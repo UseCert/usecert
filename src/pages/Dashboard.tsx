@@ -3,11 +3,13 @@ import { DashboardProvider, useDashboard } from "./dashboard/store";
 import { TopBar, Sidebar, BottomTabs, FooterBar } from "./dashboard/chrome";
 import { WalletModal } from "./dashboard/modals";
 import ToastStack from "./dashboard/Toasts";
+import CommandPalette from "./dashboard/CommandPalette";
 import Overview from "./dashboard/Overview";
 import VaultsView from "./dashboard/VaultsView";
 import MintRedeem from "./dashboard/MintRedeem";
 import StakingView from "./dashboard/StakingView";
 import ActivityView from "./dashboard/ActivityView";
+import RiskView from "./dashboard/RiskView";
 import KeepersView from "./dashboard/KeepersView";
 
 function ViewRouter() {
@@ -21,6 +23,8 @@ function ViewRouter() {
       return <StakingView />;
     case "activity":
       return <ActivityView />;
+    case "risk":
+      return <RiskView />;
     case "keepers":
       return <KeepersView />;
     default:
@@ -90,6 +94,7 @@ function DashboardInner() {
 
       <BottomTabs />
       <WalletModal />
+      <CommandPalette />
       <ToastStack />
     </div>
   );

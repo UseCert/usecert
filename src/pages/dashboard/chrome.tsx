@@ -156,13 +156,13 @@ export function BottomTabs() {
             type="button"
             onClick={() => setView(item.id)}
             className={cn(
-              "relative flex flex-col items-center gap-1 py-2.5 font-mono text-[9px] uppercase tracking-[0.04em]",
+              "relative flex flex-col items-center gap-1 px-0.5 py-2.5 font-mono text-[8.5px] uppercase tracking-[0.02em]",
               active ? "text-green-bright" : "text-white-60",
             )}
           >
-            <span className={cn("absolute left-1/2 top-0 h-[2px] w-8 -translate-x-1/2 bg-green-bright", !active && "hidden")} aria-hidden />
-            <Icon size={17} />
-            {item.id === "mint" ? "Mint" : item.label}
+            <span className={cn("absolute left-1/2 top-0 h-[2px] w-7 -translate-x-1/2 bg-green-bright", !active && "hidden")} aria-hidden />
+            <Icon size={16} />
+            {item.short}
           </button>
         );
       })}
