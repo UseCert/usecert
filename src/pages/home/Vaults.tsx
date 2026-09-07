@@ -92,7 +92,7 @@ function VaultCard({
   );
 }
 
-/** §4 CERTIFICATES: sticky stacking vault cards — #vaults */
+/** §4 CERTIFICATES: sticky stacking vault cards - #vaults */
 export default function Vaults() {
   const ref = useRef<HTMLElement>(null);
   const { scrollYProgress } = useScroll({ target: ref, offset: ["start start", "end end"] });

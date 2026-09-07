@@ -33,7 +33,7 @@ export const FAQ_ROWS: AccordionRow[] = [
   },
 ];
 
-/** §8 FAQ (light grey paper) — #faq */
+/** §8 FAQ (light grey paper) - #faq */
 export default function Faq() {
   return (
     <section id="faq" className="bg-paper text-ink">

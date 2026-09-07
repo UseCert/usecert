@@ -5,7 +5,7 @@ import VaultDetail from "@/pages/VaultDetail";
 export const Route = createFileRoute("/vaults/$slug")({
   head: () => ({
     meta: [
-      { title: "Vault Detail — Certificate Strategy Breakdown | UseCert" },
+      { title: "Vault Detail - Certificate Strategy Breakdown | UseCert" },
       {
         name: "description",
         content:

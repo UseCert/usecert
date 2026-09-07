@@ -5,7 +5,7 @@ import Roles from "@/pages/Roles";
 export const Route = createFileRoute("/roles")({
   head: () => ({
     meta: [
-      { title: "Roles — Holders, Stakers, Arbitrageurs and Builders | UseCert" },
+      { title: "Roles - Holders, Stakers, Arbitrageurs and Builders | UseCert" },
       {
         name: "description",
         content:
@@ -14,7 +14,7 @@ export const Route = createFileRoute("/roles")({
       { property: "og:title", content: "Roles in the UseCert Protocol" },
       {
         property: "og:description",
-        content: "Hold, stake, arbitrage or build — the four roles that keep UseCert vaults balanced.",
+        content: "Hold, stake, arbitrage or build - the four roles that keep UseCert vaults balanced.",
       },
     ],
   }),

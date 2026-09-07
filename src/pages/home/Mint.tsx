@@ -6,7 +6,7 @@ import { scrollToHash } from "@/lib/scroll";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
-/** §3 "WE MINT CERTIFICATES." (light grey paper) — #mint */
+/** §3 "WE MINT CERTIFICATES." (light grey paper) - #mint */
 export default function Mint() {
   const [showreelOpen, setShowreelOpen] = useState(false);
 

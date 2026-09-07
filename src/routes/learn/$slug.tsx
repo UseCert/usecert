@@ -5,7 +5,7 @@ import Article from "@/pages/Article";
 export const Route = createFileRoute("/learn/$slug")({
   head: () => ({
     meta: [
-      { title: "Article — UseCert Research" },
+      { title: "Article - UseCert Research" },
       {
         name: "description",
         content:

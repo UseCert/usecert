@@ -28,7 +28,7 @@ const SLIDES = [
   },
 ];
 
-/** §11 TESTIMONIALS "WHAT HOLDERS SAY." (light grey paper) — #signals */
+/** §11 TESTIMONIALS "WHAT HOLDERS SAY." (light grey paper) - #signals */
 export default function Testimonials() {
   const [index, setIndex] = useState(0);
   const prev = () => setIndex((i) => (i - 1 + SLIDES.length) % SLIDES.length);

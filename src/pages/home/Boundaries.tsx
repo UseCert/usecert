@@ -3,7 +3,7 @@ import Scribble from "@/components/Scribble";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
-/** §9 "HONEST BOUNDARIES" (black) — #boundaries */
+/** §9 "HONEST BOUNDARIES" (black) - #boundaries */
 export default function Boundaries() {
   return (
     <section id="boundaries" className="grain bg-ink text-white">

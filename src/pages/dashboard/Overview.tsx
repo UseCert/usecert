@@ -239,10 +239,10 @@ export default function Overview() {
                         {v.status}
                       </span>
                     </td>
-                    <td className="px-3 py-3.5 text-right tabular-nums text-white">{live ? fmtUSD(v.price) : "–"}</td>
-                    <td className="px-3 py-3.5 text-right tabular-nums text-white">{live ? fmtNum(v.supply, 0) : "–"}</td>
-                    <td className="hidden px-3 py-3.5 text-right tabular-nums text-silver lg:table-cell">{live ? fmtCompactUSD(notional) : "–"}</td>
-                    <td className="hidden px-3 py-3.5 text-right tabular-nums text-silver xl:table-cell">{live ? fmtCompactUSD(notional * 1.0002) : "–"}</td>
+                    <td className="px-3 py-3.5 text-right tabular-nums text-white">{live ? fmtUSD(v.price) : "-"}</td>
+                    <td className="px-3 py-3.5 text-right tabular-nums text-white">{live ? fmtNum(v.supply, 0) : "-"}</td>
+                    <td className="hidden px-3 py-3.5 text-right tabular-nums text-silver lg:table-cell">{live ? fmtCompactUSD(notional) : "-"}</td>
+                    <td className="hidden px-3 py-3.5 text-right tabular-nums text-silver xl:table-cell">{live ? fmtCompactUSD(notional * 1.0002) : "-"}</td>
                     <td className="hidden px-3 py-3.5 md:table-cell">
                       {live ? (
                         <span className="flex items-center gap-2">
@@ -250,10 +250,10 @@ export default function Overview() {
                           <span className="tabular-nums text-white-60">{v.bufferPct.toFixed(0)}%</span>
                         </span>
                       ) : (
-                        "–"
+                        "-"
                       )}
                     </td>
-                    <td className="px-3 py-3.5 text-right tabular-nums text-white">{live ? v.delta.toFixed(3) : "–"}</td>
+                    <td className="px-3 py-3.5 text-right tabular-nums text-white">{live ? v.delta.toFixed(3) : "-"}</td>
                     <td className="pr-4 text-white-60">
                       {live && <ChevronRight size={14} className="transition-transform group-hover:translate-x-0.5 group-hover:text-green-bright" />}
                     </td>

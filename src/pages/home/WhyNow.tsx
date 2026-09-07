@@ -5,7 +5,7 @@ import Counter from "@/components/Counter";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
-/** §2 "HOLD THE STOCK. NOT THE PERP." (full-bleed section-deep) — #why-now */
+/** §2 "HOLD THE STOCK. NOT THE PERP." (full-bleed section-deep) - #why-now */
 export default function WhyNow() {
   return (
     <section id="why-now" className="grain section-glow relative overflow-hidden bg-section-deep text-white">

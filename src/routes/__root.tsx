@@ -83,14 +83,14 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "UseCert — On-Chain Equity Certificates" },
+      { title: "UseCert - On-Chain Equity Certificates" },
       {
         name: "description",
         content:
           "UseCert issues perp-backed certificates that track equity exposure fully on chain: mint, hold, stake and redeem.",
       },
       { name: "author", content: "UseCert" },
-      { property: "og:title", content: "UseCert — On-Chain Equity Certificates" },
+      { property: "og:title", content: "UseCert - On-Chain Equity Certificates" },
       {
         property: "og:description",
         content: "Perp-backed certificates tracking equity exposure, fully on chain.",

@@ -34,7 +34,7 @@ const CARDS = [
   },
 ];
 
-/** §13 RESEARCH PREVIEW "RESEARCH AND UPDATES." (light grey paper) — #research */
+/** §13 RESEARCH PREVIEW "RESEARCH AND UPDATES." (light grey paper) - #research */
 export default function Research() {
   return (
     <section id="research" className="border-t hairline-light bg-paper text-ink">

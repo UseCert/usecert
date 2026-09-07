@@ -5,13 +5,13 @@ import Home from "@/pages/Home";
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "UseCert — Tokenized Certificates for On-Chain Equity Exposure" },
+      { title: "UseCert - Tokenized Certificates for On-Chain Equity Exposure" },
       {
         name: "description",
         content:
           "UseCert turns perp-backed vaults into tokenized certificates: mint, hold and redeem synthetic equity exposure fully on chain.",
       },
-      { property: "og:title", content: "UseCert — On-Chain Equity Certificates" },
+      { property: "og:title", content: "UseCert - On-Chain Equity Certificates" },
       {
         property: "og:description",
         content:

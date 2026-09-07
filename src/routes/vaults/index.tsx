@@ -5,7 +5,7 @@ import Vaults from "@/pages/Vaults";
 export const Route = createFileRoute("/vaults/")({
   head: () => ({
     meta: [
-      { title: "Vaults — Perp-Backed Certificate Strategies | UseCert" },
+      { title: "Vaults - Perp-Backed Certificate Strategies | UseCert" },
       {
         name: "description",
         content:
@@ -14,7 +14,7 @@ export const Route = createFileRoute("/vaults/")({
       { property: "og:title", content: "UseCert Vaults" },
       {
         property: "og:description",
-        content: "uTSLA, uNVDA, uSPX, uQQQ and uAAPL — perp-backed certificate strategies.",
+        content: "uTSLA, uNVDA, uSPX, uQQQ and uAAPL - perp-backed certificate strategies.",
       },
     ],
   }),

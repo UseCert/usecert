@@ -5,7 +5,7 @@ import Learn from "@/pages/Learn";
 export const Route = createFileRoute("/learn/")({
   head: () => ({
     meta: [
-      { title: "Research — Notes on Synthetic Equity and Perp Markets | UseCert" },
+      { title: "Research - Notes on Synthetic Equity and Perp Markets | UseCert" },
       {
         name: "description",
         content:

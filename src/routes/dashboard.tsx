@@ -4,7 +4,7 @@ import Dashboard from "@/pages/Dashboard";
 export const Route = createFileRoute("/dashboard")({
   head: () => ({
     meta: [
-      { title: "Dashboard — Mint, Redeem and Stake Certificates | UseCert" },
+      { title: "Dashboard - Mint, Redeem and Stake Certificates | UseCert" },
       {
         name: "description",
         content:
