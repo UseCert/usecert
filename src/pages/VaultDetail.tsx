@@ -1,4 +1,4 @@
-import { useParams } from "react-router";
+import { useParams } from "@/lib/router-compat";
 import DetailHero from "./vaults/DetailHero";
 import { IntroMeta, MediaBlock, TextBlock } from "./vaults/DetailSections";
 import { CtaBand, HolderWords, NextVault, Results } from "./vaults/DetailBands";

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router";
+import { Link, useLocation, useNavigate } from "@/lib/router-compat";
 import { Menu } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { scrollToHash } from "@/lib/scroll";

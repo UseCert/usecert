@@ -1,4 +1,4 @@
-import { Link } from "react-router";
+import { Link } from "@/lib/router-compat";
 import { motion } from "framer-motion";
 import { ArrowLeftRight, ArrowUpRight, Check, Cpu, Layers, LayoutGrid, List, Shield } from "lucide-react";
 import type { LucideIcon } from "lucide-react";

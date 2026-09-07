@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { Link } from "react-router";
+import { Link } from "@/lib/router-compat";
 import { motion, useScroll, useTransform } from "framer-motion";
 import type { MotionValue } from "framer-motion";
 import { ArrowUpRight } from "lucide-react";

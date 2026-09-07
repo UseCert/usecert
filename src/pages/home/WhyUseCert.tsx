@@ -1,6 +1,6 @@
 import { motion } from "framer-motion";
 import { ArrowUpRight } from "lucide-react";
-import { Link } from "react-router";
+import { Link } from "@/lib/router-compat";
 import Counter from "@/components/Counter";
 import LetterReveal from "@/components/LetterReveal";
 

@@ -1,4 +1,4 @@
-import { Link } from "react-router";
+import { Link } from "@/lib/router-compat";
 import { motion } from "framer-motion";
 import SwapButton from "./SwapButton";
 import { SOCIALS, XIcon, TelegramIcon } from "./SocialIcons";

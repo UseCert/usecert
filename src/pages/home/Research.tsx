@@ -1,6 +1,6 @@
 import { motion } from "framer-motion";
 import { ArrowUpRight } from "lucide-react";
-import { Link } from "react-router";
+import { Link } from "@/lib/router-compat";
 import LetterReveal from "@/components/LetterReveal";
 import SwapButton from "@/components/SwapButton";
 

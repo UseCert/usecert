@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useLocation } from "react-router";
+import { useLocation } from "@/lib/router-compat";
 import { scrollToHash, scrollToTop } from "@/lib/scroll";
 
 /**

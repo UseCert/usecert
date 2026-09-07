@@ -1,4 +1,4 @@
-import { Link } from "react-router";
+import { Link } from "@/lib/router-compat";
 import { ArrowUpRight } from "lucide-react";
 import type { Article } from "./data";
 

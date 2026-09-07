@@ -1,4 +1,4 @@
-import { useLocation } from "react-router";
+import { useLocation } from "@/lib/router-compat";
 import { motion } from "framer-motion";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];

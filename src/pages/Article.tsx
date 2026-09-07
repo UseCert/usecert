@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
-import { Link, Navigate, useParams } from "react-router";
+import { Link, Navigate, useParams } from "@/lib/router-compat";
 import { motion } from "framer-motion";
 import { Check, Loader2 } from "lucide-react";
 import LetterReveal from "@/components/LetterReveal";

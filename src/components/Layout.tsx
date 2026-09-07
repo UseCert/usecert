@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Outlet } from "react-router";
+import { Outlet } from "@/lib/router-compat";
 import Lenis from "lenis";
 import Navbar from "./Navbar";
 import Footer from "./Footer";
