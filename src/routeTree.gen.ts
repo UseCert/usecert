@@ -14,6 +14,7 @@ import { Route as AboutRouteImport } from './routes/about'
 import { Route as RolesRouteImport } from './routes/roles'
 import { Route as LearnIndexRouteImport } from './routes/learn/index'
 import { Route as LearnSlugRouteImport } from './routes/learn/$slug'
+import { Route as LegalPrivacyPolicyRouteImport } from './routes/legal/privacy-policy'
 import { Route as VaultsIndexRouteImport } from './routes/vaults/index'
 import { Route as VaultsSlugRouteImport } from './routes/vaults/$slug'
 
@@ -42,6 +43,11 @@ const LearnSlugRoute = LearnSlugRouteImport.update({
   path: '/learn/$slug',
   getParentRoute: () => rootRouteImport,
 } as any)
+const LegalPrivacyPolicyRoute = LegalPrivacyPolicyRouteImport.update({
+  id: '/legal/privacy-policy',
+  path: '/legal/privacy-policy',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const VaultsIndexRoute = VaultsIndexRouteImport.update({
   id: '/vaults/',
   path: '/vaults/',
@@ -58,6 +64,7 @@ export interface FileRoutesByFullPath {
   '/about': typeof AboutRoute
   '/roles': typeof RolesRoute
   '/learn/$slug': typeof LearnSlugRoute
+  '/legal/privacy-policy': typeof LegalPrivacyPolicyRoute
   '/vaults/$slug': typeof VaultsSlugRoute
   '/learn/': typeof LearnIndexRoute
   '/vaults/': typeof VaultsIndexRoute
@@ -67,6 +74,7 @@ export interface FileRoutesByTo {
   '/about': typeof AboutRoute
   '/roles': typeof RolesRoute
   '/learn/$slug': typeof LearnSlugRoute
+  '/legal/privacy-policy': typeof LegalPrivacyPolicyRoute
   '/vaults/$slug': typeof VaultsSlugRoute
   '/learn': typeof LearnIndexRoute
   '/vaults': typeof VaultsIndexRoute
@@ -77,6 +85,7 @@ export interface FileRoutesById {
   '/about': typeof AboutRoute
   '/roles': typeof RolesRoute
   '/learn/$slug': typeof LearnSlugRoute
+  '/legal/privacy-policy': typeof LegalPrivacyPolicyRoute
   '/vaults/$slug': typeof VaultsSlugRoute
   '/learn/': typeof LearnIndexRoute
   '/vaults/': typeof VaultsIndexRoute
@@ -88,6 +97,7 @@ export interface FileRouteTypes {
     | '/about'
     | '/roles'
     | '/learn/$slug'
+    | '/legal/privacy-policy'
     | '/vaults/$slug'
     | '/learn/'
     | '/vaults/'
@@ -97,6 +107,7 @@ export interface FileRouteTypes {
     | '/about'
     | '/roles'
     | '/learn/$slug'
+    | '/legal/privacy-policy'
     | '/vaults/$slug'
     | '/learn'
     | '/vaults'
@@ -106,6 +117,7 @@ export interface FileRouteTypes {
     | '/about'
     | '/roles'
     | '/learn/$slug'
+    | '/legal/privacy-policy'
     | '/vaults/$slug'
     | '/learn/'
     | '/vaults/'
@@ -116,6 +128,7 @@ export interface RootRouteChildren {
   AboutRoute: typeof AboutRoute
   RolesRoute: typeof RolesRoute
   LearnSlugRoute: typeof LearnSlugRoute
+  LegalPrivacyPolicyRoute: typeof LegalPrivacyPolicyRoute
   VaultsSlugRoute: typeof VaultsSlugRoute
   LearnIndexRoute: typeof LearnIndexRoute
   VaultsIndexRoute: typeof VaultsIndexRoute
@@ -158,6 +171,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LearnSlugRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/legal/privacy-policy': {
+      id: '/legal/privacy-policy'
+      path: '/legal/privacy-policy'
+      fullPath: '/legal/privacy-policy'
+      preLoaderRoute: typeof LegalPrivacyPolicyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/vaults/': {
       id: '/vaults/'
       path: '/vaults'
@@ -180,6 +200,7 @@ const rootRouteChildren: RootRouteChildren = {
   AboutRoute: AboutRoute,
   RolesRoute: RolesRoute,
   LearnSlugRoute: LearnSlugRoute,
+  LegalPrivacyPolicyRoute: LegalPrivacyPolicyRoute,
   VaultsSlugRoute: VaultsSlugRoute,
   LearnIndexRoute: LearnIndexRoute,
   VaultsIndexRoute: VaultsIndexRoute,
