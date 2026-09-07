@@ -94,7 +94,10 @@ export function PulseDot({ className }: { className?: string }) {
 
 /** Live number readout: green flash when the value changes. */
 export function Flash({ value, format, className }: { value: number; format: (n: number) => string; className?: string }) {
-  const [reduced] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  const [reduced, setReduced] = useState(false);
+  useEffect(() => {
+    setReduced(window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  }, []);
   const [flash, setFlash] = useState(false);
 
   // adjust-state-during-render: flip flash on the render where value changes
