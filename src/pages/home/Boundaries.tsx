@@ -1,0 +1,68 @@
+import { motion } from "framer-motion";
+import Scribble from "@/components/Scribble";
+
+const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
+
+/** §9 "HONEST BOUNDARIES" (black) — #boundaries */
+export default function Boundaries() {
+  return (
+    <section id="boundaries" className="grain bg-ink text-white">
+      <div className="relative z-[2] mx-auto max-w-[1440px] px-4 py-16 md:px-6 md:py-24 lg:px-12 lg:py-32">
+        <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">Honest boundaries</p>
+
+        <div className="mt-12 grid gap-12 lg:grid-cols-[320px_1fr] lg:gap-20">
+          {/* Left: photo + scribble + attribution */}
+          <motion.div
+            initial={{ opacity: 0, y: 24 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true, amount: 0.3 }}
+            transition={{ duration: 0.8, ease: EASE }}
+          >
+            <div className="relative">
+              <img src="/think-portrait.jpg" alt="Sealed certificate" className="aspect-[4/5] w-full object-cover" />
+              <Scribble className="absolute -bottom-6 -right-8 w-[70%]" onScroll delay={0.3} />
+            </div>
+            <div className="mt-8">
+              <p className="text-[14px] font-semibold text-white">The Risk Framework</p>
+              <p className="font-mono text-[12px] uppercase tracking-[0.08em] text-white-60">
+                Published by UseCert®
+              </p>
+            </div>
+          </motion.div>
+
+          {/* Center: large quote + micro caption */}
+          <div className="flex flex-col justify-center">
+            <motion.blockquote
+              className="max-w-[24ch] text-[26px] font-medium leading-[1.05] tracking-[-0.03em] md:text-[32px] lg:text-[40px]"
+              initial="hidden"
+              whileInView="show"
+              viewport={{ once: true, amount: 0.4 }}
+              variants={{ hidden: {}, show: { transition: { staggerChildren: 0.02 } } }}
+            >
+              {"Certificates are synthetic, and we say that first. Backed by perp positions and USDC margin, not custody of shares. No dividends, no shareholder rights. The solvency dashboard is public and the stress parameters are published, because trust here should never require trusting us."
+                .split(" ")
+                .map((w, i) => (
+                  <motion.span
+                    key={i}
+                    className="inline-block whitespace-pre"
+                    variants={{ hidden: { opacity: 0, y: 12 }, show: { opacity: 1, y: 0, transition: { duration: 0.4 } } }}
+                  >
+                    {w}{" "}
+                  </motion.span>
+                ))}
+            </motion.blockquote>
+            <motion.p
+              className="mt-8 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60"
+              initial={{ opacity: 0 }}
+              whileInView={{ opacity: 1 }}
+              viewport={{ once: true }}
+              transition={{ delay: 0.6, duration: 0.6 }}
+            >
+              "Solvency is public. Risks are named. Infrastructure, not advice."
+            </motion.p>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}

@@ -10,33 +10,167 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as R404RouteImport } from './routes/404'
+import { Route as AboutRouteImport } from './routes/about'
+import { Route as DashboardRouteImport } from './routes/dashboard'
+import { Route as RolesRouteImport } from './routes/roles'
+import { Route as LearnIndexRouteImport } from './routes/learn/index'
+import { Route as LearnSlugRouteImport } from './routes/learn/$slug'
+import { Route as LegalPrivacyPolicyRouteImport } from './routes/legal/privacy-policy'
+import { Route as LegalTermsOfServiceRouteImport } from './routes/legal/terms-of-service'
+import { Route as VaultsIndexRouteImport } from './routes/vaults/index'
+import { Route as VaultsSlugRouteImport } from './routes/vaults/$slug'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const R404Route = R404RouteImport.update({
+  id: '/404',
+  path: '/404',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AboutRoute = AboutRouteImport.update({
+  id: '/about',
+  path: '/about',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardRoute = DashboardRouteImport.update({
+  id: '/dashboard',
+  path: '/dashboard',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RolesRoute = RolesRouteImport.update({
+  id: '/roles',
+  path: '/roles',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LearnIndexRoute = LearnIndexRouteImport.update({
+  id: '/learn/',
+  path: '/learn/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LearnSlugRoute = LearnSlugRouteImport.update({
+  id: '/learn/$slug',
+  path: '/learn/$slug',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LegalPrivacyPolicyRoute = LegalPrivacyPolicyRouteImport.update({
+  id: '/legal/privacy-policy',
+  path: '/legal/privacy-policy',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LegalTermsOfServiceRoute = LegalTermsOfServiceRouteImport.update({
+  id: '/legal/terms-of-service',
+  path: '/legal/terms-of-service',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VaultsIndexRoute = VaultsIndexRouteImport.update({
+  id: '/vaults/',
+  path: '/vaults/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VaultsSlugRoute = VaultsSlugRouteImport.update({
+  id: '/vaults/$slug',
+  path: '/vaults/$slug',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/404': typeof R404Route
+  '/about': typeof AboutRoute
+  '/dashboard': typeof DashboardRoute
+  '/roles': typeof RolesRoute
+  '/learn/$slug': typeof LearnSlugRoute
+  '/legal/privacy-policy': typeof LegalPrivacyPolicyRoute
+  '/legal/terms-of-service': typeof LegalTermsOfServiceRoute
+  '/vaults/$slug': typeof VaultsSlugRoute
+  '/learn/': typeof LearnIndexRoute
+  '/vaults/': typeof VaultsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/404': typeof R404Route
+  '/about': typeof AboutRoute
+  '/dashboard': typeof DashboardRoute
+  '/roles': typeof RolesRoute
+  '/learn/$slug': typeof LearnSlugRoute
+  '/legal/privacy-policy': typeof LegalPrivacyPolicyRoute
+  '/legal/terms-of-service': typeof LegalTermsOfServiceRoute
+  '/vaults/$slug': typeof VaultsSlugRoute
+  '/learn': typeof LearnIndexRoute
+  '/vaults': typeof VaultsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/404': typeof R404Route
+  '/about': typeof AboutRoute
+  '/dashboard': typeof DashboardRoute
+  '/roles': typeof RolesRoute
+  '/learn/$slug': typeof LearnSlugRoute
+  '/legal/privacy-policy': typeof LegalPrivacyPolicyRoute
+  '/legal/terms-of-service': typeof LegalTermsOfServiceRoute
+  '/vaults/$slug': typeof VaultsSlugRoute
+  '/learn/': typeof LearnIndexRoute
+  '/vaults/': typeof VaultsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths:
+    | '/'
+    | '/404'
+    | '/about'
+    | '/dashboard'
+    | '/roles'
+    | '/learn/$slug'
+    | '/legal/privacy-policy'
+    | '/legal/terms-of-service'
+    | '/vaults/$slug'
+    | '/learn/'
+    | '/vaults/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to:
+    | '/'
+    | '/404'
+    | '/about'
+    | '/dashboard'
+    | '/roles'
+    | '/learn/$slug'
+    | '/legal/privacy-policy'
+    | '/legal/terms-of-service'
+    | '/vaults/$slug'
+    | '/learn'
+    | '/vaults'
+  id:
+    | '__root__'
+    | '/'
+    | '/404'
+    | '/about'
+    | '/dashboard'
+    | '/roles'
+    | '/learn/$slug'
+    | '/legal/privacy-policy'
+    | '/legal/terms-of-service'
+    | '/vaults/$slug'
+    | '/learn/'
+    | '/vaults/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  R404Route: typeof R404Route
+  AboutRoute: typeof AboutRoute
+  DashboardRoute: typeof DashboardRoute
+  RolesRoute: typeof RolesRoute
+  LearnSlugRoute: typeof LearnSlugRoute
+  LegalPrivacyPolicyRoute: typeof LegalPrivacyPolicyRoute
+  LegalTermsOfServiceRoute: typeof LegalTermsOfServiceRoute
+  VaultsSlugRoute: typeof VaultsSlugRoute
+  LearnIndexRoute: typeof LearnIndexRoute
+  VaultsIndexRoute: typeof VaultsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +182,91 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/404': {
+      id: '/404'
+      path: '/404'
+      fullPath: '/404'
+      preLoaderRoute: typeof R404RouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/about': {
+      id: '/about'
+      path: '/about'
+      fullPath: '/about'
+      preLoaderRoute: typeof AboutRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard': {
+      id: '/dashboard'
+      path: '/dashboard'
+      fullPath: '/dashboard'
+      preLoaderRoute: typeof DashboardRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/roles': {
+      id: '/roles'
+      path: '/roles'
+      fullPath: '/roles'
+      preLoaderRoute: typeof RolesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/learn/': {
+      id: '/learn/'
+      path: '/learn'
+      fullPath: '/learn/'
+      preLoaderRoute: typeof LearnIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/learn/$slug': {
+      id: '/learn/$slug'
+      path: '/learn/$slug'
+      fullPath: '/learn/$slug'
+      preLoaderRoute: typeof LearnSlugRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/legal/privacy-policy': {
+      id: '/legal/privacy-policy'
+      path: '/legal/privacy-policy'
+      fullPath: '/legal/privacy-policy'
+      preLoaderRoute: typeof LegalPrivacyPolicyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/legal/terms-of-service': {
+      id: '/legal/terms-of-service'
+      path: '/legal/terms-of-service'
+      fullPath: '/legal/terms-of-service'
+      preLoaderRoute: typeof LegalTermsOfServiceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/vaults/': {
+      id: '/vaults/'
+      path: '/vaults'
+      fullPath: '/vaults/'
+      preLoaderRoute: typeof VaultsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/vaults/$slug': {
+      id: '/vaults/$slug'
+      path: '/vaults/$slug'
+      fullPath: '/vaults/$slug'
+      preLoaderRoute: typeof VaultsSlugRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  R404Route: R404Route,
+  AboutRoute: AboutRoute,
+  DashboardRoute: DashboardRoute,
+  RolesRoute: RolesRoute,
+  LearnSlugRoute: LearnSlugRoute,
+  LegalPrivacyPolicyRoute: LegalPrivacyPolicyRoute,
+  LegalTermsOfServiceRoute: LegalTermsOfServiceRoute,
+  VaultsSlugRoute: VaultsSlugRoute,
+  LearnIndexRoute: LearnIndexRoute,
+  VaultsIndexRoute: VaultsIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
