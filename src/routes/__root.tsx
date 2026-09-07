@@ -77,28 +77,48 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Lovable App" },
-      { name: "description", content: "Lovable Generated Project" },
-      { name: "author", content: "Lovable" },
-      { property: "og:title", content: "Lovable App" },
-      { property: "og:description", content: "Lovable Generated Project" },
+      { title: "UseCert — On-Chain Equity Certificates" },
+      {
+        name: "description",
+        content:
+          "UseCert issues perp-backed certificates that track equity exposure fully on chain: mint, hold, stake and redeem.",
+      },
+      { name: "author", content: "UseCert" },
+      { property: "og:title", content: "UseCert — On-Chain Equity Certificates" },
+      {
+        property: "og:description",
+        content: "Perp-backed certificates tracking equity exposure, fully on chain.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
-      { name: "twitter:site", content: "@Lovable" },
     ],
     links: [
       {
         rel: "stylesheet",
         href: appCss,
       },
-      { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
+      { rel: "preconnect", href: "https://fonts.googleapis.com" },
+      { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
+      {
+        rel: "stylesheet",
+        href: "https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Inter:wght@400;500&display=swap",
+      },
+      { rel: "icon", href: "/logo.png", type: "image/png" },
     ],
   }),
   shellComponent: RootShell,
   component: RootComponent,
-  notFoundComponent: NotFoundComponent,
+  notFoundComponent: NotFoundRoute,
   errorComponent: ErrorComponent,
 });
+
+function NotFoundRoute() {
+  return (
+    <Layout>
+      <NotFound />
+    </Layout>
+  );
+}
 
 function RootShell({ children }: { children: ReactNode }) {
   return (
@@ -116,9 +136,18 @@ function RootShell({ children }: { children: ReactNode }) {
 
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setLoaded(true), 1700);
+    return () => window.clearTimeout(t);
+  }, []);
 
   return (
     <QueryClientProvider client={queryClient}>
+      <AnimatePresence>{!loaded && <Preloader key="preloader" />}</AnimatePresence>
+      <FilmGrain />
+      <ScrollToTop />
       {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
       <Outlet />
     </QueryClientProvider>
