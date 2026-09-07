@@ -175,26 +175,27 @@ export default function Hero() {
 
       {/* Bottom-left: phase + slot bars */}
       <motion.div
-        className="absolute bottom-6 left-4 z-[2] flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60 md:left-12"
+        className="absolute bottom-5 left-4 z-[2] flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.06em] text-white-60 sm:gap-3 sm:text-[11px] sm:tracking-[0.08em] md:left-12"
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 1.6, duration: 0.6, ease: EASE }}
       >
         <span>Phase:</span>
         <SlotBars />
-        <span className="text-white">C1 Live</span>
+        <span className="whitespace-nowrap text-white">C1 Live</span>
       </motion.div>
 
       {/* Bottom-right: local time */}
       <motion.div
-        className="absolute bottom-6 right-4 z-[2] flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60 md:right-12"
+        className="absolute bottom-5 right-4 z-[2] flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.06em] text-white-60 sm:text-[11px] sm:tracking-[0.08em] md:right-12"
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 1.7, duration: 0.6, ease: EASE }}
       >
-        <span>Local Time:</span>
+        <span className="hidden sm:inline">Local Time:</span>
         <LiveClock />
       </motion.div>
+
     </section>
   );
 }
