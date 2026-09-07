@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Outlet } from "@/lib/router-compat";
 import Lenis from "lenis";
 import Navbar from "./Navbar";
@@ -16,7 +16,7 @@ import { setLenis } from "@/lib/scroll";
  * (e.g. `-mt-16 md:-mt-20` on the hero section). Page agents: do not add
  * nav-height padding/margins yourselves.
  */
-export default function Layout() {
+export default function Layout({ children }: { children?: ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
 
   // Lenis smooth scrolling (lerp 0.09), disabled for reduced motion.
