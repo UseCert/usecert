@@ -142,16 +142,23 @@ function RootShell({ children }: { children: ReactNode }) {
 
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
+  const [exiting, setExiting] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    const t = window.setTimeout(() => setLoaded(true), 1700);
-    return () => window.clearTimeout(t);
+    const a = window.setTimeout(() => setExiting(true), 1700);
+    const b = window.setTimeout(() => setLoaded(true), 2600);
+    return () => {
+      window.clearTimeout(a);
+      window.clearTimeout(b);
+    };
   }, []);
 
   return (
     <QueryClientProvider client={queryClient}>
-      <AnimatePresence>{!loaded && <Preloader key="preloader" />}</AnimatePresence>
+      <AnimatePresence>
+        {!loaded && <Preloader key="preloader" exiting={exiting} />}
+      </AnimatePresence>
       <FilmGrain />
       <ScrollToTop />
       {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
