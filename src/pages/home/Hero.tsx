@@ -15,12 +15,15 @@ function LiveClock() {
     const mm = String(d.getMinutes()).padStart(2, "0");
     return `${month} ${day}, ${hh}:${mm}`;
   };
-  const [now, setNow] = useState(format);
+  // Rendered client-side only: server time zone never matches the visitor's.
+  const [now, setNow] = useState<string | null>(null);
   useEffect(() => {
+    setNow(format());
     const id = window.setInterval(() => setNow(format()), 30_000);
     return () => window.clearInterval(id);
   }, []);
-  return <span className="text-white">{now}</span>;
+  return <span className="text-white">{now ?? "\u00a0"}</span>;
+
 }
 
 /** 5-bar phase indicator (3 green-bright / 2 grey) */
