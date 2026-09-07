@@ -10,7 +10,7 @@ const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
  * unmounts it after ~1.7s; it exits by sliding up like a curtain, revealing
  * the freshly mounted page underneath (so hero animations play in full).
  */
-export default function Preloader() {
+export default function Preloader({ exiting = false }: { exiting?: boolean }) {
   const [pct, setPct] = useState(0);
 
   useEffect(() => {
