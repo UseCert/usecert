@@ -27,6 +27,8 @@ export default function Preloader() {
   return (
     <motion.div
       className="grain fixed inset-0 z-[100] flex flex-col bg-abyss text-white"
+      initial={{ y: 0 }}
+      animate={{ y: exiting ? "-100%" : 0 }}
       exit={{ y: "-100%" }}
       transition={{ duration: 0.8, ease: EASE }}
     >
