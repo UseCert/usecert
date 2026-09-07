@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AboutRouteImport } from './routes/about'
 import { Route as RolesRouteImport } from './routes/roles'
 import { Route as LearnIndexRouteImport } from './routes/learn/index'
+import { Route as LearnSlugRouteImport } from './routes/learn/$slug'
 import { Route as VaultsIndexRouteImport } from './routes/vaults/index'
 import { Route as VaultsSlugRouteImport } from './routes/vaults/$slug'
 
@@ -36,6 +37,11 @@ const LearnIndexRoute = LearnIndexRouteImport.update({
   path: '/learn/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const LearnSlugRoute = LearnSlugRouteImport.update({
+  id: '/learn/$slug',
+  path: '/learn/$slug',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const VaultsIndexRoute = VaultsIndexRouteImport.update({
   id: '/vaults/',
   path: '/vaults/',
@@ -51,6 +57,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
   '/roles': typeof RolesRoute
+  '/learn/$slug': typeof LearnSlugRoute
   '/vaults/$slug': typeof VaultsSlugRoute
   '/learn/': typeof LearnIndexRoute
   '/vaults/': typeof VaultsIndexRoute
@@ -59,6 +66,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
   '/roles': typeof RolesRoute
+  '/learn/$slug': typeof LearnSlugRoute
   '/vaults/$slug': typeof VaultsSlugRoute
   '/learn': typeof LearnIndexRoute
   '/vaults': typeof VaultsIndexRoute
@@ -68,6 +76,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/about': typeof AboutRoute
   '/roles': typeof RolesRoute
+  '/learn/$slug': typeof LearnSlugRoute
   '/vaults/$slug': typeof VaultsSlugRoute
   '/learn/': typeof LearnIndexRoute
   '/vaults/': typeof VaultsIndexRoute
@@ -75,14 +84,28 @@ export interface FileRoutesById {
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/about' | '/roles' | '/vaults/$slug' | '/learn/' | '/vaults/'
+    | '/'
+    | '/about'
+    | '/roles'
+    | '/learn/$slug'
+    | '/vaults/$slug'
+    | '/learn/'
+    | '/vaults/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/about' | '/roles' | '/vaults/$slug' | '/learn' | '/vaults'
+  to:
+    | '/'
+    | '/about'
+    | '/roles'
+    | '/learn/$slug'
+    | '/vaults/$slug'
+    | '/learn'
+    | '/vaults'
   id:
     | '__root__'
     | '/'
     | '/about'
     | '/roles'
+    | '/learn/$slug'
     | '/vaults/$slug'
     | '/learn/'
     | '/vaults/'
@@ -92,6 +115,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AboutRoute: typeof AboutRoute
   RolesRoute: typeof RolesRoute
+  LearnSlugRoute: typeof LearnSlugRoute
   VaultsSlugRoute: typeof VaultsSlugRoute
   LearnIndexRoute: typeof LearnIndexRoute
   VaultsIndexRoute: typeof VaultsIndexRoute
@@ -127,6 +151,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LearnIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/learn/$slug': {
+      id: '/learn/$slug'
+      path: '/learn/$slug'
+      fullPath: '/learn/$slug'
+      preLoaderRoute: typeof LearnSlugRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/vaults/': {
       id: '/vaults/'
       path: '/vaults'
@@ -148,6 +179,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AboutRoute: AboutRoute,
   RolesRoute: RolesRoute,
+  LearnSlugRoute: LearnSlugRoute,
   VaultsSlugRoute: VaultsSlugRoute,
   LearnIndexRoute: LearnIndexRoute,
   VaultsIndexRoute: VaultsIndexRoute,
