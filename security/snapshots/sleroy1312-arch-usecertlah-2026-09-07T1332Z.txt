@@ -1,0 +1,75 @@
+# Security audit: sleroy1312-arch/usecertlah
+# Generated: 2026-09-07T1332Z (read-only; no repo code executed)
+
+## Repo metadata
+private=true pushed=2026-09-07T10:52:20Z size=11274KB lang=TypeScript forks=0 default_branch=main archived=false
+
+## Our permissions (expect: pull/push/triage, NOT admin)
+admin=false maintain=false pull=true push=true triage=true
+
+## Collaborators (watch for additions)
+Chrissou78 write
+sleroy1312-arch admin
+
+## Deploy keys / webhooks
+  NOT VERIFIABLE - requires repo admin. Blind spot: the owner could
+  add a deploy key or webhook and we would not see it. Ask the owner
+  directly if this ever matters.
+
+## Commit authors, all-time (NON-BOT AUTHORS ARE THE KEY SIGNAL)
+     43 gpt-engineer-app[bot] <159125892+gpt-engineer-app[bot]@users.noreply.github.com>
+      1 Lovable <noreply@lovable.dev>
+      1 Lovable <159125892+lovable-dev[bot]@users.noreply.github.com>
+
+### Unrecognised authors
+none - still bot-only
+
+## Tracked files by type
+    138 tsx
+     39 jpg
+     15 ts
+      4 svg
+      4 json
+      3 md
+      2 png
+      1 txt
+      1 toml
+      1 prettierrc
+      1 prettierignore
+      1 lock
+
+## Lifecycle scripts (MUST be none: postinstall/preinstall/install/prepare)
+  none
+  all scripts: dev=vite dev | build=vite build | build:dev=vite build --mode development | preview=vite preview | lint=eslint . | format=prettier --write .
+
+## CI workflows (MUST be none, or reviewed line by line)
+  no .github directory
+
+## Wallet / web3 dependencies (MUST be none while there is no dApp)
+  none
+
+## Secret-shaped strings
+  none
+
+## Hardcoded EVM addresses (each must be mock/placeholder or reviewed)
+src/pages/dashboard/store.tsx:275:0x4fA2b7C1d8E9f0A1b2C3d4E5f6A7b8C9d0E19cE1
+
+## Dynamic code execution / obfuscation
+src/components/ui/chart.tsx:83:      dangerouslySetInnerHTML={{
+
+## Outbound network calls
+src/server.ts:48:  async fetch(request: Request, env: unknown, ctx: unknown) {
+src/server.ts:51:      const response = await handler.fetch(request, env, ctx);
+
+## External domains referenced
+explorer.robinhood.com
+fonts.googleapis.com
+fonts.gstatic.com
+github.com
+robinhood.com
+t.me
+www.w3.org
+x.com
+
+## Env vars read
+  none
