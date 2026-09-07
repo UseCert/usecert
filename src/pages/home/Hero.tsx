@@ -126,19 +126,20 @@ export default function Hero() {
 
           {/* Wordmark */}
           <div className="relative mt-6">
-            <h1 className="text-[52px] font-semibold uppercase leading-[0.82] tracking-[-0.05em] text-white md:text-[68px] lg:text-[92px]">
+            <h1 className="text-[40px] font-semibold uppercase leading-[0.9] tracking-[-0.04em] text-white sm:text-[52px] sm:leading-[0.82] sm:tracking-[-0.05em] md:text-[68px] lg:text-[92px]">
               <LetterReveal text="USECERT®" immediate delay={0.2} stagger={0.03} />
             </h1>
             <motion.span
-              className="absolute bottom-1 right-0 text-[18px] font-semibold uppercase tracking-[-0.03em] text-white md:text-[24px]"
+              className="mt-1 block text-[16px] font-semibold uppercase tracking-[-0.03em] text-white sm:absolute sm:bottom-1 sm:right-0 sm:mt-0 sm:text-[18px] md:text-[24px]"
               initial={{ opacity: 0, y: 16 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.7, duration: 0.6, ease: EASE }}
             >
               Protocol
             </motion.span>
-            <Scribble className="absolute -right-4 -top-10 w-[46%] max-w-[380px] md:-right-10" delay={0.8} />
+            <Scribble className="pointer-events-none absolute -top-8 right-0 w-[40%] max-w-[380px] opacity-70 sm:-right-4 sm:-top-10 sm:w-[46%] sm:opacity-100 md:-right-10" delay={0.8} />
           </div>
+
 
           <RevealParagraph />
 
@@ -174,26 +175,27 @@ export default function Hero() {
 
       {/* Bottom-left: phase + slot bars */}
       <motion.div
-        className="absolute bottom-6 left-4 z-[2] flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60 md:left-12"
+        className="absolute bottom-5 left-4 z-[2] flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.06em] text-white-60 sm:gap-3 sm:text-[11px] sm:tracking-[0.08em] md:left-12"
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 1.6, duration: 0.6, ease: EASE }}
       >
         <span>Phase:</span>
         <SlotBars />
-        <span className="text-white">C1 Live</span>
+        <span className="whitespace-nowrap text-white">C1 Live</span>
       </motion.div>
 
       {/* Bottom-right: local time */}
       <motion.div
-        className="absolute bottom-6 right-4 z-[2] flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60 md:right-12"
+        className="absolute bottom-5 right-4 z-[2] flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.06em] text-white-60 sm:text-[11px] sm:tracking-[0.08em] md:right-12"
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 1.7, duration: 0.6, ease: EASE }}
       >
-        <span>Local Time:</span>
+        <span className="hidden sm:inline">Local Time:</span>
         <LiveClock />
       </motion.div>
+
     </section>
   );
 }

@@ -14,9 +14,10 @@ export default function CtaBand() {
             <LetterReveal text="Ready when you are." byWord stagger={0.05} />
           </h2>
           <motion.div
-            className="shrink-0"
-            initial={{ opacity: 0, x: 24 }}
-            whileInView={{ opacity: 1, x: 0 }}
+            className="w-full shrink-0 sm:w-auto"
+            initial={{ opacity: 0, y: 24 }}
+            whileInView={{ opacity: 1, y: 0 }}
+
             viewport={{ once: true, amount: 0.4 }}
             transition={{ delay: 0.2, duration: 0.7, ease: EASE }}
           >
