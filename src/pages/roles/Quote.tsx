@@ -24,7 +24,7 @@ export default function Quote() {
                 alt="Sealed certificate"
                 className="aspect-[4/5] w-full object-cover"
               />
-              <Scribble className="absolute -bottom-6 -right-8 w-[70%]" onScroll delay={0.3} />
+              <Scribble className="absolute -bottom-6 -right-2 w-[60%] sm:-right-8 sm:w-[70%]" onScroll delay={0.3} />
             </div>
             <div className="mt-8">
               <p className="text-[14px] font-semibold text-white">The Risk Framework</p>

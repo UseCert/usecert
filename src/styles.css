@@ -166,13 +166,22 @@
   }
   html {
     scroll-behavior: auto;
+    -webkit-text-size-adjust: 100%;
   }
   body {
     background-color: var(--color-ink);
     color: #fff;
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
+    /* No page ever scrolls sideways on a phone; decorative art may bleed. */
+    overflow-x: clip;
   }
+  img,
+  svg,
+  video {
+    max-width: 100%;
+  }
+
   ::selection {
     background: #a8c9a4;
     color: #0b0b0b;

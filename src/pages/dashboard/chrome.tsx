@@ -1,40 +1,51 @@
 import { Link } from "@/lib/router-compat";
 import { motion } from "framer-motion";
-import { ArrowLeftRight, ArrowUpRight, Check, Cpu, Layers, LayoutGrid, List, Shield } from "lucide-react";
+import { ArrowLeftRight, ArrowUpRight, Check, Cpu, Layers, LayoutGrid, List, Shield, ShieldAlert } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDashboard } from "./store";
 import type { ViewId } from "./store";
 import { PulseDot } from "./ui";
 import { WalletButton } from "./modals";
+import { CommandTrigger } from "./CommandPalette";
 
-const NAV_ITEMS: { id: ViewId; label: string; icon: LucideIcon }[] = [
-  { id: "overview", label: "Overview", icon: LayoutGrid },
-  { id: "vaults", label: "Vaults", icon: Layers },
-  { id: "mint", label: "Mint / Redeem", icon: ArrowLeftRight },
-  { id: "staking", label: "Staking", icon: Shield },
-  { id: "activity", label: "Activity", icon: List },
-  { id: "keepers", label: "Keepers", icon: Cpu },
+const NAV_ITEMS: { id: ViewId; label: string; short: string; icon: LucideIcon }[] = [
+  { id: "overview", label: "Overview", short: "Home", icon: LayoutGrid },
+  { id: "vaults", label: "Vaults", short: "Vaults", icon: Layers },
+  { id: "mint", label: "Mint / Redeem", short: "Mint", icon: ArrowLeftRight },
+  { id: "staking", label: "Staking", short: "Stake", icon: Shield },
+  { id: "activity", label: "Activity", short: "Flows", icon: List },
+  { id: "risk", label: "Risk & Parameters", short: "Risk", icon: ShieldAlert },
+  { id: "keepers", label: "Keepers", short: "Keepers", icon: Cpu },
 ];
 
 /* ---------------------------------------------------------------- top bar */
 
 export function TopBar() {
-  const { block } = useDashboard();
+  const { block, totals } = useDashboard();
+  const healthy = totals.ratio >= 100;
   return (
     <header className="fixed left-0 right-0 top-0 z-40 h-16 border-b hairline-dark bg-abyss/85 backdrop-blur-[12px]">
-      <div className="relative flex h-full items-center justify-between gap-4 px-4 md:px-6">
-        {/* Left: brand */}
-        <div className="flex items-center gap-3">
-          <Link to="/" className="flex items-center gap-2.5" aria-label="Back to UseCert home">
+      <div className="relative grid h-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 md:px-6">
+        {/* Left: brand + system status */}
+        <div className="flex min-w-0 items-center gap-3">
+          <Link to="/" className="flex shrink-0 items-center gap-2.5" aria-label="Back to UseCert home">
             <img src="/logo.png" alt="UseCert monogram" className="h-6 w-6 object-contain" />
             <span className="text-[15px] font-semibold uppercase tracking-[-0.02em] text-white">
               UseCert<sup className="text-[8px] align-super">®</sup>
             </span>
           </Link>
           <span className="hidden h-4 w-px bg-hairline-dark md:block" aria-hidden />
-          <span className="hidden font-mono text-[10px] uppercase tracking-[0.08em] text-white-60 md:block">
-            Solvency, public every block
+          <span
+            className={cn(
+              "hidden shrink-0 items-center gap-2 rounded-full border px-3 py-1 font-mono text-[10px] uppercase tracking-[0.08em] md:flex",
+              healthy ? "border-green-bright/40 text-green-bright" : "border-warn/40 text-warn",
+            )}
+          >
+            <PulseDot /> {healthy ? "All systems operational" : "Degraded"}
+          </span>
+          <span className="hidden truncate font-mono text-[10px] uppercase tracking-[0.08em] text-white-60 xl:block">
+            Backing {totals.ratio.toFixed(2)}% · oracle 3s
           </span>
         </div>
 
@@ -46,9 +57,10 @@ export function TopBar() {
           </span>
         </div>
 
-        {/* Right: block ticker + wallet */}
-        <div className="flex items-center gap-3 md:gap-5">
-          <span className="hidden font-mono text-[11px] uppercase tracking-[0.06em] text-silver sm:block">
+        {/* Right: search + block ticker + wallet */}
+        <div className="flex shrink-0 items-center gap-2 md:gap-4">
+          <CommandTrigger className="hidden sm:flex" />
+          <span className="hidden font-mono text-[11px] uppercase tracking-[0.06em] text-silver md:block">
             BLOCK <span className="tabular-nums text-white">{block.toLocaleString("en-US")}</span>
           </span>
           <WalletButton />
@@ -134,7 +146,7 @@ export function Sidebar() {
 export function BottomTabs() {
   const { view, setView } = useDashboard();
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-40 grid grid-cols-6 border-t hairline-dark bg-abyss/95 backdrop-blur-[12px] md:hidden">
+    <nav className="fixed bottom-0 left-0 right-0 z-40 grid grid-cols-7 border-t hairline-dark bg-abyss/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-[12px] md:hidden">
       {NAV_ITEMS.map((item) => {
         const active = view === item.id;
         const Icon = item.icon;
@@ -144,13 +156,13 @@ export function BottomTabs() {
             type="button"
             onClick={() => setView(item.id)}
             className={cn(
-              "relative flex flex-col items-center gap-1 py-2.5 font-mono text-[9px] uppercase tracking-[0.04em]",
+              "relative flex flex-col items-center gap-1 px-0.5 py-2.5 font-mono text-[8.5px] uppercase tracking-[0.02em]",
               active ? "text-green-bright" : "text-white-60",
             )}
           >
-            <span className={cn("absolute left-1/2 top-0 h-[2px] w-8 -translate-x-1/2 bg-green-bright", !active && "hidden")} aria-hidden />
-            <Icon size={17} />
-            {item.id === "mint" ? "Mint" : item.label}
+            <span className={cn("absolute left-1/2 top-0 h-[2px] w-7 -translate-x-1/2 bg-green-bright", !active && "hidden")} aria-hidden />
+            <Icon size={16} />
+            {item.short}
           </button>
         );
       })}

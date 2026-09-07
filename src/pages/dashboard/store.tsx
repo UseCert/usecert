@@ -6,7 +6,7 @@ import { mulberry32, randHash } from "./format";
 /* ------------------------------------------------------------------ types */
 
 export type VaultId = "utsla" | "unvda" | "uspx" | "uqqq";
-export type ViewId = "overview" | "vaults" | "mint" | "staking" | "activity" | "keepers";
+export type ViewId = "overview" | "vaults" | "mint" | "staking" | "activity" | "risk" | "keepers";
 export type FlowType = "MINT" | "REDEEM" | "STAKE" | "UNSTAKE" | "CLAIM" | "WITHDRAW";
 export type Timeframe = "1H" | "24H" | "7D" | "ALL";
 
