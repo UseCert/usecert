@@ -9,7 +9,7 @@ const STATS = [
   { value: 23, prefix: "", suffix: "/30", caption: "Of the top trading pairs are tokenized stocks and commodities" },
 ];
 
-/** §7 "THE GAP" (full-bleed section-deep) — #the-gap */
+/** §7 "THE GAP" (full-bleed section-deep) - #the-gap */
 export default function TheGap() {
   return (
     <section id="the-gap" className="grain section-glow relative bg-section-deep text-white">

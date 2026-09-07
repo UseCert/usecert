@@ -55,7 +55,7 @@ function CellValue({ cell, highlight }: { cell: Cell; highlight?: boolean }) {
   );
 }
 
-/** §10 "BEATING THE FIELD." (black, pricing-table replica) — #compare */
+/** §10 "BEATING THE FIELD." (black, pricing-table replica) - #compare */
 export default function Compare() {
   return (
     <section id="compare" className="grain bg-ink text-white">

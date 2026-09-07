@@ -6,7 +6,7 @@ import LetterReveal from "@/components/LetterReveal";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
-/** §5 "WHY USECERT?" (light grey paper) — #why-usecert */
+/** §5 "WHY USECERT?" (light grey paper) - #why-usecert */
 export default function WhyUseCert() {
   return (
     <section id="why-usecert" className="bg-paper text-ink">

@@ -126,7 +126,7 @@ export default function ActivityView() {
                     <td className="px-3 py-3 text-right tabular-nums text-silver">{fmtNum(f.amount, f.vault === "token" ? 2 : 4)}</td>
                     <td className="px-3 py-3 text-right tabular-nums text-white">{fmtUSD(f.usdc, 0)}</td>
                     <td className="hidden px-3 py-3 text-right tabular-nums text-silver lg:table-cell">
-                      {f.vault === "token" ? "–" : fmtUSD(f.price)}
+                      {f.vault === "token" ? "-" : fmtUSD(f.price)}
                     </td>
                     <td className="hidden px-3 py-3 text-right text-white-60 md:table-cell">{f.feeBps} bps</td>
                     <td className="px-3 py-3 text-right text-white-60">{timeAgo(f.time)}</td>

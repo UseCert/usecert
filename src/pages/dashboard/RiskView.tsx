@@ -30,7 +30,7 @@ const DESIGN_LAWS: { n: string; title: string; body: string }[] = [
   {
     n: "05",
     title: "Mirror the market honestly",
-    body: "Certificates are synthetic price exposure — no custody of shares, no dividends, no shareholder rights. Corporate actions follow the underlying market spec.",
+    body: "Certificates are synthetic price exposure - no custody of shares, no dividends, no shareholder rights. Corporate actions follow the underlying market spec.",
   },
 ];
 
@@ -132,7 +132,7 @@ function Waterfall({ buffer, notional }: { buffer: number; notional: number }) {
       </div>
       <p className="mt-6 border-t hairline-dark pt-4 font-mono text-[10px] uppercase leading-[1.7] tracking-[0.06em] text-white-60">
         Losses consume the buffer first, then the staked insurance tranche. Holder backing is only reachable after both
-        are exhausted — and the invariant is published every block.
+        are exhausted - and the invariant is published every block.
       </p>
     </Panel>
   );
@@ -157,7 +157,7 @@ export default function RiskView() {
         }
         right={
           <p className="max-w-[46ch] self-end text-[16px] leading-[1.4] tracking-[-0.02em] text-silver sm:text-[18px] md:text-[20px]">
-            Every parameter that governs the vaults, the buffer and the insurance tranche — published, live, and
+            Every parameter that governs the vaults, the buffer and the insurance tranche - published, live, and
             stress-tested.
           </p>
         }
@@ -292,7 +292,7 @@ export default function RiskView() {
           <ul className="mt-5 flex flex-col gap-4 text-[13px] leading-[1.55] text-white-60">
             <li>
               Certificates are <span className="text-white">synthetic</span>: price exposure backed by perp positions and
-              USDC margin — not custody of shares, no dividends, no shareholder rights.
+              USDC margin - not custody of shares, no dividends, no shareholder rights.
             </li>
             <li>
               Named risks: sustained negative funding (buffered, then fee'd), dependency on the underlying equity perp

@@ -57,7 +57,7 @@ export const HOW_IT_WORKS_ROWS: AccordionRow[] = [
   },
 ];
 
-/** §6 HOW IT WORKS (black, accordion) — #how-it-works */
+/** §6 HOW IT WORKS (black, accordion) - #how-it-works */
 export default function HowItWorks() {
   return (
     <section id="how-it-works" className="grain bg-ink text-white">

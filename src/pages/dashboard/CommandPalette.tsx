@@ -70,7 +70,7 @@ export default function CommandPalette() {
       .forEach((v) => {
         list.push({
           id: `vault-${v.id}`,
-          label: `${v.name} — ${v.full}`,
+          label: `${v.name} - ${v.full}`,
           hint: "Open vault",
           group: "Vaults",
           icon: Layers,
