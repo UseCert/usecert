@@ -5,22 +5,25 @@
 import {
   Link as TanstackLink,
   Navigate as TanstackNavigate,
+  Outlet,
   useLocation as useTanstackLocation,
   useNavigate as useTanstackNavigate,
   useParams as useTanstackParams,
 } from "@tanstack/react-router";
-import type { ComponentProps } from "react";
+import type { AnchorHTMLAttributes, ReactElement } from "react";
 
-type AnyProps = Record<string, unknown>;
+/* eslint-disable @typescript-eslint/no-explicit-any */
 
-export function Link(props: ComponentProps<"a"> & { to: string }) {
-  const Cmp = TanstackLink as unknown as (p: AnyProps) => JSX.Element;
-  return <Cmp {...(props as AnyProps)} />;
+export { Outlet };
+
+export function Link(props: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string }) {
+  const Cmp = TanstackLink as any;
+  return <Cmp {...(props as any)} /> as ReactElement;
 }
 
 export function Navigate({ to, replace }: { to: string; replace?: boolean }) {
-  const Cmp = TanstackNavigate as unknown as (p: AnyProps) => JSX.Element;
-  return <Cmp to={to} replace={replace} />;
+  const Cmp = TanstackNavigate as any;
+  return <Cmp to={to} replace={replace} /> as ReactElement;
 }
 
 export function useLocation() {
@@ -30,9 +33,11 @@ export function useLocation() {
 export function useNavigate() {
   const navigate = useTanstackNavigate();
   return (to: string, options?: { replace?: boolean }) =>
-    navigate({ to, replace: options?.replace } as never);
+    navigate({ to, replace: options?.replace } as any);
 }
 
-export function useParams<T extends Record<string, string | undefined>>(): T {
-  return useTanstackParams({ strict: false }) as T;
+export function useParams<
+  T extends Record<string, string | undefined> = Record<string, string | undefined>,
+>(): T {
+  return (useTanstackParams as any)({ strict: false }) as T;
 }
