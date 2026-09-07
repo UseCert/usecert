@@ -54,8 +54,8 @@ export default function Navbar({ onMenuOpen }: { onMenuOpen: () => void }) {
     >
       <div className={cn("mx-auto flex max-w-[1440px] items-center justify-between px-4 md:px-6 lg:px-12", NAV_HEIGHT)}>
         {/* Left: monogram + wordmark + tagline */}
-        <div className="flex items-center gap-3">
-          <Link to="/" className="flex items-center gap-2.5" aria-label="UseCert home">
+        <div className="flex min-w-0 items-center gap-3">
+          <Link to="/" className="flex shrink-0 items-center gap-2.5" aria-label="UseCert home">
             <img src="/logo.png" alt="UseCert monogram" className="h-7 w-7 object-contain" />
             <span className="text-[17px] font-semibold uppercase tracking-[-0.02em] text-white">
               UseCert<sup className="text-[9px] align-super">®</sup>
@@ -68,7 +68,7 @@ export default function Navbar({ onMenuOpen }: { onMenuOpen: () => void }) {
         </div>
 
         {/* Right: links + CTA + hamburger */}
-        <nav className="flex items-center gap-6">
+        <nav className="flex shrink-0 items-center gap-2.5 sm:gap-4 lg:gap-6">
           <ul className="hidden lg:flex items-center gap-2 text-[12px] font-medium uppercase tracking-[0.08em]">
             {LINKS.map((l, i) => (
               <li key={l.label} className="flex items-center gap-2">
@@ -91,12 +91,12 @@ export default function Navbar({ onMenuOpen }: { onMenuOpen: () => void }) {
               </li>
             ))}
           </ul>
-          <SwapButton label="Launch App" to="/dashboard" variant="primary" className="[&_span]:px-5 [&_span]:py-3" />
+          <SwapButton label="Launch App" to="/dashboard" variant="primary" className="[&_span]:px-3.5 [&_span]:py-2.5 [&_span]:text-[11px] sm:[&_span]:px-5 sm:[&_span]:py-3 sm:[&_span]:text-[12px]" />
           <button
             type="button"
             onClick={onMenuOpen}
             aria-label="Open menu"
-            className="lg:hidden flex h-11 w-11 items-center justify-center border hairline-dark bg-ink text-white"
+            className="lg:hidden flex h-10 w-10 shrink-0 sm:h-11 sm:w-11 items-center justify-center border hairline-dark bg-ink text-white"
           >
             <Menu size={18} />
           </button>
