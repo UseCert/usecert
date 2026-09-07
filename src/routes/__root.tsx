@@ -7,10 +7,16 @@ import {
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { AnimatePresence } from "framer-motion";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
+import Layout from "@/components/Layout";
+import Preloader from "@/components/Preloader";
+import FilmGrain from "@/components/FilmGrain";
+import ScrollToTop from "@/components/ScrollToTop";
+import NotFound from "@/pages/NotFound";
 
 function NotFoundComponent() {
   return (
