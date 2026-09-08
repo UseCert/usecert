@@ -324,15 +324,59 @@ blob data posted"* by replaying **Account Delta Trees** from every batch.
 versus precompiles is only **freshness** — ~60s instead of per-block, with the age published rather
 than hidden.
 
-**Open item (O-1):** whether Poseidon2 inclusion-proof verification is affordable in Robinhood
-Chain gas. `elliottech/poseidon_crypto` and the in-repo `DesertVerifier` are the starting points;
-`DesertVerifier` already verifies ownership proofs on-chain for Desert mode, which is strong
-evidence the primitive is viable and possibly directly reusable. If gas proves prohibitive,
-fallback is off-chain verification anchored to the on-chain root, which is weaker and must then be
-described as such.
+### 8.1 O-1 resolved: gas is not the constraint
 
-**Front-end consequence:** *"provable on chain every block"* must become *"proven on-chain every
-batch (~60s), with age published."*
+Investigated 2026-09-07. Two findings changed the answer.
+
+**Lighter does not verify Merkle paths on-chain.** `ZkLighter.performDesert` hashes the claim into
+a single value and proves it inside a SNARK:
+
+```solidity
+bytes32 commitment = createExitCommitment(stateRoot, accountIndex, ..., totalBaseAmount);
+inputs[0] = uint256(commitment) % BN254_MODULUS;
+bool success = desertVerifier.Verify(proof, inputs);
+```
+
+`DesertVerifier` is a PLONK/BN254 verifier (KZG SRS + verifying-key constants), **not** a Poseidon
+or Merkle verifier. There is no Merkle verification primitive anywhere in their contracts, so
+nothing is directly reusable — but the *pattern* is proven and their verifier is already deployed.
+
+**A Solidity implementation is cheap.** Exact parameters from
+`elliottech/poseidon_crypto/hash/poseidon2_goldilocks`: Goldilocks field
+(`p = 2^64 - 2^32 + 1`), `WIDTH = 12`, `RATE = 8`, `D = 7`, `ROUNDS_F = 8`, `ROUNDS_P = 22`, and
+`HashTwoToOne` consumes 2 x 4 field elements — exactly `RATE`, so **one permutation per Merkle
+node**. Per permutation: 118 S-boxes x 4 multiplications = 472 field multiplications, plus 22 x 12
+for the internal linear layer.
+
+Because operands are all below `2^64`, each Goldilocks multiplication is a single `MULMOD`
+opcode at 8 gas — no 256-bit modular reduction needed. Estimated **400–650k gas for a depth-32
+path**, which on an Orbit L2 is cents, once per batch per asset.
+
+**These figures are analytical, not measured** (see O-1b). They are derived from round structure
+and opcode costs, not from a Foundry benchmark.
+
+### 8.2 Three routes, and the staged choice
+
+| Route | On-chain cost | Engineering cost |
+| --- | --- | --- |
+| **A. Off-chain reconstruction, on-chain root as anchor** | zero | days — tooling only |
+| **B. Poseidon2-Goldilocks path verified in Solidity** | ~400–650k gas | days–weeks, no circuit, no trusted setup |
+| **C. Custom SNARK circuit + verifier** | ~250–350k gas, flat | weeks; circuit, prover service, deploy |
+
+**C1 ships route A. C2 upgrades to route B. Route C is rejected** unless Lighter shares their
+circuit — and note their circuit proves *asset balance in desert mode only*, never position
+notional, so it could not serve solvency even if shared.
+
+Route A is not a fudge: the Account Delta Tree blobs are posted on-chain, so any third party can
+reconstruct the tree and check our numbers independently, today, with no new contracts. What it
+does not provide is a contract that *refuses to operate* on bad backing — that arrives with route B.
+
+**Front-end consequence, staged honestly:**
+
+- C1: *"independently verifiable every batch (~60s)"* — with the reconstruction tool published.
+- C2: *"proven on-chain every batch (~60s), age published."*
+
+Never *"provable every block"* at any stage.
 
 ---
 
@@ -483,15 +527,80 @@ not mocks — before mainnet.
 ## 15. Build order
 
 - **C1** — `CertFactory`, `CertVault`, `Certificate`, `CertOracle`, `BufferBook`,
-  `SolvencyRegistry`, `Zap`; `uTSLA` and `uNVDA`; delta-keeper, solvency-prover, fill-reporter;
-  public solvency dashboard wired to real data. No off-chain trading key. This is the claim, live.
-- **C2** — `uSPX` / `uQQQ`; DEX seeding on Pleiades and Uniswap; lending integrations; optionally
-  the Section 11.1 latency path if and only if O-8 resolves cleanly.
+  `CapacityOracle`, `SolvencyRegistry` (route A), `Zap`; `uTSLA` and `uNVDA`; delta-keeper,
+  solvency-prover, fill-reporter; published reconstruction tool; public dashboard showing solvency
+  **and capacity**. No off-chain trading key. A capped pilot, honestly labelled.
+- **C2** — capacity expansion: route B on-chain proofs, perpRFQ whitelisting (O-11) for size,
+  `uSPX` / `uQQQ`, DEX seeding on Pleiades and Uniswap, lending integrations; optionally the
+  Section 11.1 latency path if and only if O-8 resolves cleanly.
 - **C3** — `CERT.sol` genesis, `InsuranceStaking`, funding-surplus flywheel.
 - **C4** — Structured wrappers (DCA vault, covered-call-style vaults) on the certificate base.
 
 **Kill/persist:** unchanged. If mint TVL misses threshold by day 30, the vault engine persists as
 internal infrastructure and marketing rotates.
+
+---
+
+## 15.1 Capacity model — built to grow
+
+Live market data, 2026-09-07 (Lighter `api/v1/orderBookDetails`):
+
+| Market | `market_id` | Open interest | Daily volume | Mark vs index |
+| --- | --- | --- | --- | --- |
+| TSLA | 16 | ~3,353 sh (~$1.19M) | $1.81M | 0.8 bps |
+| NVDA | 15 | ~12,389 sh (~$2.88M) | $2.09M | 7 bps |
+
+Both markets: `price_decimals` 2, `size_decimals` 4, min order 0.02 / 0.04, min notional $10,
+`order_quote_limit` $25M, **maker and taker fee 0.0000**, `force_reduce_only` false, RFQ enabled.
+Margin fractions (of `ASSET_MARGIN_TICK = 10_000`): default IMR 5000, min IMR 500, MMR 300, CMR 200.
+
+**These books are thin.** A vault of any size becomes a dominant share of open interest, which
+moves the price it is hedging into and distorts the funding it depends on. But the market is
+expected to grow, so **capacity is a formula, not a constant** — no redeploy, no migration, no
+hardcoded ceiling.
+
+### 15.1.1 The formula
+
+Per asset, the vault's own position notional is capped at:
+
+```
+maxNotional(asset) = min(
+    depthBps    * openInterest(asset),   // scales automatically with the market
+    absoluteCap(asset),                  // governance ceiling, immutable bounds
+    bufferCapacity(asset)                // what the insurance buffer can actually absorb
+)
+```
+
+- `openInterest` comes from the same per-batch attestation that feeds `SolvencyRegistry`, so it is
+  proven, not self-reported, and cannot be gamed by the operator.
+- `depthBps` starts deliberately low (target: vault ≤ 10% of open interest) and is governance-
+  adjustable **within immutable min/max bounds set at deploy**. Governance can never remove the cap.
+- `mintInstant` and `requestMint` both revert once `maxNotional` is reached, with a distinct error
+  so the UI can say *"at capacity"* rather than *"failed"*. Redemption is never capped (Law 2).
+- `instantCap` (the instant-settlement size threshold) is separately derived from buffer health, per
+  Section 6.
+
+### 15.1.2 Why this is the right shape
+
+As open interest grows from $1M to $100M, capacity grows with it automatically. Nothing needs
+redeploying and no parameter needs a human in the loop for the common case. The failure mode is
+"minting pauses at capacity," never "vault is under-hedged."
+
+Two consequences to accept openly:
+
+- **C1 is a capped pilot.** At 10% of a $1.19M TSLA book, that is roughly $120k of `uTSLA`. The
+  launch plan and the marketing must say so; a solvency dashboard showing a $120k vault while the
+  copy claims the deepest book on-chain is worse than saying nothing.
+- **perpRFQ is the size valve.** `rfq_enabled` is true on both markets and market makers quote
+  large blocks, which is how large mints get filled without walking the book. It requires address
+  whitelisting, so it is a C2 item — and it is the main reason capacity can rise faster than
+  visible order-book depth.
+
+### 15.1.3 Published, not buried
+
+`maxNotional`, current utilisation, `depthBps`, and live open interest all go on the public
+dashboard next to the solvency figure. Capacity is a fact about the market, not an embarrassment,
+and publishing it is the same discipline as publishing the buffer.
 
 ---
 
@@ -510,21 +619,37 @@ Resolved 2026-09-07 against `elliottech/lighter-contracts` @ `75c2a73` and curre
   Still to confirm per asset: market index, tick and price decimals, leverage cap, funding interval,
   corporate-action handling.
 
-Still open, and all of them block Solidity:
+- **O-1 RESOLVED.** Gas is not the constraint. See 8.1/8.2: route A for C1, route B for C2, route C
+  rejected. No longer blocks Solidity.
+- **O-5 COMPLETE for C1 assets.** TSLA `market_id` 16, NVDA `market_id` 15, both active, decimals
+  and margin fractions recorded in 15.1. Zero maker and taker fees.
+- **O-9 PARTLY RESOLVED.** Trading fees are 0.0000 maker and taker. Standard accounts have 300ms
+  taker latency; Premium is opt-in and only relevant for HFT. **Public RPC
+  (`https://rpc.mainnet.chain.robinhood.com`, chain ID 4663) rate-limits aggressively — 429 on the
+  second consecutive call — so every worker needs a paid endpoint (Alchemy) from day one.**
+- **O-10 PARTLY RESOLVED.** Live `ZkLighter` on Robinhood Chain is
+  `0x94bAB9693Ba2f6358507eFfcbd372b0660AFfF9d`, retrieved from `https://api.rh.lighter.xyz/info`.
+  Byte-for-byte comparison against `75c2a73` still pending — a build task needing Foundry and exact
+  compiler settings.
 
-- **O-1** Poseidon2 inclusion-proof gas cost on Robinhood Chain. Start from the in-repo
-  `DesertVerifier`, which already does on-chain ownership proofs and may be reusable.
-- **O-2** Robinhood Chain base-asset index plus `tickSize` / `minDepositTicks` / `depositCapTicks`,
-  and USDG/USDC depth.
+Still open. None now block starting Solidity; each blocks a specific deliverable:
+
+- **O-1b** Replace the analytical gas estimate in 8.1 with a Foundry measurement. Blocks the C2
+  route-B commitment, not C1.
+- **O-2** Robinhood Chain base-asset index for USDG plus `tickSize` / `minDepositTicks` /
+  `depositCapTicks`, and USDG/USDC pool depth. The asset endpoints are 403-gated, so read these
+  from the live contract. Blocks `Zap.sol` and deposit sizing.
 - **O-6** Blob retention and availability window; whether an independent archive is needed for tree
-  reconstruction.
-- **O-7** Buffer floor and thresholds, fitted to historical funding and basis data pulled at build.
+  reconstruction. Blocks route A's durability claim.
+- **O-7** Buffer floor and thresholds, and the initial `depthBps`, fitted to historical funding,
+  basis and open-interest data. Blocks mainnet parameters, not testnet.
 - **O-8** Whether an API key can be scoped to trading without withdrawal rights. Gates Section 11.1
   only; C1 does not depend on it.
-- **O-9** Observed priority-request latency on Robinhood Chain under load, and gas cost per
-  `createOrder`. Sets `rebalance()` cadence and the bounty size.
-- **O-10** Whether the deployed Robinhood Chain `ZkLighter` matches this source revision. Pin the
-  live addresses and ABIs at build; do not assume parity with the reference repo.
+- **O-11** perpRFQ whitelisting: eligibility, process, and whether a contract address can be
+  whitelisted. Gates the C2 capacity valve in 15.1.2.
+- **O-12** Live open-interest source for the capacity formula — confirm it can be proven per batch
+  from blob data rather than trusted from the API. If it cannot, `depthBps` must be governed
+  conservatively instead.
 
 ---
 
