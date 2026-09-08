@@ -329,28 +329,41 @@ contract CertVaultRedeemTest is VaultFixture {
     ///         pay a burned holder nothing at all, so zero must read as the absence of a price
     ///         and not as a valuation.
     ///
+    ///         The third half is the one the re-trace found, and it is a real feed value rather
+    ///         than a mock: an answer of 1e49 at the feed's 8 decimals is px18 = 1e59, which
+    ///         _tryFeed's own overflow headroom check passes and returns live. Against a receipt
+    ///         of ~10 certificates, `certIn * px18` then does not fit in uint256 — a 0x11 panic
+    ///         INSIDE a payout, i.e. a receipt whose certificates are already burned and which
+    ///         no longer pays. The cap must decline to compute rather than panic.
+    ///
     /// @dev LOAD-BEARING: replace `_payout18`'s try/catch with a direct `oracle.pxUnguarded()`
     ///      call and the first claim reverts `OracleUnreadable()`; drop its `px18 == 0` guard and
-    ///      the second claim pays 0 instead of the full owed amount.
+    ///      the second claim pays 0 instead of the full owed amount; drop its
+    ///      `px18 > type(uint256).max / certIn` guard and the third panics 0x11.
     function test_claimRedeemPaysInFullWhenTheOracleCannotPrice() public {
         vm.prank(alice);
         vault.mintInstant(3_558.6e6);
-        uint256 half = cert.balanceOf(alice) / 2;
+        uint256 third = cert.balanceOf(alice) / 3;
 
         vm.prank(alice);
-        uint256 idA = vault.forceExit(half);
+        uint256 idA = vault.forceExit(third);
+        vm.prank(alice);
+        uint256 idB = vault.forceExit(third);
         // The remainder is read BEFORE the prank: vm.prank affects only the very next external
         // call, and cert.balanceOf() inline as an argument would consume it (the same gotcha
         // documented in test_sweepLargerThanOutstandingDoesNotUnderflow).
         uint256 rest = cert.balanceOf(alice);
         vm.prank(alice);
-        uint256 idB = vault.forceExit(rest);
+        uint256 idC = vault.forceExit(rest);
         (, uint256 owedA18,,,) = vault.redeemReceipts(idA);
         (, uint256 owedB18,,,) = vault.redeemReceipts(idB);
+        (, uint256 owedC18,,,) = vault.redeemReceipts(idC);
         uint256 owedA = owedA18 / 1e12; // USDG has 6 decimals
         uint256 owedB = owedB18 / 1e12;
+        uint256 owedC = owedC18 / 1e12;
         assertGt(owedA, 0);
         assertGt(owedB, 0);
+        assertGt(owedC, 0);
 
         // 1. The oracle read itself reverts.
         vm.mockCallRevert(
@@ -373,5 +386,17 @@ contract CertVaultRedeemTest is VaultFixture {
         assertEq(outB, owedB, "a zero price was treated as a valuation of zero");
         assertEq(usdg.balanceOf(alice), beforeB + owedB, "the holder was not paid in full");
         vm.clearMockedCalls();
+
+        // 3. A real, live feed value whose product with the receipt's quantity does not fit in
+        //    uint256. No mock: this is what CertOracle actually returns for this answer.
+        feed.set(int256(1e49), block.timestamp);
+        (uint256 hugePx,) = oracle.pxUnguarded();
+        assertEq(hugePx, 1e59, "the feed value did not reach the vault unclamped");
+        assertGt(rest * (hugePx / 1e18), type(uint256).max / 1e18, "the product does not actually overflow");
+        uint256 beforeC = usdg.balanceOf(alice);
+        vm.prank(alice);
+        uint256 outC = vault.claimRedeem(idC);
+        assertEq(outC, owedC, "an unrepresentable valuation blocked or shrank the payout");
+        assertEq(usdg.balanceOf(alice), beforeC + owedC, "the holder was not paid in full");
     }
 }

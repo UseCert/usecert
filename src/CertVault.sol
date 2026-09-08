@@ -943,8 +943,18 @@ contract CertVault {
     ///          Law 2 breach this contract could contain;
     ///        - a receipt with no recorded quantity, i.e. any receipt written before this mapping
     ///          existed. There are none on a fresh deployment, and reading a missing quantity as
-    ///          zero certificates would cap every such payout at zero, so it defers too.
-    ///      In all three the vault keeps the pre-H-2 behaviour, which is the only safe direction:
+    ///          zero certificates would cap every such payout at zero, so it defers too;
+    ///        - a price so large that `certIn * px18` does not fit in uint256. This one was found
+    ///          by re-tracing the payout path for Law 2 AFTER writing the cap, and it was a real
+    ///          regression in the cap itself: _queueExit's own `certIn * px18` was bounded by the
+    ///          price AT REQUEST, but nothing bounds the price at CLAIM, so a feed reporting
+    ///          ~1e59 (18-decimal) against a receipt of ~10 certificates panicked 0x11 inside a
+    ///          payout — an unpayable receipt with the certificates already burned, which is the
+    ///          exact shape of the Critical this contract has been bitten by twice. Note the
+    ///          arithmetic direction: at any price that large the cap could not have bitten
+    ///          anyway (the certificates are worth astronomically more than the receipt), so
+    ///          returning owed18 here is not merely the safe answer, it is the right one.
+    ///      In all four the vault keeps the pre-H-2 behaviour, which is the only safe direction:
     ///      a valuation the chain cannot compute must never become a reason not to pay.
     function _payout18(uint256 receiptId, uint256 owed18) internal view returns (uint256) {
         uint256 certIn = redeemCertIn[receiptId];
@@ -957,6 +967,9 @@ contract CertVault {
             return owed18;
         }
         if (px18 == 0) return owed18;
+        // certIn is non-zero above, so this division is safe, and it must come BEFORE the
+        // multiplication rather than being trusted not to matter — see the fourth bullet.
+        if (px18 > type(uint256).max / certIn) return owed18;
 
         uint256 valueNow18 = certIn * px18 / 1e18;
         return valueNow18 < owed18 ? valueNow18 : owed18;
