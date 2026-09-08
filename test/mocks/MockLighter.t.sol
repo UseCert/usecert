@@ -18,9 +18,9 @@ contract MockLighterTest is Test {
     }
 
     function test_depositRegistersAccount() public {
-        assertEq(lighter.accountIndexOf(address(this)), 0);
+        assertEq(lighter.addressToAccountIndex(address(this)), 0);
         lighter.deposit(address(this), 3, 0, 1_000e6);
-        assertGt(lighter.accountIndexOf(address(this)), 0);
+        assertGt(lighter.addressToAccountIndex(address(this)), 0);
         assertEq(lighter.marginBalance(), 1_000e6);
     }
 
@@ -31,7 +31,7 @@ contract MockLighterTest is Test {
 
     function test_orderDoesNotFillUntilBatchSettles() public {
         lighter.deposit(address(this), 3, 0, 1_000e6);
-        uint48 idx = lighter.accountIndexOf(address(this));
+        uint48 idx = lighter.addressToAccountIndex(address(this));
         lighter.createOrder(idx, 16, 100, 35586, 0, 1);
 
         // The whole point: no fill in the calling transaction.
@@ -45,7 +45,7 @@ contract MockLighterTest is Test {
 
     function test_zeroBaseAmountClosesEntirePosition() public {
         lighter.deposit(address(this), 3, 0, 1_000e6);
-        uint48 idx = lighter.accountIndexOf(address(this));
+        uint48 idx = lighter.addressToAccountIndex(address(this));
         lighter.createOrder(idx, 16, 500, 35586, 0, 1);
         lighter.settleBatch();
         assertEq(lighter.positionBase(16), 500);

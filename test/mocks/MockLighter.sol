@@ -22,7 +22,7 @@ contract MockLighter is ILighter {
     IERC20 public immutable collateral;
     uint16 public immutable collateralAssetIndex;
 
-    mapping(address => uint48) public accountIndexOf;
+    mapping(address => uint48) public addressToAccountIndex;
     uint48 private _nextAccountIndex = 3;
 
     /// @dev collateral posted as margin, in token units
@@ -47,8 +47,8 @@ contract MockLighter is ILighter {
     function deposit(address to, uint16, uint8, uint256 amount) external payable {
         collateral.transferFrom(msg.sender, address(this), amount);
         marginBalance += amount;
-        if (accountIndexOf[to] == 0) {
-            accountIndexOf[to] = _nextAccountIndex++;
+        if (addressToAccountIndex[to] == 0) {
+            addressToAccountIndex[to] = _nextAccountIndex++;
         }
     }
 
