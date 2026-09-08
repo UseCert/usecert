@@ -33,10 +33,42 @@ contract CertOracleTest is Test {
     }
 
     function test_pxUnguardedNeverRevertsWhenStale() public {
+        // Record a known last-good value distinct from whatever the feed reports next.
+        oracle.pokeLastGood();
+        (uint256 lastGoodP, uint256 lastGoodT) = oracle.pxUnguarded();
+        assertEq(lastGoodP, PX);
+
+        // Now move the feed to a clearly different price AND make it stale, so the live
+        // branch of pxUnguarded() (if it ran) would return a different value than last-good.
+        feed.set(999_99000000, block.timestamp);
         vm.warp(block.timestamp + 3601);
+
         (uint256 p, uint256 t) = oracle.pxUnguarded();
-        assertEq(p, PX);
+        // If the staleness check were broken and the live branch ran, p would be 999.99e18.
+        assertEq(p, lastGoodP);
+        assertEq(t, lastGoodT);
         assertGt(t, 0);
+    }
+
+    function test_pxUnguardedNeverRevertsWhenFeedReverts() public {
+        oracle.pokeLastGood();
+        (uint256 lastGoodP, uint256 lastGoodT) = oracle.pxUnguarded();
+
+        feed.setShouldRevert(true);
+
+        (uint256 p, uint256 t) = oracle.pxUnguarded();
+        assertEq(p, lastGoodP);
+        assertEq(t, lastGoodT);
+    }
+
+    function test_basisBpsNeverRevertsWhenFeedReverts() public {
+        feed.setShouldRevert(true);
+        assertEq(oracle.basisBps(), 0);
+    }
+
+    function test_mintAllowedNeverRevertsWhenFeedReverts() public {
+        feed.setShouldRevert(true);
+        assertFalse(oracle.mintAllowed());
     }
 
     function test_nonPositivePriceReverts() public {
@@ -78,5 +110,16 @@ contract CertOracleTest is Test {
     function test_onlyAttesterSetsMarkPrice() public {
         vm.expectRevert(CertOracle.CertOracle_OnlyAttester.selector);
         oracle.setMarkPrice(1e18);
+    }
+
+    function test_mintAllowedFalseWhenFeedTruncatesToZero() public {
+        // 19 feed decimals with answer = 1 truncates to px18 = 1 / 10 = 0 on normalisation,
+        // while _tryFeed() still reports ok = true. mintAllowed() must not divide by that zero.
+        MockAggregatorV3 tinyFeed = new MockAggregatorV3(19, 1);
+        CertOracle tinyOracle = new CertOracle(address(tinyFeed), attester, 2, 3600, 500, 100);
+        vm.prank(attester);
+        tinyOracle.setMarkPrice(PX);
+
+        assertFalse(tinyOracle.mintAllowed());
     }
 }

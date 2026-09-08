@@ -73,13 +73,21 @@ contract CertOracle is ICertOracle {
         return (lastGoodPx18, lastGoodAt);
     }
 
+    /// @dev Never lets an external feed failure propagate: pxUnguarded(), basisBps() and
+    ///      mintAllowed() all rely on this returning cleanly no matter what the feed does.
     function _tryFeed() internal view returns (bool ok, uint256 px18, uint256 updatedAt) {
-        (, int256 answer,, uint256 t,) = feed.latestRoundData();
-        if (answer <= 0) return (false, 0, 0);
-        if (block.timestamp - t > stalenessSeconds) return (false, 0, 0);
-        uint8 d = feed.decimals();
-        px18 = d <= 18 ? uint256(answer) * (10 ** (18 - d)) : uint256(answer) / (10 ** (d - 18));
-        return (true, px18, t);
+        try feed.latestRoundData() returns (uint80, int256 answer, uint256, uint256 t, uint80) {
+            if (answer <= 0) return (false, 0, 0);
+            if (block.timestamp - t > stalenessSeconds) return (false, 0, 0);
+            try feed.decimals() returns (uint8 d) {
+                px18 = d <= 18 ? uint256(answer) * (10 ** (18 - d)) : uint256(answer) / (10 ** (d - 18));
+                return (true, px18, t);
+            } catch {
+                return (false, 0, 0);
+            }
+        } catch {
+            return (false, 0, 0);
+        }
     }
 
     function basisBps() external view returns (uint256) {
@@ -91,7 +99,7 @@ contract CertOracle is ICertOracle {
 
     function mintAllowed() external view returns (bool) {
         (bool ok, uint256 p,) = _tryFeed();
-        if (!ok) return false;
+        if (!ok || p == 0) return false;
         if (markPx18 == 0) return false;
         uint256 diff = markPx18 > p ? markPx18 - p : p - markPx18;
         if (diff * 10_000 / p > basisBandBps) return false;
