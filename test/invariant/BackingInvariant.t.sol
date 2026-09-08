@@ -125,8 +125,18 @@ contract BackingInvariantTest is VaultFixture {
     ///         it is checked arithmetic, so an underflow there would revert the call that caused
     ///         it — surfacing as a lawTwoViolations increment on the redeem side, not silent
     ///         corruption.
+    /// @dev M-4 added a THIRD margin counter, marginExcess (margin freed by an instant redemption,
+    ///      which no receipt will ever allocate — see CertVault). It is included in the sum here
+    ///      deliberately rather than left out: redeemInstant fills it by TRANSFERRING out of
+    ///      postedMargin, so including it leaves this assertion measuring exactly what it measured
+    ///      before, while omitting it would have silently weakened the property — any margin moved
+    ///      into the new counter would have stopped being counted at all, and this invariant would
+    ///      have gone on passing while conserving less than its own name claims.
     function invariant_marginNeverExceedsDeposited() public view {
-        assertLe(vault.postedMargin() + vault.marginPendingRecall(), handler.totalDepositedToVenue());
+        assertLe(
+            vault.postedMargin() + vault.marginPendingRecall() + vault.marginExcess(),
+            handler.totalDepositedToVenue()
+        );
     }
 
     /// @notice NOT an invariant (deliberately): `CapacityOracle.maxNotional18` computes

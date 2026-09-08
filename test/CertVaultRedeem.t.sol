@@ -313,4 +313,65 @@ contract CertVaultRedeemTest is VaultFixture {
         lighter.settleBatch();
         assertEq(lighter.positionBase(MARKET), posBefore, "an order went in after all");
     }
+
+    /// @notice H-2's Law 2 proof. claimRedeem now reads the oracle, to cap a queued payout at
+    ///         what the certificates it burned are worth at claim time. That read sits in a
+    ///         payout path, so it must be incapable of two things: blocking a claim, and valuing
+    ///         a claim at nothing. Both are driven here, on two receipts of the same funded exit.
+    ///
+    ///         The first half mocks `pxUnguarded()` into reverting. CertOracle does not do that
+    ///         today — CRITICAL B hardened its last uncaught arithmetic — but the vault must not
+    ///         depend on that being permanently true, and the mock is the only way to prove the
+    ///         try/catch is really there.
+    ///
+    ///         The second half returns a price of ZERO, which CertOracle genuinely can (an ok
+    ///         feed whose answer normalises down to 0 at high decimals). Capping at zero would
+    ///         pay a burned holder nothing at all, so zero must read as the absence of a price
+    ///         and not as a valuation.
+    ///
+    /// @dev LOAD-BEARING: replace `_payout18`'s try/catch with a direct `oracle.pxUnguarded()`
+    ///      call and the first claim reverts `OracleUnreadable()`; drop its `px18 == 0` guard and
+    ///      the second claim pays 0 instead of the full owed amount.
+    function test_claimRedeemPaysInFullWhenTheOracleCannotPrice() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        uint256 half = cert.balanceOf(alice) / 2;
+
+        vm.prank(alice);
+        uint256 idA = vault.forceExit(half);
+        // The remainder is read BEFORE the prank: vm.prank affects only the very next external
+        // call, and cert.balanceOf() inline as an argument would consume it (the same gotcha
+        // documented in test_sweepLargerThanOutstandingDoesNotUnderflow).
+        uint256 rest = cert.balanceOf(alice);
+        vm.prank(alice);
+        uint256 idB = vault.forceExit(rest);
+        (, uint256 owedA18,,,) = vault.redeemReceipts(idA);
+        (, uint256 owedB18,,,) = vault.redeemReceipts(idB);
+        uint256 owedA = owedA18 / 1e12; // USDG has 6 decimals
+        uint256 owedB = owedB18 / 1e12;
+        assertGt(owedA, 0);
+        assertGt(owedB, 0);
+
+        // 1. The oracle read itself reverts.
+        vm.mockCallRevert(
+            address(oracle), abi.encodeWithSignature("pxUnguarded()"), abi.encodeWithSignature("OracleUnreadable()")
+        );
+        uint256 beforeA = usdg.balanceOf(alice);
+        vm.prank(alice);
+        uint256 outA = vault.claimRedeem(idA);
+        assertEq(outA, owedA, "an unreadable oracle shrank the payout");
+        assertEq(usdg.balanceOf(alice), beforeA + owedA, "the holder was not paid in full");
+        vm.clearMockedCalls();
+
+        // 2. The oracle answers, with zero.
+        vm.mockCall(
+            address(oracle), abi.encodeWithSignature("pxUnguarded()"), abi.encode(uint256(0), block.timestamp)
+        );
+        uint256 beforeB = usdg.balanceOf(alice);
+        vm.prank(alice);
+        uint256 outB = vault.claimRedeem(idB);
+        assertEq(outB, owedB, "a zero price was treated as a valuation of zero");
+        assertEq(usdg.balanceOf(alice), beforeB + owedB, "the holder was not paid in full");
+        vm.clearMockedCalls();
+    }
 }
