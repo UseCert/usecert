@@ -223,6 +223,10 @@ contract CertVault {
     event RedeemRequested(uint256 indexed receiptId, address indexed user, uint256 certIn, uint64 expiresAt);
     event RedeemClaimed(uint256 indexed receiptId, uint256 amountOut);
     event ForceExited(uint256 indexed receiptId, address indexed user, uint256 certIn);
+    /// @dev Law 2: the closing hedge on the exit path is fail-open (see _tryHedge). This records
+    ///      that the burn and receipt went through but the venue-side close did not, so it is
+    ///      never silently lost — someone (rebalance(), or a retried close) can true it up later.
+    event CloseOrderNotPlaced(uint256 certIn);
 
     /// @notice Instant redemption from the vault's own collateral balance (the hot buffer).
     /// @dev Deliberately reads NOTHING about buffer P&L health, capacity, or oracle pause state —
@@ -277,7 +281,10 @@ contract CertVault {
             paid: false
         });
 
-        _hedge(certIn, px18, SIDE_ASK);
+        // Fail-open (Law 2): forceExit is the last-resort backstop and must survive even when the
+        // closing order itself cannot be placed. requestRedeem shares this path deliberately —
+        // both queued-exit entry points must be equally unstoppable. See _tryHedge.
+        if (!_tryHedge(certIn, px18, SIDE_ASK)) emit CloseOrderNotPlaced(certIn);
 
         // Price-independent by construction: certIn <= supplyBefore always (the burn above would
         // have reverted otherwise), so this holder's share of postedMargin can never exceed what
@@ -349,6 +356,31 @@ contract CertVault {
         uint48 baseAmount = uint48(certAmount18 * (10 ** cfg.sizeDecimals) / 1e18);
         uint32 tickPx = oracle.toTickPrice(px18);
         lighter.createOrder(lighterAccountIndex(), cfg.marketIndex, baseAmount, tickPx, side, ORDER_TYPE_MARKET);
+    }
+
+    /// @dev Fail-open counterpart to _hedge, used ONLY by the exit path (_queueExit, i.e.
+    ///      requestRedeem/forceExit). forceExit is the documented Law 2 backstop — it must work
+    ///      when every off-chain service is dead, the buffer is empty, the oracle is stale, and
+    ///      the venue is refusing calls — so no step of placing the closing order may revert the
+    ///      transaction. Two things can revert inside _hedge: oracle.toTickPrice() (an external
+    ///      view call that reverts CertOracle_TickOverflow when the encoded tick is 0 or exceeds
+    ///      uint32, reachable at extreme prices) and lighter.createOrder() (unguarded, can revert
+    ///      for any venue reason). Both are wrapped in try/catch here; either failure returns
+    ///      false instead of propagating. mintInstant, requestMint and rebalance() deliberately
+    ///      keep calling the revert-capable _hedge — minting and rebalancing may be gated, but
+    ///      redemption may never be (Laws 2 and 3).
+    function _tryHedge(uint256 certAmount18, uint256 px18, uint8 side) internal returns (bool placed) {
+        uint48 baseAmount = uint48(certAmount18 * (10 ** cfg.sizeDecimals) / 1e18);
+        try oracle.toTickPrice(px18) returns (uint32 tickPx) {
+            try lighter.createOrder(lighterAccountIndex(), cfg.marketIndex, baseAmount, tickPx, side, ORDER_TYPE_MARKET)
+            {
+                return true;
+            } catch {
+                return false;
+            }
+        } catch {
+            return false;
+        }
     }
 
     /// @notice Deposit the target share of freshly received collateral to Lighter as margin.

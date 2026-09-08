@@ -156,4 +156,33 @@ contract CertVaultRedeemTest is VaultFixture {
         vm.prank(alice);
         vault.closeAll();
     }
+
+    /// Law 2: forceExit must survive even when the closing hedge itself cannot be placed.
+    /// Drive the feed to a price so extreme that CertOracle.toTickPrice() overflows uint32 —
+    /// pxUnguarded() still returns it (fresh, so not stale) but _hedge would revert
+    /// CertOracle_TickOverflow. forceExit must not revert: the burn and the receipt must stand,
+    /// with CloseOrderNotPlaced recording that the close order itself was not placed.
+    function test_forceExitSurvivesUnplaceableCloseOrder() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+        uint256 bal = cert.balanceOf(alice);
+
+        // priceDecimals is 2 in this fixture's oracle: tick = px18 * 100 / 1e18. Push px18 far
+        // past the point where that overflows uint32 (~4.29e9), while keeping the feed fresh.
+        vm.prank(attester);
+        feed.set(int256(5e28), block.timestamp);
+
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit CertVault.CloseOrderNotPlaced(bal);
+
+        vm.prank(alice);
+        uint256 id = vault.forceExit(bal);
+
+        assertGt(id, 0);
+        assertEq(cert.balanceOf(alice), 0); // burn still happened
+        (address user,,,, bool paid) = vault.redeemReceipts(id);
+        assertEq(user, alice); // receipt still exists
+        assertFalse(paid);
+    }
 }
