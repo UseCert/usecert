@@ -399,6 +399,64 @@ sits explicitly *outside* the solvency perimeter.
 `depositCapTicks` for the base asset, and USDG/USDC pool depth. If depth is thin, the zap ships
 disabled and the copy changes.
 
+### 9.1 The margin split — how collateral is actually held
+
+Added 2026-09-07 after implementation exposed a gap: revision 2 of this spec described the mint
+path as "deposit margin and create the order", but never said how much margin, and the first
+implementation posted none at all. It opened roughly $355k of notional against $1 of venue margin,
+and every test passed because the mock did not enforce margin. Law 1 was unsatisfiable in code
+while appearing satisfied in tests.
+
+**The non-obvious part.** The vault is structurally hedged at *any* leverage. Because
+`supply x px == position notional` at delta 1.0, a price move changes the position and the holder
+claims by the same amount:
+
+- price rises 10% -> position gains 10% of notional, claims rise 10% of notional, net zero
+- price falls 10% -> position loses 10%, claims fall 10%, net zero
+
+Leverage does not break the hedge. What leverage buys is **liquidation risk**, and liquidation is
+the one failure that genuinely breaks the product: once the position is force-closed the vault
+holds cash with no hedge, and a subsequent price recovery impairs holders.
+
+| Margin posted | Leverage | Adverse move to liquidation (3% MMR) |
+| --- | --- | --- |
+| 100% of notional | 1x | ~-97%, essentially impossible |
+| 50% (Lighter's default IMF) | 2x | ~-47% |
+| 20% | 5x | ~-17%, an earnings gap reaches this |
+
+On a $1-3M book (Section 15.1) an earnings gap is a real event, so the target is ~1x.
+
+**The decision.** Collateral is split at mint:
+
+- `targetMarginBps` of net collateral is deposited to Lighter as margin. Default **9000** (90%),
+  giving ~1.1x leverage, so liquidation needs an ~-88% move.
+- The retained remainder is the **hot buffer** — the float that serves instant redemptions.
+- Bounds are **contract constants**, not configuration: `MIN_TARGET_MARGIN_BPS = 5000` and
+  `MAX_TARGET_MARGIN_BPS = 10000`, checked in the constructor, with **no setter**. No deployment can
+  produce a vault levered beyond 2x and governance cannot re-lever one afterwards.
+- `redeemInstant` is a convenience fast path: when the hot buffer cannot cover a payout it reverts
+  `CertVault_UseQueuedRedeem` and the holder uses the queued path. **This is not a Law 2 exception** —
+  `requestRedeem`, `forceExit` and `claimRedeem` stay unconditionally open and read no buffer
+  health, no capacity, no `mintAllowed`, and never `px()`.
+- Rebalancing margin against hot buffer is a permissionless `rebalance()` responsibility. No new
+  trusted actor.
+
+**Verified before committing to this** (2026-09-07, against `elliottech/lighter-contracts` @
+`75c2a73`): `defaultInitialMarginFraction` and `minInitialMarginFraction` are *market-level*
+parameters in `TxTypes.UpdateMarketPerps`. There is no per-account leverage setter and no
+update-leverage transaction type. IMF is a floor on *required* margin, never a ceiling on *posted*
+margin — so an over-margined ~1x position is expressible and nothing sweeps the excess.
+
+**Rejected alternative:** post only Lighter's required margin (~50% IMF) and keep the rest local.
+That keeps instant-redeem capacity generous but runs the venue position at ~2x, trading the
+product's one credible claim — verifiable solvency — for redemption convenience on a book thin
+enough that a gap is plausible.
+
+**Test discipline this taught us.** `MockLighter` now enforces margin in `settleBatch()` and
+reverts `InsufficientMargin()`. When that enforcement landed, **9 existing tests reverted** — which
+is the proof the gap was real. Any future venue behaviour the vault depends on must be modelled in
+the mock, or the suite will keep certifying designs the venue would reject.
+
 ---
 
 ## 10. Oracle and basis risk
