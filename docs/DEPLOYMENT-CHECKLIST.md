@@ -14,6 +14,47 @@ Each item states the assumption, what depends on it, and what happens if it is v
 
 ---
 
+## 0. BLOCKER — `CertFactory` exceeds the EIP-170 contract size limit
+
+**`CertFactory` cannot be deployed to any EIP-170 chain as currently built.** Measured with this
+repo's `foundry.toml` (`optimizer = true`, `optimizer_runs = 200`, `via_ir = false`):
+
+| Contract | Runtime size | EIP-170 limit | Margin |
+| --- | --- | --- | --- |
+| `CertFactory` | **28,205 B** | 24,576 B | **−3,629 B** |
+| `CertVault` | 17,559 B | 24,576 B | +7,017 B |
+
+`CertFactory.deployVault` uses `new CertVault(...)`, so the factory's runtime bytecode embeds
+`CertVault`'s entire 25,743-byte creation code. The factory is therefore always larger than the
+vault it deploys, and the vault is already two thirds of the limit.
+
+**This is pre-existing, not introduced by the C1 audit fixes.** At commit `eb408d8`, before this
+pass, `CertFactory` measured 27,368 B (−2,792 B). The audit fixes added 461 B to `CertVault`'s
+runtime and so 837 B to the factory, deepening an existing overrun rather than creating one.
+
+It is not caught by the test suite because Foundry does not enforce EIP-170 in tests, which is why
+`test/CertFactory.t.sol` passes.
+
+**It does not block the protocol** — every test deploys `CertVault` directly, and so can a
+deployment script. It blocks *the factory*, i.e. the on-chain multi-vault deployment path.
+
+**Options, none of which were taken here** (this pass was scoped not to modify `foundry.toml` and
+not to restructure the factory):
+
+1. `via_ir = true`, and/or a much lower `optimizer_runs`, in `foundry.toml`. Cheapest, and worth
+   measuring first — but it changes codegen for every contract and must be re-audited, and
+   `CertFactory.deployVault`'s own NatSpec notes the flat signature already overflows the stack
+   window with `via_ir = false`.
+2. Stop embedding the creation code: deploy vaults via a minimal-proxy / clone-with-immutable-args
+   pattern, or a separate `CertVaultDeployer` the factory calls.
+3. Drop `CertFactory` from C1 and deploy vaults directly from the multisig, registering them with a
+   thin registry. The factory's only substance is `isVault`, `vaults`, and the L-1 marker.
+
+**Measure `forge build --sizes` and resolve this before mainnet.** Nothing else on this checklist
+matters if the deployment path itself will not fit on chain.
+
+---
+
 ## 1. The collateral token — L-7, and the sharpest item on this list
 
 `CertVault.cfg.collateral` is arbitrary at deploy and **there are no reentrancy guards anywhere in
