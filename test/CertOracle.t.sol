@@ -112,6 +112,31 @@ contract CertOracleTest is Test {
         oracle.setMarkPrice(1e18);
     }
 
+    /// Finding 2 (Task 10 review): arithmetic in a try's success block is NOT covered by that
+    /// try's own catch. _tryFeed()'s success block does
+    /// `uint256(answer) / (10 ** (d - 18))` unguarded — a feed reporting decimals() >= 96 makes
+    /// that exponentiation overflow uint256 and panic, uncaught, propagating through
+    /// pxUnguarded()/basisBps()/mintAllowed(), all three of which are documented to never revert
+    /// and are reachable from forceExit(). Construct a dedicated oracle+feed pair (a straight
+    /// second CertOracle constructed directly against a decimals()=100 feed would itself panic
+    /// in the constructor's own unguarded _readFeed() call, so establish a good last-good price
+    /// first, then flip the SAME feed to the absurd decimals afterward via the mock's setter).
+    function test_pxUnguardedSurvivesAbsurdFeedDecimals() public {
+        MockAggregatorV3 absurdFeed = new MockAggregatorV3(8, 355_86000000);
+        CertOracle absurdOracle = new CertOracle(address(absurdFeed), attester, 2, 3600, 500, 100);
+        (uint256 lastGoodP,) = absurdOracle.pxUnguarded();
+        assertEq(lastGoodP, PX); // sane construction established a real last-good price
+
+        absurdFeed.setDecimals(100); // >= 96 -> 10 ** (d - 18) would overflow uint256
+
+        (uint256 p, uint256 t) = absurdOracle.pxUnguarded();
+        assertEq(p, lastGoodP); // falls back to last-good, does not panic
+        assertGt(t, 0);
+
+        assertEq(absurdOracle.basisBps(), 0); // must not revert either
+        assertFalse(absurdOracle.mintAllowed()); // unusable feed -> minting must not be allowed
+    }
+
     function test_mintAllowedFalseWhenFeedTruncatesToZero() public {
         // 19 feed decimals with answer = 1 truncates to px18 = 1 / 10 = 0 on normalisation,
         // while _tryFeed() still reports ok = true. mintAllowed() must not divide by that zero.

@@ -26,6 +26,15 @@ contract MockAggregatorV3 is IAggregatorV3 {
         shouldRevert = r;
     }
 
+    /// @dev Lets a test flip an already-deployed feed's reported decimals() after the fact —
+    ///      e.g. modelling a live feed that starts sane and later reports something absurd
+    ///      (Task 10 review, Finding 2), which a straight second constructor call cannot
+    ///      reproduce: CertOracle's own constructor reads the feed unguarded, so a feed that is
+    ///      already broken at construction time makes the CertOracle constructor itself panic.
+    function setDecimals(uint8 d) external {
+        _decimals = d;
+    }
+
     function decimals() external view returns (uint8) {
         if (shouldRevert) revert("MockAggregatorV3: reverted");
         return _decimals;

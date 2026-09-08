@@ -31,6 +31,16 @@ contract CertVault {
     error CertVault_NothingToClaim();
     error CertVault_TargetMarginOutOfBounds();
     error CertVault_UseQueuedRedeem();
+    /// @dev Finding 1 (Task 10 review): a zero amount at any mint/redeem entry point is worthless
+    ///      to the caller but, left unguarded, reaches _hedge/_tryHedge as baseAmount == 0 —
+    ///      Lighter's documented "close the entire position" primitive (see ILighter.sol). Reject
+    ///      it here with a clear, dedicated error before it can ever reach that primitive.
+    error CertVault_ZeroAmount();
+    /// @dev Finding 1 (Task 10 review): _hedge must never silently submit baseAmount == 0 — that
+    ///      is Lighter's close-all primitive, not a no-op. mintInstant/requestMint/rebalance() use
+    ///      the revert-capable _hedge, so an amount that rounds to zero after size-decimals
+    ///      conversion must revert instead of hedging nothing (an unhedged mint breaks Law 1).
+    error CertVault_ZeroHedgeAmount();
 
     event Minted(address indexed user, uint256 amountIn, uint256 certOut, uint256 px18, uint256 fee);
     event MintRequested(uint256 indexed receiptId, address indexed user, uint256 amountIn);
@@ -144,6 +154,7 @@ contract CertVault {
     // ---------------------------------------------------------------- mint
 
     function mintInstant(uint256 amountIn) external returns (uint256 certOut) {
+        if (amountIn == 0) revert CertVault_ZeroAmount();
         if (!bootstrapped) revert CertVault_NotBootstrapped();
         if (!oracle.mintAllowed()) revert CertVault_MintPaused();
 
@@ -165,6 +176,7 @@ contract CertVault {
     }
 
     function requestMint(uint256 amountIn) external returns (uint256 receiptId) {
+        if (amountIn == 0) revert CertVault_ZeroAmount();
         if (!bootstrapped) revert CertVault_NotBootstrapped();
         if (!oracle.mintAllowed()) revert CertVault_MintPaused();
 
@@ -235,6 +247,7 @@ contract CertVault {
     ///      requestRedeem/forceExit/claimRedeem). Uses pxUnguarded so a stale feed cannot trap a
     ///      holder.
     function redeemInstant(uint256 certIn) external returns (uint256 amountOut) {
+        if (certIn == 0) revert CertVault_ZeroAmount();
         (uint256 px18,) = oracle.pxUnguarded();
         uint256 gross18 = certIn * px18 / 1e18;
         uint256 fee18 = gross18 * cfg.redeemFeeBps / 10_000;
@@ -262,6 +275,13 @@ contract CertVault {
     }
 
     function _queueExit(uint256 certIn, bool isForce) internal returns (uint256 receiptId) {
+        // Finding 1b (Task 10 review): with no guard here, ANY address holding zero certificates
+        // could call forceExit(0)/requestRedeem(0) for free — certificate.burn(msg.sender, 0)
+        // succeeds trivially, and the unguarded _tryHedge(0, ...) would forward baseAmount == 0 to
+        // Lighter's close-all primitive, wiping the vault's entire hedge. This is not a Law 2
+        // gate: a holder redeeming nothing has nothing to redeem, and every non-zero amount below
+        // still routes through unconditionally.
+        if (certIn == 0) revert CertVault_ZeroAmount();
         (uint256 px18,) = oracle.pxUnguarded();
         uint256 gross18 = certIn * px18 / 1e18;
         uint256 fee18 = gross18 * cfg.redeemFeeBps / 10_000;
@@ -337,6 +357,10 @@ contract CertVault {
     function closeAll() external {
         if (msg.sender != governance) revert CertVault_OnlyGovernance();
         (uint256 px18,) = oracle.pxUnguarded();
+        // Deliberately NOT routed through _hedge/_tryHedge: those now refuse baseAmount == 0
+        // (Finding 1, Task 10 review). closeAll() is the one legitimate caller of Lighter's
+        // baseAmount == 0 "close the entire position" primitive, so it calls createOrder directly
+        // with a literal 0 here, bypassing the zero-amount guards on purpose.
         lighter.createOrder(
             lighterAccountIndex(), cfg.marketIndex, 0, oracle.toTickPrice(px18), SIDE_ASK, ORDER_TYPE_MARKET
         );
@@ -418,6 +442,12 @@ contract CertVault {
         if (gap18 > MAX_REBALANCE_NOTIONAL_18) gap18 = MAX_REBALANCE_NOTIONAL_18;
 
         uint256 certEquivalent = gap18 * 1e18 / px18;
+        // Finding 1a (Task 10 review): either this division or the size-decimals conversion
+        // inside _hedge can floor a small-but-real gap to a baseAmount of 0 — Lighter's
+        // "close the entire position" primitive, not a no-op. That is ordinary during a
+        // wind-down (outstanding notional a few cents wide at sizeDecimals = 4). Treat a
+        // dust-sized gap as already in-band rather than ever submitting a zero-amount order.
+        if (_baseAmount(certEquivalent) == 0) revert CertVault_InBand();
         _hedge(certEquivalent, px18, underHedged ? SIDE_BID : SIDE_ASK);
     }
 
@@ -438,10 +468,24 @@ contract CertVault {
         if (current + addNotional18 > max) revert CertVault_AtCapacity();
     }
 
+    /// @dev Shared size-decimals conversion used by _hedge, _tryHedge and rebalance()'s own
+    ///      pre-check, so all three agree on exactly when an amount would floor to Lighter's
+    ///      baseAmount == 0 close-all primitive (Finding 1, Task 10 review).
+    function _baseAmount(uint256 certAmount18) internal view returns (uint48) {
+        return uint48(certAmount18 * (10 ** cfg.sizeDecimals) / 1e18);
+    }
+
     /// @dev Submits the vault's own order through Lighter's priority queue. Market order because
     ///      the on-chain path exposes no IOC or post-only flag; price is passed as the guard band.
+    ///      Refuses baseAmount == 0 (Finding 1, Task 10 review): that value is Lighter's
+    ///      documented "close the entire position" primitive, not a no-op, so silently sending it
+    ///      here would close the vault's whole hedge instead of doing nothing. mintInstant,
+    ///      requestMint and rebalance() call this revert-capable path deliberately — an unhedged
+    ///      mint must not pass silently (Law 1); closeAll() bypasses this helper entirely to reach
+    ///      the primitive on purpose.
     function _hedge(uint256 certAmount18, uint256 px18, uint8 side) internal {
-        uint48 baseAmount = uint48(certAmount18 * (10 ** cfg.sizeDecimals) / 1e18);
+        uint48 baseAmount = _baseAmount(certAmount18);
+        if (baseAmount == 0) revert CertVault_ZeroHedgeAmount();
         uint32 tickPx = oracle.toTickPrice(px18);
         lighter.createOrder(lighterAccountIndex(), cfg.marketIndex, baseAmount, tickPx, side, ORDER_TYPE_MARKET);
     }
@@ -458,7 +502,12 @@ contract CertVault {
     ///      keep calling the revert-capable _hedge — minting and rebalancing may be gated, but
     ///      redemption may never be (Laws 2 and 3).
     function _tryHedge(uint256 certAmount18, uint256 px18, uint8 side) internal returns (bool placed) {
-        uint48 baseAmount = uint48(certAmount18 * (10 ** cfg.sizeDecimals) / 1e18);
+        uint48 baseAmount = _baseAmount(certAmount18);
+        // Finding 1b (Task 10 review): baseAmount == 0 is Lighter's "close the entire position"
+        // primitive, not a no-op. _queueExit already rejects certIn == 0 up front, but this stays
+        // as defence in depth — nothing here may ever forward a zero to createOrder. Treat it the
+        // same as any other unplaceable close: report "not placed" rather than submitting it.
+        if (baseAmount == 0) return false;
         try oracle.toTickPrice(px18) returns (uint32 tickPx) {
             try lighter.createOrder(lighterAccountIndex(), cfg.marketIndex, baseAmount, tickPx, side, ORDER_TYPE_MARKET)
             {

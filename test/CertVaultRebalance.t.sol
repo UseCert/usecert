@@ -101,4 +101,104 @@ contract CertVaultRebalanceTest is VaultFixture {
         vm.prank(alice);
         vault.accrueFunding(100e18);
     }
+
+    // ---------------------------------------------------------------------
+    // Task 10 review fixes: Finding 1 (CRITICAL) — baseAmount == 0 is Lighter's "close the
+    // entire position" primitive (see ILighter.sol), not a no-op. It was reachable both by an
+    // innocent rebalance() rounding its trim to zero (1a) and by anyone calling forceExit(0) /
+    // requestRedeem(0) for free (1b). See CertVault_ZeroAmount, CertVault_ZeroHedgeAmount and the
+    // CertVault_InBand check added to rebalance().
+    // ---------------------------------------------------------------------
+
+    /// Finding 1b: forceExit(0) must revert instead of forwarding baseAmount == 0 to Lighter and
+    /// wiping the vault's entire hedge for free. This is the security proof for that guard.
+    function test_forceExitZeroRevertsAndCannotWipeHedge() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+
+        int256 posBefore = lighter.positionBase(MARKET);
+        assertNotEq(posBefore, int256(0)); // sanity: there is a real hedge to protect
+
+        // A stranger holding zero certificates — certificate.burn(msg.sender, 0) would succeed
+        // trivially, so nothing but this guard stops them from reaching _tryHedge(0, ...).
+        address stranger = makeAddr("zeroStranger");
+        assertEq(cert.balanceOf(stranger), 0);
+
+        vm.prank(stranger);
+        vm.expectRevert(CertVault.CertVault_ZeroAmount.selector);
+        vault.forceExit(0);
+
+        lighter.settleBatch(); // nothing was queued by the reverted call
+        assertEq(lighter.positionBase(MARKET), posBefore); // hedge is untouched
+
+        // LOAD-BEARING CHECK (performed manually, not left in the committed suite; see
+        // task-10-report.md's fix appendix for the full transcript):
+        //  1. With ONLY _queueExit's `if (certIn == 0) revert CertVault_ZeroAmount();` removed,
+        //     this test's vm.expectRevert fails as expected
+        //     (`[FAIL: next call did not revert as expected]`) — but _tryHedge's own
+        //     `if (baseAmount == 0) return false;` defence-in-depth still catches the zero:
+        //     positionBase stayed at 99900 (unchanged), CloseOrderNotPlaced(0) fired instead.
+        //  2. With BOTH that line AND _tryHedge's `if (baseAmount == 0) return false;` removed
+        //     (reproducing the pre-fix state exactly), forceExit(0) from the zero-balance
+        //     stranger drove `lighter.positionBase(MARKET)` from 99900 straight to 0 — the entire
+        //     hedge wiped for the cost of one permissionless, zero-value call. Both lines were
+        //     then restored and the full suite re-verified green.
+    }
+
+    /// Finding 1b: requestRedeem(0) shares _queueExit with forceExit(0) and must be rejected the
+    /// same way.
+    function test_requestRedeemZeroReverts() public {
+        vm.expectRevert(CertVault.CertVault_ZeroAmount.selector);
+        vm.prank(alice);
+        vault.requestRedeem(0);
+    }
+
+    /// Finding 1a: drive outstanding supply down to a dust remainder so that the notional gap
+    /// rebalance() would trim is worth only a fraction of a cent — small enough that, after the
+    /// sizeDecimals conversion, it floors to baseAmount == 0. rebalance() must treat this as
+    /// already in-band rather than ever submitting a zero-amount order.
+    function test_rebalanceTreatsDustAsInBand() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+
+        // Redeem almost everything away, leaving 1e13 wei of cert (0.00001 uTSLA) outstanding —
+        // at PX = 355.86e18 and sizeDecimals = 4, the full notional this dust demands rounds to
+        // less than one tradeable tick (see the exact math in the fix report).
+        uint256 dust = 1e13;
+        uint256 bal = cert.balanceOf(alice);
+        vm.prank(alice);
+        vault.redeemInstant(bal - dust);
+        lighter.settleBatch();
+        assertEq(cert.totalSupply(), dust);
+
+        int256 posBefore = lighter.positionBase(MARKET);
+
+        // Attest a matching low (zero) notional for the now-dust supply -> the vault reads as
+        // fully unhedged in percentage terms, but the dollar gap is sub-tick.
+        vm.prank(attester);
+        reg.attest(address(vault), 2, 0, 100e18, 1_190_000e18);
+
+        vm.expectRevert(CertVault.CertVault_InBand.selector);
+        vault.rebalance();
+
+        lighter.settleBatch(); // no-op: the reverted call queued nothing
+        assertEq(lighter.positionBase(MARKET), posBefore); // not force-closed
+    }
+
+    /// The guards above must not break closeAll(), the one legitimate caller of Lighter's
+    /// baseAmount == 0 primitive.
+    function test_closeAllStillClosesEverything() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+        assertNotEq(lighter.positionBase(MARKET), int256(0)); // sanity: a position exists to close
+
+        vm.prank(gov);
+        vault.closeAll();
+        lighter.settleBatch();
+
+        assertEq(lighter.positionBase(MARKET), 0);
+    }
 }

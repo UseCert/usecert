@@ -80,6 +80,14 @@ contract CertOracle is ICertOracle {
             if (answer <= 0) return (false, 0, 0);
             if (block.timestamp - t > stalenessSeconds) return (false, 0, 0);
             try feed.decimals() returns (uint8 d) {
+                // Finding 2 (Task 10 review): arithmetic inside a try's success block is NOT
+                // covered by that try's own catch. decimals() >= 96 makes 10 ** (d - 18) overflow
+                // uint256 and panic uncaught here, propagating through pxUnguarded()/basisBps()/
+                // mintAllowed() — all three are documented to never revert. Bound d before doing
+                // any exponentiation: 36 is far beyond any real aggregator and safely below the
+                // ~78 exponent where the power itself would overflow. Out of range -> the feed is
+                // simply unusable, same as any other _tryFeed() failure.
+                if (d > 36) return (false, 0, 0);
                 px18 = d <= 18 ? uint256(answer) * (10 ** (18 - d)) : uint256(answer) / (10 ** (d - 18));
                 return (true, px18, t);
             } catch {
