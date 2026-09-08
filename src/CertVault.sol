@@ -37,6 +37,9 @@ contract CertVault {
     ///      on the decimals() read below, and a zero `lighter` only at bootstrap(). Named at
     ///      construction instead. Checked BEFORE targetMarginBps so the more basic error wins.
     error CertVault_ZeroAddress();
+    /// @dev FINDING 1 follow-on: a deploy-config value that would let arithmetic on the Law 2 path
+    ///      panic. See the constructor for which three and why each one matters.
+    error CertVault_ConfigOutOfBounds();
     error CertVault_UseQueuedRedeem();
     /// @dev Finding 1 (Task 10 review): a zero amount at any mint/redeem entry point is worthless
     ///      to the caller but, left unguarded, reaches _hedge/_tryHedge as baseAmount == 0 —
@@ -158,6 +161,18 @@ contract CertVault {
 
     uint256 internal constant MIN_TARGET_MARGIN_BPS = 5_000;
     uint256 internal constant MAX_TARGET_MARGIN_BPS = 10_000;
+
+    /// @notice Ceiling on both `cfg.sizeDecimals` and the collateral token's own `decimals()`.
+    /// @dev FINDING 1 follow-on. `10 ** cfg.sizeDecimals` is evaluated in _quantiseToVenue and in
+    ///      _baseAmount (the latter outside every try/catch _tryHedge owns), and
+    ///      `10 ** (decimals - 18)` in _to18/_from18. Both overflow and panic past 77 and 95. That
+    ///      is NOT a Law 2 breach — the same panics hit the mint path, so such a vault can never
+    ///      issue a certificate and has no holder to strand — it is a vault that deploys looking
+    ///      alive and panics anonymously on every call. This bound turns that into a named error at
+    ///      construction. Drawn at 18, well inside the panic, because a bound that only just holds
+    ///      is not a bound; and at <= 18 _from18 divides rather than multiplies, so it cannot
+    ///      overflow at all. See the constructor for the one config bound that IS a Law 2 fix.
+    uint8 internal constant MAX_VENUE_DECIMALS = 18;
 
     /// @notice Ceiling on the price any `quantity x price` valuation in this contract will use, in
     ///         18 decimals. Published, immutable, and deliberately absurd: 1e36 is one million
@@ -400,7 +415,37 @@ contract CertVault {
         if (c.targetMarginBps < MIN_TARGET_MARGIN_BPS || c.targetMarginBps > MAX_TARGET_MARGIN_BPS) {
             revert CertVault_TargetMarginOutOfBounds();
         }
-        _collateralDecimals = IERC20Metadata(c.collateral).decimals();
+        // FINDING 1, from re-tracing forceExit end to end AFTER the valuation fix. Three pieces of
+        // deploy config decided whether arithmetic on the redemption path could panic, and none was
+        // bounded. They are NOT equally severe and are deliberately not described as though they
+        // were — one is a reachable Law 2 breach and two are robustness:
+        //
+        //  - redeemFeeBps > 10_000 IS A REACHABLE LAW 2 BREACH, and it was measured. `gross18 -
+        //    fee18` underflows in both redeemInstant and _queueExit, while minting is entirely
+        //    unaffected (it reads mintFeeBps) — so a vault deployed this way mints happily, issues
+        //    real certificates to real holders, and then panics 0x11 inside forceExit for every one
+        //    of them, with no permissionless way out and no setter to repair it. Measured on a
+        //    fixture vault at redeemFeeBps = 10_001: the holder minted 9.9945 certificates and
+        //    forceExit reverted with panic 0x11. A fee above 100% is not a fee.
+        //  - mintFeeBps > 10_000 underflows `received - fee` in both mint paths. Bounded by the
+        //    same line, but it is the harmless direction: it kills minting, so no holder ever
+        //    exists to be stranded.
+        //  - sizeDecimals and the collateral's own decimals are ROBUSTNESS, not Law 2. Past 77 and
+        //    95 respectively, `10 ** cfg.sizeDecimals` (in _quantiseToVenue and _baseAmount) and
+        //    `10 ** (decimals - 18)` (in _to18/_from18) overflow and panic — but they panic on the
+        //    MINT path too, so such a vault can never issue a certificate and cannot strand a
+        //    holder. What the bounds buy is a named error at construction instead of a deployed
+        //    contract that looks alive and panics anonymously on every call. Drawn at 18 rather
+        //    than at the panic itself, because a bound that only just holds is not a bound: 18 is
+        //    above any real venue size_decimals and above every realistic collateral (USDG, USDC,
+        //    USDT and DAI are 6 or 18), and at <= 18 _from18 is division-only and so cannot
+        //    overflow at all.
+        if (c.sizeDecimals > MAX_VENUE_DECIMALS) revert CertVault_ConfigOutOfBounds();
+        if (c.mintFeeBps > 10_000 || c.redeemFeeBps > 10_000) revert CertVault_ConfigOutOfBounds();
+
+        uint8 collateralDecimals = IERC20Metadata(c.collateral).decimals();
+        if (collateralDecimals > MAX_VENUE_DECIMALS) revert CertVault_ConfigOutOfBounds();
+        _collateralDecimals = collateralDecimals;
 
         certificate = new Certificate(name_, symbol_, address(this));
         buffer = new BufferBook(address(this), 200);
@@ -947,7 +992,13 @@ contract CertVault {
         // (this path routes to the queue when the float is short) but a panic here is still a
         // redemption reverting on arithmetic, and the fix costs nothing. See _value18.
         uint256 gross18 = _value18(certIn, px18);
-        uint256 fee18 = gross18 * cfg.redeemFeeBps / 10_000;
+        // FINDING 1: mulDiv here too. gross18 can now legitimately be very large (the clamped
+        // valuation at an absurd price), and `gross18 * cfg.redeemFeeBps` was a checked
+        // multiplication that would have panicked past max / redeemFeeBps — reintroducing the
+        // panic one line after removing it. Total for any redeemFeeBps <= 10_000, which the
+        // constructor now enforces, and that same bound is what makes `gross18 - fee18` below
+        // provably non-underflowing.
+        uint256 fee18 = Math.mulDiv(gross18, cfg.redeemFeeBps, 10_000);
         amountOut = _from18(gross18 - fee18);
 
         if (hotBuffer() < amountOut) revert CertVault_UseQueuedRedeem();
@@ -968,7 +1019,8 @@ contract CertVault {
         // share can never exceed what was actually posted, unlike a price-derived figure that
         // grows with the market. It is a transfer between counters — no balance moves here, and
         // nothing in it can fail on funding.
-        uint256 freed = supplyBefore == 0 ? 0 : postedMargin * certIn / supplyBefore;
+        // FINDING 1: mulDiv, for the same reason and by the same argument as _queueExit's twin.
+        uint256 freed = supplyBefore == 0 ? 0 : Math.mulDiv(postedMargin, certIn, supplyBefore);
         if (freed > 0) {
             postedMargin -= freed;
             marginExcess += freed;
@@ -1012,7 +1064,9 @@ contract CertVault {
         // burned holder nothing — the sharpest Law 2 breach the contract could contain. So the
         // arithmetic had to be made total instead. See _value18 and MAX_VALUATION_PX18.
         uint256 gross18 = _value18(certIn, px18);
-        uint256 fee18 = gross18 * cfg.redeemFeeBps / 10_000;
+        // FINDING 1: see redeemInstant's twin. Total for any redeemFeeBps <= 10_000 (constructor
+        // bound), which also makes the subtraction below provably safe.
+        uint256 fee18 = Math.mulDiv(gross18, cfg.redeemFeeBps, 10_000);
         uint256 owed18 = gross18 - fee18;
         // C1: record the obligation the moment it is created, so recallMargin() can size its
         // request off what is actually owed rather than off the deposited cost basis.
@@ -1043,7 +1097,13 @@ contract CertVault {
         // Price-independent by construction: certIn <= supplyBefore always (the burn above would
         // have reverted otherwise), so this holder's share of postedMargin can never exceed what
         // was actually posted — unlike sizing off the current oracle price, which grows with it.
-        uint256 fromMargin = supplyBefore == 0 ? 0 : postedMargin * certIn / supplyBefore;
+        // FINDING 1: `postedMargin * certIn` was a checked multiplication on the Law 2 path.
+        // mulDiv makes it total using nothing but the invariant the burn above already
+        // establishes — certIn <= supplyBefore, so postedMargin * certIn <= postedMargin *
+        // supplyBefore, and mulDiv panics only past supplyBefore * 2^256, which would need
+        // postedMargin >= 2^256. No supply or price bound is required for that argument, and
+        // mulDiv floors, so the pro-rata property this comment describes is unchanged.
+        uint256 fromMargin = supplyBefore == 0 ? 0 : Math.mulDiv(postedMargin, certIn, supplyBefore);
         postedMargin -= fromMargin;
         // Task 8d: margin behind an open position is locked by the venue's initial margin
         // requirement and cannot be withdrawn until the closing order above fills in a batch —
@@ -1706,8 +1766,21 @@ contract CertVault {
     ///      _tryHedge treats out-of-range exactly like any other unplaceable close and returns
     ///      false. The zero-check in both callers still runs on this wide value, so an amount
     ///      that truncates to zero is caught before any cast, as it was before.
+    /// @dev FINDING 1, third instance and the one that mattered most after _queueExit's own. This
+    ///      was `certAmount18 * (10 ** cfg.sizeDecimals) / 1e18`, a CHECKED multiplication in the
+    ///      first statement _tryHedge executes — outside every try/catch that helper owns, which
+    ///      the NatSpec above already identifies as the reason a revert here propagates out of the
+    ///      fail-open exit path and reverts forceExit. That paragraph was written about the uint48
+    ///      narrowing and missed the multiplication sitting next to it.
+    ///
+    ///      Now total. mulDiv's 512-bit intermediate panics only when the quotient leaves uint256,
+    ///      i.e. `certAmount18 * 10**sizeDecimals >= 1e18 * 2^256`; with sizeDecimals bounded at
+    ///      MAX_VENUE_DECIMALS = 18 in the constructor the multiplier is at most 1e18, so that
+    ///      needs certAmount18 >= 2^256 and is unreachable for a uint256. The constructor bound is
+    ///      the other half of this fix and is not decoration: `10 ** cfg.sizeDecimals` panics on
+    ///      its own past 78.
     function _baseAmount(uint256 certAmount18) internal view returns (uint256) {
-        return certAmount18 * (10 ** cfg.sizeDecimals) / 1e18;
+        return Math.mulDiv(certAmount18, 10 ** cfg.sizeDecimals, 1e18);
     }
 
     /// @dev Submits the vault's own order through Lighter's priority queue. Market order because

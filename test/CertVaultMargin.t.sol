@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {CertVault} from "../src/CertVault.sol";
 import {VaultFixture} from "./helpers/VaultFixture.sol";
+import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockLighter} from "./mocks/MockLighter.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 
@@ -370,5 +371,105 @@ contract CertVaultMarginTest is VaultFixture {
             vm.expectRevert(CertVault.CertVault_ZeroAddress.selector);
             new CertVault(d, c, VENUE_WITHDRAW_CAP, SETTLE_WINDOW, "UseCert TSLA", "uTSLA");
         }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // FINDING 1, from re-tracing forceExit END TO END after the valuation fix. Three pieces of
+    // deploy config decided whether Law 2's backstop could revert on arithmetic, and none was
+    // bounded. The multiplications themselves are now Math.mulDiv (see _baseAmount, _queueExit and
+    // redeemInstant); these bounds are the other half of each argument, and without them the
+    // enumeration in the report would have had to read "unreachable if the deployer was sensible".
+    // ---------------------------------------------------------------------------------------
+
+    function _deps() internal view returns (CertVault.Deps memory) {
+        return CertVault.Deps({
+            lighter: address(lighter),
+            oracle: address(oracle),
+            registry: address(reg),
+            capacity: address(cap),
+            governance: gov
+        });
+    }
+
+    function _cfgWith(address collateral, uint8 sizeDecimals_, uint256 mintFeeBps_, uint256 redeemFeeBps_)
+        internal
+        view
+        returns (CertVault.VaultConfig memory)
+    {
+        return CertVault.VaultConfig({
+            collateral: collateral,
+            collateralAssetIndex: ASSET_IDX,
+            routeType: 0,
+            marketIndex: MARKET,
+            sizeDecimals: sizeDecimals_,
+            mintFeeBps: mintFeeBps_,
+            redeemFeeBps: redeemFeeBps_,
+            instantCap18: 10_000e18,
+            settleBandBps: 500,
+            targetMarginBps: 9_000
+        });
+    }
+
+    /// @notice `10 ** cfg.sizeDecimals` is evaluated in _quantiseToVenue and in _baseAmount (the
+    ///         latter being the FIRST statement _tryHedge executes, outside every try/catch that
+    ///         helper owns). Past 77 that exponentiation panics on its own.
+    /// @dev ROBUSTNESS, NOT LAW 2, and the distinction is asserted rather than blurred: the same
+    ///      panic hits the mint path, so a vault configured this way can never issue a certificate
+    ///      and therefore has no holder to strand. What it produces without this bound is a
+    ///      deployed contract that looks alive and panics anonymously on every call. The one
+    ///      config bound that IS a Law 2 fix is redeemFeeBps, below.
+    /// @dev LOAD-BEARING: remove the MAX_VENUE_DECIMALS check and both cases below deploy. Both 19
+    ///      and 78 are rejected — 19 because that is where the bound is drawn, 78 because that is
+    ///      where the panic actually begins, and a bound placed at the panic is a bound that only
+    ///      just holds.
+    function test_constructorRejectsAnAbsurdSizeDecimals() public {
+        vm.expectRevert(CertVault.CertVault_ConfigOutOfBounds.selector);
+        new CertVault(_deps(), _cfgWith(address(usdg), 19, 10, 10), VENUE_WITHDRAW_CAP, SETTLE_WINDOW, "x", "x");
+
+        vm.expectRevert(CertVault.CertVault_ConfigOutOfBounds.selector);
+        new CertVault(_deps(), _cfgWith(address(usdg), 78, 10, 10), VENUE_WITHDRAW_CAP, SETTLE_WINDOW, "x", "x");
+    }
+
+    /// @notice THE ONE REACHABLE LAW 2 BREACH IN THIS GROUP, and it was measured. A redeemFeeBps
+    ///         above 10_000 underflows `gross18 - fee18` in both redeemInstant and _queueExit while
+    ///         leaving minting untouched (that path reads mintFeeBps) — so the vault mints happily,
+    ///         issues real certificates to real holders, and then panics 0x11 inside forceExit for
+    ///         every one of them, with no permissionless escape and no setter to repair it.
+    /// @dev MEASURED on a fixture vault deployed at redeemFeeBps = 10_001 with the bound removed:
+    ///      the holder minted 9.9945 certificates and forceExit reverted with panic 0x11.
+    ///      mintFeeBps is bounded by the same line but is the harmless direction — it kills
+    ///      minting, so no holder ever exists to be stranded.
+    function test_constructorRejectsAFeeAboveOneHundredPercent() public {
+        vm.expectRevert(CertVault.CertVault_ConfigOutOfBounds.selector);
+        new CertVault(_deps(), _cfgWith(address(usdg), 4, 10_001, 10), VENUE_WITHDRAW_CAP, SETTLE_WINDOW, "x", "x");
+
+        vm.expectRevert(CertVault.CertVault_ConfigOutOfBounds.selector);
+        new CertVault(_deps(), _cfgWith(address(usdg), 4, 10, 10_001), VENUE_WITHDRAW_CAP, SETTLE_WINDOW, "x", "x");
+    }
+
+    /// @notice Collateral decimals above 18 make _from18 MULTIPLY rather than divide, which is the
+    ///         overflow direction on the claimRedeem payout path, and `10 ** (decimals - 18)`
+    ///         panics outright past 95. Robustness rather than Law 2, for the same reason as
+    ///         sizeDecimals above: _to18 is on the mint path too, so a vault this misconfigured
+    ///         never issues a certificate. Bounded at 18, where _from18 is division-only and
+    ///         cannot overflow at all. Every realistic collateral is 6 or 18.
+    function test_constructorRejectsCollateralDecimalsAboveEighteen() public {
+        MockERC20 wide = new MockERC20("WIDE", "WIDE", 24);
+        vm.expectRevert(CertVault.CertVault_ConfigOutOfBounds.selector);
+        new CertVault(_deps(), _cfgWith(address(wide), 4, 10, 10), VENUE_WITHDRAW_CAP, SETTLE_WINDOW, "x", "x");
+
+        MockERC20 absurd = new MockERC20("HUGE", "HUGE", 96);
+        vm.expectRevert(CertVault.CertVault_ConfigOutOfBounds.selector);
+        new CertVault(_deps(), _cfgWith(address(absurd), 4, 10, 10), VENUE_WITHDRAW_CAP, SETTLE_WINDOW, "x", "x");
+    }
+
+    /// @notice The bounds are ceilings, not narrowings: 18 on both decimals fields still deploys,
+    ///         and so does a zero fee. A bound that rejected a legitimate configuration would be a
+    ///         worse bug than the one it closed.
+    function test_constructorAcceptsTheBoundaryConfiguration() public {
+        MockERC20 eighteen = new MockERC20("E18", "E18", 18);
+        CertVault v =
+            new CertVault(_deps(), _cfgWith(address(eighteen), 18, 0, 0), VENUE_WITHDRAW_CAP, SETTLE_WINDOW, "x", "x");
+        assertEq(address(v.certificate()) != address(0), true);
     }
 }
