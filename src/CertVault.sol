@@ -46,8 +46,14 @@ contract CertVault {
     event MintRequested(uint256 indexed receiptId, address indexed user, uint256 amountIn);
     event MintSettled(uint256 indexed receiptId, uint256 certOut, uint256 fillPx18);
     event MarginPosted(uint256 marginPosted, uint256 retainedAsHotBuffer);
-    event MarginWithdrawRequested(uint256 amount, uint256 postedMarginAfter);
-    event MarginWithdrawFailed(uint256 amount);
+    /// @dev Task 8d: margin backing an open position is locked by the venue's initial margin
+    ///      requirement until the closing order fills, so submitting a withdrawal and the cash
+    ///      actually arriving are two different events, fired from two different functions.
+    ///      Requested fires from recallMargin() when a withdrawal is accepted for submission (no
+    ///      guarantee cash moves — see fact 4 in the task brief); Recalled fires only once
+    ///      getPendingBalance proves cash actually landed (_sweepPending).
+    event MarginRecallRequested(uint256 amount);
+    event MarginRecalled(uint256 amount, uint256 pendingAfter);
 
     struct Deps {
         address lighter;
@@ -103,6 +109,16 @@ contract CertVault {
     ///      liquidation — the authoritative backing figure is SolvencyRegistry's per-batch
     ///      attestation. Do not use this for solvency.
     uint256 public postedMargin;
+
+    /// @notice Margin allocated to exits (via _queueExit's pro-rata decrement of postedMargin)
+    ///         that has not yet been confirmed to have arrived back at the vault.
+    /// @dev Two-phase by necessity (Task 8d): margin backing an open position is locked by the
+    ///      venue's initial margin requirement and cannot be withdrawn until the closing order
+    ///      fills. Increased only in _queueExit (allocation); decreased only in _sweepPending, and
+    ///      only by what getPendingBalance proves actually arrived — never on withdrawal
+    ///      submission, since the venue performs no balance check and a request can be silently
+    ///      refused inside the rollup with no on-chain signal (see recallMargin()).
+    uint256 public marginPendingRecall;
 
     constructor(Deps memory d, VaultConfig memory c, string memory name_, string memory symbol_) {
         lighter = ILighter(d.lighter);
@@ -311,22 +327,16 @@ contract CertVault {
         // was actually posted — unlike sizing off the current oracle price, which grows with it.
         uint256 fromMargin = supplyBefore == 0 ? 0 : postedMargin * certIn / supplyBefore;
         postedMargin -= fromMargin;
+        // Task 8d: margin behind an open position is locked by the venue's initial margin
+        // requirement and cannot be withdrawn until the closing order above fills in a batch —
+        // submitting a withdrawal request here would be pointless at best (fact 3 in the task
+        // brief: at 50% IMR a full-supply exit is unsatisfiable at every price) and, because the
+        // venue performs no balance check and rejects insufficient requests silently inside the
+        // rollup (fact 4), indistinguishable on-chain from success. So _queueExit only records the
+        // allocation; recallMargin() is the separate, retryable step that actually withdraws once
+        // the position has closed.
         if (fromMargin > 0) {
-            // Computed before the try, not inside it: a silently truncated withdrawal amount
-            // would be worse than a revert, and this is unreachable below ~$18.4 trillion.
-            uint64 fromMargin64 = SafeCast.toUint64(fromMargin);
-            // forceExit is the Law 2 backstop and must work even if the venue itself refuses the
-            // withdrawal (withdrawals disabled, deposit cap, or a future rule) — so this call must
-            // never be able to revert the transaction. The burn and the receipt stand regardless;
-            // claimRedeem pays from the hot buffer when the margin round-trip has not returned.
-            try lighter.withdraw(lighterAccountIndex(), cfg.collateralAssetIndex, cfg.routeType, fromMargin64) {
-                emit MarginWithdrawRequested(fromMargin, postedMargin);
-            } catch {
-                // Restore the counter: without this a refused withdrawal would permanently
-                // understate postedMargin and shrink every later holder's share.
-                postedMargin += fromMargin;
-                emit MarginWithdrawFailed(fromMargin);
-            }
+            marginPendingRecall += fromMargin;
         }
 
         if (isForce) emit ForceExited(receiptId, msg.sender, certIn);
@@ -340,15 +350,37 @@ contract CertVault {
         RedeemReceipt storage r = redeemReceipts[receiptId];
         if (r.user == address(0) || r.paid) revert CertVault_NothingToClaim();
 
-        uint128 pending = lighter.getPendingBalance(address(this), cfg.collateralAssetIndex);
-        if (pending > 0) {
-            lighter.withdrawPendingBalance(address(this), cfg.collateralAssetIndex, pending);
-        }
+        _sweepPending();
 
         amountOut = _from18(r.owed18);
         r.paid = true;
         IERC20(cfg.collateral).safeTransfer(r.user, amountOut);
         emit RedeemClaimed(receiptId, amountOut);
+    }
+
+    /// @notice Bring exit-allocated margin home from the venue. Permissionless and retryable.
+    /// @dev Two-phase by necessity: margin backing an open position is locked by the venue's
+    ///      initial margin requirement and cannot be withdrawn until the closing order fills. So
+    ///      this is a separate step that anyone may retry until it lands. It is deliberately NOT
+    ///      receipt-scoped: a single counter avoids the per-receipt keeper that would otherwise be
+    ///      required inside a path that must work with no off-chain services (see task-8d brief —
+    ///      a TTL'd per-receipt hold was built and judged fatal for double-counting headroom).
+    ///      Fail-open: the venue performs no balance check and rejects insufficient requests
+    ///      silently inside the rollup, so a failure here must never revert the caller.
+    function recallMargin() external {
+        _sweepPending();
+        uint256 want = marginPendingRecall;
+        if (want == 0) return;
+
+        // A request above uint64 is unreachable below ~$18.4T; revert loudly rather than truncate.
+        uint64 amount = SafeCast.toUint64(want);
+
+        try lighter.withdraw(lighterAccountIndex(), cfg.collateralAssetIndex, cfg.routeType, amount) {
+            emit MarginRecallRequested(want);
+        } catch {
+            // Venue refused at request time (withdrawals disabled, deposit cap, future rule).
+            // marginPendingRecall is intentionally NOT reduced — the caller may retry.
+        }
     }
 
     /// @notice Wind-down: close the entire position using Lighter's baseAmount == 0 primitive.
@@ -461,6 +493,24 @@ contract CertVault {
     }
 
     // ---------------------------------------------------------------- internals
+
+    /// @notice Collect any margin the venue has actually released, and only then reduce the
+    ///         outstanding recall. getPendingBalance is the sole on-chain proof a withdrawal
+    ///         executed (Task 8d, fact 5) — L1 acceptance of the withdraw() call carries none.
+    /// @dev min(...) guards against a sweep larger than marginPendingRecall (e.g. funding credited
+    ///      by the venue landing in the same pending balance) flooring the counter at 0 instead of
+    ///      underflowing.
+    function _sweepPending() internal returns (uint256 swept) {
+        uint128 pending = lighter.getPendingBalance(address(this), cfg.collateralAssetIndex);
+        if (pending == 0) return 0;
+
+        lighter.withdrawPendingBalance(address(this), cfg.collateralAssetIndex, pending);
+        swept = uint256(pending);
+
+        uint256 applied = swept < marginPendingRecall ? swept : marginPendingRecall;
+        marginPendingRecall -= applied;
+        emit MarginRecalled(applied, marginPendingRecall);
+    }
 
     function _requireCapacity(uint256 addNotional18) internal view {
         uint256 max = capacity.maxNotional18(address(this), buffer.capacity18(address(this)));

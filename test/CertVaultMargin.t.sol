@@ -168,8 +168,14 @@ contract CertVaultMarginTest is VaultFixture {
         vm.prank(alice);
         uint256 id = vault.requestRedeem(bal);
 
-        assertEq(lighter.marginBalance(), marginBefore - expectedFromMargin);
+        // Task 8d: the pro-rata share is now *allocated* to marginPendingRecall, not withdrawn
+        // from Lighter at request time — margin behind an open position is locked by the venue's
+        // initial margin requirement until the closing order fills in a batch, so
+        // lighter.marginBalance() is untouched here. See CertVaultRecall.t.sol for the separate,
+        // retryable recallMargin() step that actually withdraws once the position has closed.
+        assertEq(lighter.marginBalance(), marginBefore);
         assertEq(vault.postedMargin(), postedBefore - expectedFromMargin);
+        assertEq(vault.marginPendingRecall(), expectedFromMargin);
 
         lighter.settleBatch();
 
@@ -216,21 +222,31 @@ contract CertVaultMarginTest is VaultFixture {
         vm.prank(alice);
         vault.requestRedeem(bal);
 
-        assertEq(lighter.marginBalance(), marginBefore - expectedFromMargin);
+        // Task 8d: the pro-rata share is allocated to marginPendingRecall, not withdrawn from
+        // Lighter at request time (see _queueExit's doc comment) — so lighter.marginBalance() is
+        // untouched here. The core proof this test exists for — sizing tracks what was actually
+        // posted, not a recomputation off the raised price — now lives in marginPendingRecall.
+        assertEq(lighter.marginBalance(), marginBefore);
+        assertEq(vault.marginPendingRecall(), expectedFromMargin);
         assertEq(vault.postedMargin(), 0);
     }
 
-    /// @notice Law 2 guard for this task: forceExit must survive the venue itself refusing the
-    ///         withdrawal (here modelled as an on-chain deposit-cap rejection, which is a real
-    ///         validation `AdditionalZkLighter.withdraw()` performs). The burn and the receipt must
-    ///         stand, and the counter must be restored rather than silently written off.
+    /// @notice Task 8d: _queueExit no longer calls lighter.withdraw at all — the venue's deposit
+    ///         cap is therefore irrelevant to forceExit itself (it only matters to a later
+    ///         recallMargin() call; see CertVaultRecall.t.sol's
+    ///         test_recallMarginIsRetryableAndFailOpen for that retryability proof). This test
+    ///         previously proved forceExit survives a refused withdrawal by restoring postedMargin
+    ///         after a caught revert; that restore path no longer exists because there is no
+    ///         withdrawal to refuse here. What must still hold: forceExit succeeds unconditionally
+    ///         regardless of depositCapTicks, and its pro-rata share is allocated away from
+    ///         postedMargin into marginPendingRecall permanently, not restored.
     function test_forceExitSurvivesVenueRefusingWithdraw() public {
         vm.prank(alice);
         vault.mintInstant(3_558.6e6);
         uint256 bal = cert.balanceOf(alice);
         uint256 postedBefore = vault.postedMargin();
 
-        lighter.setDepositCapTicks(1); // any real withdrawal request will be refused
+        lighter.setDepositCapTicks(1); // would refuse a real withdrawal request; irrelevant here
 
         vm.prank(alice);
         uint256 id = vault.forceExit(bal);
@@ -240,7 +256,8 @@ contract CertVaultMarginTest is VaultFixture {
         (address user,,,, bool paid) = vault.redeemReceipts(id);
         assertEq(user, alice);
         assertFalse(paid);
-        assertEq(vault.postedMargin(), postedBefore);
+        assertEq(vault.postedMargin(), 0); // fully allocated away, not restored
+        assertEq(vault.marginPendingRecall(), postedBefore); // allocation landed in the recall counter
     }
 
     /// @notice Load-bearing regression: under the old price-derived sizing, fromMargin could
@@ -261,9 +278,16 @@ contract CertVaultMarginTest is VaultFixture {
         assertEq(cert.balanceOf(alice), 0);
     }
 
-    /// @notice Redeeming in unequal parts must not strand margin: each partial redemption pulls
-    ///         exactly its pro-rata share of what remains posted, and the sum across all parts
-    ///         recovers the original posted margin (up to floor-division dust).
+    /// @notice Redeeming in unequal parts must not strand margin: each partial redemption
+    ///         allocates exactly its pro-rata share of what remains posted to marginPendingRecall,
+    ///         and the sum across all parts recovers the original posted margin (up to
+    ///         floor-division dust).
+    /// @dev Task 8d: this test previously measured the sum via lighter.marginBalance() dropping,
+    ///      because _queueExit used to submit a withdrawal per partial redeem. It no longer does
+    ///      (margin behind an open position is locked by IMR until the closing order fills — see
+    ///      _queueExit's doc comment) — so the conservation proof now runs against
+    ///      marginPendingRecall, which accumulates the allocation instead of lighter.marginBalance
+    ///      dropping. lighter.marginBalance() is asserted unchanged throughout.
     function test_partialRedemptionsDoNotStrandMargin() public {
         vm.prank(alice);
         vault.mintInstant(3_558.6e6);
@@ -274,29 +298,34 @@ contract CertVaultMarginTest is VaultFixture {
         uint256 part3 = bal - part1 - part2; // remainder: sums exactly to bal
 
         uint256 originalPosted = vault.postedMargin();
-        uint256 totalWithdrawn;
+        uint256 marginBefore = lighter.marginBalance();
+        uint256 totalAllocated;
 
-        totalWithdrawn += _redeemPartAndCheck(part1);
-        totalWithdrawn += _redeemPartAndCheck(part2);
-        totalWithdrawn += _redeemPartAndCheck(part3);
+        totalAllocated += _redeemPartAndCheck(part1);
+        totalAllocated += _redeemPartAndCheck(part2);
+        totalAllocated += _redeemPartAndCheck(part3);
 
         assertEq(cert.balanceOf(alice), 0);
         assertEq(vault.postedMargin(), 0);
-        assertApproxEqAbs(totalWithdrawn, originalPosted, 2);
+        assertEq(vault.marginPendingRecall(), totalAllocated);
+        assertEq(lighter.marginBalance(), marginBefore); // untouched — no withdrawal submitted
+        assertApproxEqAbs(totalAllocated, originalPosted, 2);
     }
 
     /// @dev Redeems `certIn` from alice, asserting postedMargin lands exactly where the same
-    ///      pro-rata formula the contract uses says it should, and returns the margin withdrawn.
-    function _redeemPartAndCheck(uint256 certIn) internal returns (uint256 withdrawn) {
+    ///      pro-rata formula the contract uses says it should, and returns the amount allocated to
+    ///      marginPendingRecall (Task 8d: allocation, not a venue withdrawal — see _queueExit).
+    function _redeemPartAndCheck(uint256 certIn) internal returns (uint256 allocated) {
         uint256 supply = cert.totalSupply();
         uint256 posted = vault.postedMargin();
         uint256 expectedFromMargin = posted * certIn / supply;
-        uint256 marginBefore = lighter.marginBalance();
+        uint256 pendingBefore = vault.marginPendingRecall();
 
         vm.prank(alice);
         vault.requestRedeem(certIn);
 
-        withdrawn = marginBefore - lighter.marginBalance();
+        allocated = vault.marginPendingRecall() - pendingBefore;
+        assertEq(allocated, expectedFromMargin);
         assertEq(vault.postedMargin(), posted - expectedFromMargin);
     }
 
