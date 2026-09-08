@@ -58,11 +58,13 @@ contract CertVault {
     ///      twin of CertVault_AwaitingSettlement, and a retryable "not yet" for the same reasons:
     ///      it reverts WITHOUT setting r.settled, so the receipt stays refundable forever, and
     ///      stageRefund() has ALREADY moved this escrow's posted share into marginPendingRecall,
-    ///      so the permissionless recallMargin() / _sweepPending() / seedBuffer trio can each
-    ///      create the funding condition. That last clause is the whole point: the previous shape
-    ///      of this function reallocated and paid atomically, so the reallocation was rolled back
-    ///      by the very revert that made it necessary and no external call could ever unstick the
-    ///      escrow. See stageRefund().
+    ///      so the two permissionless entry points recallMargin() (which submits the withdrawal
+    ///      and, on a later call, sweeps it home) and seedBuffer() can each create the funding
+    ///      condition. NOT _sweepPending(), which is internal and therefore not an escape route of
+    ///      its own — only something that calls it is. Having a real escape is the whole point:
+    ///      the previous shape of this function reallocated and paid atomically, so the
+    ///      reallocation was rolled back by the very revert that made it necessary and no external
+    ///      call could ever unstick the escrow. See stageRefund().
     error CertVault_RefundAwaitingSettlement();
     /// @dev refundMint before stageRefund. Escapable by anyone, immediately: stageRefund() is
     ///      permissionless, takes no funding, and cannot revert on it.
@@ -75,8 +77,11 @@ contract CertVault {
     event MintRefunded(uint256 indexed receiptId, address indexed user, uint256 amountOut);
     /// @dev Phase 1 of a refund. marginReallocated is what moved from postedMargin into
     ///      marginPendingRecall (so recallMargin() will ask the venue for it); hedgeClosePlaced
-    ///      records whether the closing order for the unsettled mint's hedge actually went in,
-    ///      since that step is fail-open and must never be silently lost when it does not.
+    ///      records whether the closing order was ACCEPTED FOR SUBMISSION — the same
+    ///      submitted-versus-arrived distinction MarginRecallRequested/MarginRecalled draw below,
+    ///      and for the same reason: createOrder only enqueues a priority request, so a true here
+    ///      is not a fill. Emitted either way, since the close is fail-open and a close that did
+    ///      not go in must never be silently lost.
     event RefundStaged(uint256 indexed receiptId, uint256 marginReallocated, bool hedgeClosePlaced);
     event MarginPosted(uint256 marginPosted, uint256 retainedAsHotBuffer);
     /// @dev Task 8d: margin backing an open position is locked by the venue's initial margin
@@ -116,9 +121,12 @@ contract CertVault {
     ///      receipt, which minted 280.7 certificates against a hedge covering 140.4.
     /// @dev refundStaged and indicativeCerts are the two-phase refund's state. refundStaged is
     ///      what makes stageRefund idempotent-once and what refundMint requires; indicativeCerts
-    ///      is the certificate amount requestMint actually hedged, recorded so a refund can close
-    ///      exactly that exposure rather than guessing it back out of price at refund time (the
-    ///      price will have moved, and the hedge was sized at the request price).
+    ///      is the certificate amount requestMint SUBMITTED a hedge order for — not a confirmed
+    ///      fill, since orders fill asynchronously in a later batch and nothing here observes that.
+    ///      Recorded so a refund can close that exposure rather than guessing it back out of price
+    ///      at refund time (the price will have moved; the hedge was sized at the request price).
+    ///      The gap between "submitted" and "held" is where stageRefund's open-loop close can
+    ///      over-close — see the comment on that close.
     struct MintReceipt {
         address user;
         uint256 escrow;
@@ -297,11 +305,12 @@ contract CertVault {
             requestPx18: px18,
             requestedAt: uint64(block.timestamp),
             refundStaged: false,
-            // Step 1 of the refund fix: record exactly what the _hedge below is about to open, so
-            // stageRefund can close that same exposure. Without it a refund left the vault long
+            // Step 1 of the refund fix: record what the _hedge below is about to submit an order
+            // for, so stageRefund can close that exposure. Without it a refund left the vault long
             // against certificates that were never minted (measured: totalSupply 0 against a
-            // 1,403,641-tick position on a 50k mint), breaching Law 1 until rebalance() — a
-            // bounded, attester-dependent trim — happened to grind it down.
+            // 1,403,641-tick position on a 50k mint), breaching Law 1 with NO permissionless way
+            // back — rebalance() cannot trim it, because _solvency reports deltaBps == 10_000 at
+            // zero supply and rebalance() therefore reverts CertVault_InBand.
             indicativeCerts: indicative
         });
 
@@ -344,13 +353,18 @@ contract CertVault {
     ///      funding check would roll the reallocation back with it, so the reallocation could
     ///      never run in the one situation it exists for — an escrow the vault cannot currently
     ///      afford. That is precisely how escrow became permanently stranded. This phase touches
-    ///      no balances and performs no transfer, so it always succeeds, and it can therefore be
-    ///      staged long before the vault can afford the payout.
+    ///      no balances and performs no transfer, so nothing in it can fail on funding, and it can
+    ///      therefore be staged long before the vault can afford the payout. (It is not
+    ///      unconditionally infallible: it inherits _tryHedge's one unguarded read, the
+    ///      lighterAccountIndex() argument evaluated inside _tryHedge's own try — see _tryHedge.
+    ///      That is pre-existing and equally true of _queueExit, the Law 2 backstop.)
     ///
     ///      Law 2: nothing here can hold user value behind it. refundMint's
-    ///      CertVault_RefundNotStaged is escaped by this call, which anyone may make; this call's
-    ///      own reverts are "already staged" and "window still open", and in the latter case
-    ///      settleMint is still the live path.
+    ///      CertVault_RefundNotStaged is escaped by this call, which anyone may make. This call's
+    ///      own reverts are CertVault_BadReceipt (unknown, already settled, or already staged —
+    ///      the three share one error, so a caller cannot tell them apart; the receipt getter
+    ///      can) and CertVault_SettleWindowNotExpired, in which case settleMint is still the live
+    ///      path.
     function stageRefund(uint256 receiptId) external {
         MintReceipt storage r = mintReceipts[receiptId];
         if (r.user == address(0) || r.settled) revert CertVault_BadReceipt();
@@ -374,15 +388,36 @@ contract CertVault {
             marginPendingRecall += posted;
         }
 
-        // Close the hedge this unsettled mint opened. requestMint hedged r.indicativeCerts at the
-        // request price; the certificates were never minted, so leaving it open makes the vault
-        // long against nothing (Law 1). Fail-open, using the exit path's _tryHedge and not _hedge:
-        // an unplaceable close must not block the refund, the event below records that it did not
-        // go in, and rebalance() remains the backstop.
+        // Close the hedge this unsettled mint opened. requestMint submitted an order for
+        // r.indicativeCerts at r.requestPx18; the certificates were never minted, so leaving that
+        // exposure open makes the vault long against nothing (Law 1). Fail-open, using the exit
+        // path's _tryHedge and not _hedge: an unplaceable close must not block the refund, and the
+        // event below records that it did not go in.
+        //
+        // Priced off r.requestPx18, NOT oracle.pxUnguarded(). Two reasons, the first of which is
+        // the Law 2 one: pxUnguarded() is documented never to revert but is not actually
+        // revert-proof (CertOracle._tryFeed computes `block.timestamp - t` inside a try's SUCCESS
+        // block, which that try's catch does not cover, so a feed reporting a future updatedAt
+        // panics straight through it) — and an unwrapped external read here would make
+        // CertVault_RefundNotStaged permanent, recreating the exact Critical this split exists to
+        // fix. r.requestPx18 needs no call at all. Second, it is the more correct number: it is
+        // the price this hedge was sized at. It is non-zero for every receipt requestMint creates,
+        // since oracle.px() reverts on a non-positive answer, and toTickPrice is inside
+        // _tryHedge's try either way.
+        //
+        // OPEN, NOT FIXED (see refund-fix-report.md): this close is open-loop. ILighter exposes no
+        // position getter, so nothing here can net r.indicativeCerts against what the vault
+        // actually holds. If closeAll() or rebalance() has already flattened or trimmed the
+        // position, this ASK opens a SHORT instead of closing a long — and rebalance() cannot
+        // undo it, because _solvency reports deltaBps == 10_000 (dead centre of the band) whenever
+        // supply is 0, so rebalance() reverts CertVault_InBand at exactly the moment a trim is
+        // needed. Closing that gap needs a design decision (a position counter here, a getter on
+        // ILighter, or a rebalance() that treats a position at zero supply as maximally
+        // out-of-band), not a comment. Do not restate "rebalance() is the backstop" here: it is
+        // not, and an earlier version of this comment said so wrongly.
         bool placed = false;
         if (r.indicativeCerts > 0) {
-            (uint256 px18,) = oracle.pxUnguarded();
-            placed = _tryHedge(r.indicativeCerts, px18, SIDE_ASK);
+            placed = _tryHedge(r.indicativeCerts, r.requestPx18, SIDE_ASK);
         }
 
         emit RefundStaged(receiptId, posted, placed);
@@ -420,7 +455,7 @@ contract CertVault {
         amountOut = r.escrow;
         if (IERC20(cfg.collateral).balanceOf(address(this)) < amountOut) {
             // Retryable, not a dead end: stageRefund has already moved this escrow's posted share
-            // into marginPendingRecall, and recallMargin(), _sweepPending() and seedBuffer are all
+            // into marginPendingRecall, and recallMargin() and seedBuffer() are both
             // permissionless. The receipt stays unsettled and staged.
             revert CertVault_RefundAwaitingSettlement();
         }
@@ -606,7 +641,8 @@ contract CertVault {
         // A staged mint refund reaches this sizing through marginPendingRecall, not through
         // totalOwedOutstanding: stageRefund() moves the escrow's posted share into that counter,
         // and the `max` below therefore already asks the venue for it. Proven by test, not by
-        // reading — see test_recallMarginRequestsTheStagedRefundShare / ..._DoesNotRequestUnstaged.
+        // reading — see test_recallMarginRequestsTheStagedRefundShare and its negative control
+        // test_recallMarginDoesNotRequestUnstagedRefundEscrow.
         // Always recall at least the allocated basis; ask for the shortfall when it is larger,
         // because the venue fulfils min(request, available) and _sweepPending reconciles what
         // actually arrives.
@@ -773,8 +809,21 @@ contract CertVault {
     ///      recallMargin (contradicting its own fail-open NatSpec). On failure this returns 0 and
     ///      leaves both counters untouched, so the caller simply retries later; both callers
     ///      already tolerate a zero sweep.
+    /// @dev The getPendingBalance read is wrapped too, not just the drain. It is a view, but it is
+    ///      still an unguarded venue call sitting inside four paths that must not revert
+    ///      (claimRedeem, recallMargin, closeAll and now refundMint) — a venue paused behind a
+    ///      proxy, or an asset index deconfigured, would have reverted refundMint with a venue
+    ///      error while the buffer was fully funded, i.e. with something other than the retryable
+    ///      CertVault_RefundAwaitingSettlement, and would have blocked claimRedeem outright. On
+    ///      failure this returns 0 with both counters untouched, which is what this function's own
+    ///      NatSpec above already promised and what every caller already tolerates.
     function _sweepPending() internal returns (uint256 swept) {
-        uint128 pending = lighter.getPendingBalance(address(this), cfg.collateralAssetIndex);
+        uint128 pending;
+        try lighter.getPendingBalance(address(this), cfg.collateralAssetIndex) returns (uint128 p) {
+            pending = p;
+        } catch {
+            return 0;
+        }
         if (pending == 0) return 0;
 
         try lighter.withdrawPendingBalance(address(this), cfg.collateralAssetIndex, pending) {

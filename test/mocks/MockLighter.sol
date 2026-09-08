@@ -33,6 +33,11 @@ contract MockLighter is ILighter {
     /// @dev M1: models the venue refusing to drain an already-credited pending balance (paused
     ///      withdrawals, a rollup rule, a future guard). CertVault._sweepPending must survive it.
     error DrainRefused();
+    /// @dev Models the venue's pending-balance VIEW reverting — a proxy paused behind the read, an
+    ///      asset index deconfigured, an upgrade mid-flight. _sweepPending read this unguarded
+    ///      until the refund fix, which meant a broken view could revert refundMint (and
+    ///      claimRedeem) with a venue error while the buffer was fully funded.
+    error PendingReadRefused();
 
     IERC20 public immutable collateral;
     uint16 public immutable collateralAssetIndex;
@@ -57,6 +62,8 @@ contract MockLighter is ILighter {
     uint256 public depositCapTicks = type(uint64).max;
     /// @dev M1: when set, withdrawPendingBalance reverts DrainRefused().
     bool public shouldRevertDrain;
+    /// @dev When set, getPendingBalance reverts PendingReadRefused().
+    bool public shouldRevertPendingRead;
 
     Order[] private _queue;
     mapping(address => mapping(uint16 => uint128)) private _pending;
@@ -88,6 +95,10 @@ contract MockLighter is ILighter {
 
     function setShouldRevertDrain(bool v) external {
         shouldRevertDrain = v;
+    }
+
+    function setShouldRevertPendingRead(bool v) external {
+        shouldRevertPendingRead = v;
     }
 
     function deposit(address to, uint16, uint8, uint256 amount) external payable {
@@ -162,6 +173,7 @@ contract MockLighter is ILighter {
     }
 
     function getPendingBalance(address owner, uint16 assetIndex) external view returns (uint128) {
+        if (shouldRevertPendingRead) revert PendingReadRefused();
         return _pending[owner][assetIndex];
     }
 

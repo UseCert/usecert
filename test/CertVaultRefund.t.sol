@@ -292,6 +292,69 @@ contract CertVaultRefundTest is VaultFixture {
         assertEq(uint256(lighter.getPendingBalance(address(vault), ASSET_IDX)), POSTED);
     }
 
+    /// @notice `CertVault_RefundNotStaged` must never become permanent, or the Critical is back in
+    ///         a new shape. `stageRefund` originally read `oracle.pxUnguarded()` unwrapped to price
+    ///         the closing order, and that read is NOT actually revert-proof despite its NatSpec:
+    ///         `CertOracle._tryFeed` computes `block.timestamp - t` inside a try's SUCCESS block,
+    ///         which that try's own catch does not cover, so a feed reporting a future
+    ///         `updatedAt` panics straight through `pxUnguarded()` and its `lastGoodPx18` fallback
+    ///         is unreachable. `oracle` and `feed` are both immutable, so there is no swap. This
+    ///         proves the panic is real and that `stageRefund` no longer touches the oracle at all.
+    ///         Found in self-review, not by the brief.
+    function test_stageRefundSurvivesAnOracleThatPanicsOnRead() public {
+        uint256 id = _drainThenRequestPastWindow();
+
+        // The feed starts reporting a timestamp in the future and freezes there.
+        feed.set(int256(PX / 1e10), block.timestamp + 1 days);
+
+        // The documented-never-to-revert read does revert. This assertion is the finding.
+        vm.expectRevert(); // Panic(0x11), arithmetic underflow, raised inside CertOracle
+        oracle.pxUnguarded();
+
+        // stageRefund does not care: it prices the close off the receipt's own requestPx18.
+        vault.stageRefund(id);
+        (,,,,, bool staged,) = vault.mintReceipts(id);
+        assertTrue(staged, "staging was blocked by a broken oracle");
+        assertEq(vault.marginPendingRecall(), POSTED);
+        assertEq(lighter.queuedOrderCount(), 1, "the close was not even submitted");
+
+        // And the whole refund completes with the oracle still broken — no path here reads it.
+        vault.recallMargin();
+        lighter.settleBatch();
+        vault.recallMargin();
+        uint256 before = usdg.balanceOf(alice);
+        vault.refundMint(id);
+        assertEq(usdg.balanceOf(alice) - before, ESCROW);
+        assertEq(lighter.positionBase(MARKET), 0);
+    }
+
+    /// @notice A venue whose pending-balance VIEW reverts must not block a refund the vault can
+    ///         already afford. `_sweepPending` read `getPendingBalance` unguarded (only the drain
+    ///         was wrapped), so a paused or misconfigured venue would have reverted `refundMint`
+    ///         with a venue error while the buffer was fully funded — a revert that is neither
+    ///         `CertVault_RefundAwaitingSettlement` nor escapable by anything, since every
+    ///         documented escape (`recallMargin`, and `claimRedeem` on the redeem side) sweeps
+    ///         through the same read. Found in self-review, not by the brief.
+    function test_refundSurvivesABrokenPendingBalanceRead() public {
+        uint256 id = _drainThenRequestPastWindow();
+        vault.stageRefund(id);
+
+        // Fund the buffer so the ONLY thing that could refuse the payout is the broken read.
+        vault.seedBuffer(50_000e6);
+        assertGe(vault.hotBuffer(), ESCROW);
+
+        lighter.setShouldRevertPendingRead(true);
+
+        uint256 before = usdg.balanceOf(alice);
+        uint256 out = vault.refundMint(id); // must not propagate the venue's error
+        assertEq(out, ESCROW);
+        assertEq(usdg.balanceOf(alice) - before, ESCROW);
+
+        // The same read is on claimRedeem's and recallMargin's paths; neither may propagate it.
+        lighter.setShouldRevertPendingRead(true);
+        vault.recallMargin(); // fail-open, must not revert
+    }
+
     /// @notice The sharp edge of the `posted > postedMargin` cap, measured rather than assumed.
     ///         A full-supply forceExit allocates ALL of postedMargin to itself, so a refund staged
     ///         afterwards gets a reallocation of exactly ZERO. That cap is correct and must stay —
