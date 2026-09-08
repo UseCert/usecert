@@ -128,7 +128,8 @@ contract CertVaultMintTest is VaultFixture {
                 mintFeeBps: 10,
                 redeemFeeBps: 10,
                 instantCap18: 10_000e18,
-                settleBandBps: 500
+                settleBandBps: 500,
+                targetMarginBps: 9_000
             }),
             "UseCert TSLA",
             "uTSLA"

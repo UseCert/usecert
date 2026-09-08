@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {ILighter} from "../../src/interfaces/ILighter.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "openzeppelin-contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /// @notice Test double reproducing Lighter's asynchronous priority-queue semantics.
 /// @dev Orders NEVER fill in the calling transaction. Call settleBatch() to fill.
@@ -18,9 +19,12 @@ contract MockLighter is ILighter {
     error AccountIsNotRegistered();
     error MarketIndexTooHigh();
     error BadOrderType();
+    error InsufficientMargin();
 
     IERC20 public immutable collateral;
     uint16 public immutable collateralAssetIndex;
+    uint8 public immutable sizeDecimals;
+    uint8 private immutable _collateralDecimals;
 
     mapping(address => uint48) public addressToAccountIndex;
     uint48 private _nextAccountIndex = 3;
@@ -31,13 +35,21 @@ contract MockLighter is ILighter {
     mapping(uint16 => int256) public positionBase;
     /// @dev mark price scaled to 1e18
     mapping(uint16 => uint256) public markPrice;
+    /// @dev required margin as a fraction of resulting notional, in bps. Default 5_000 (2x).
+    uint256 public requiredMarginBps = 5_000;
 
     Order[] private _queue;
     mapping(address => mapping(uint16 => uint128)) private _pending;
 
-    constructor(IERC20 _collateral, uint16 _collateralAssetIndex) {
+    constructor(IERC20 _collateral, uint16 _collateralAssetIndex, uint8 _sizeDecimals) {
         collateral = _collateral;
         collateralAssetIndex = _collateralAssetIndex;
+        sizeDecimals = _sizeDecimals;
+        _collateralDecimals = IERC20Metadata(address(_collateral)).decimals();
+    }
+
+    function setRequiredMarginBps(uint256 bps) external {
+        requiredMarginBps = bps;
     }
 
     function setMarkPrice(uint16 marketIndex, uint256 px18) external {
@@ -86,15 +98,32 @@ contract MockLighter is ILighter {
     }
 
     /// @notice Fill every queued order at the current mark price. Emulates one batch executing.
+    /// @dev Fills that increase |position| must be covered by requiredMarginBps of the resulting
+    ///      notional, valued at markPrice — the way a real venue would reject an under-margined
+    ///      order rather than silently fill it.
     function settleBatch() external {
         for (uint256 i = 0; i < _queue.length; ++i) {
             Order memory o = _queue[i];
+            int256 previous = positionBase[o.marketIndex];
             int256 signed = o.isAsk == 1 ? -int256(uint256(o.baseAmount)) : int256(uint256(o.baseAmount));
+            int256 resulting;
             if (o.baseAmount == 0) {
                 // baseAmount == 0 means close the entire position
-                positionBase[o.marketIndex] = 0;
+                resulting = 0;
             } else {
-                positionBase[o.marketIndex] += signed;
+                resulting = previous + signed;
+            }
+            positionBase[o.marketIndex] = resulting;
+
+            uint256 absResulting = resulting >= 0 ? uint256(resulting) : uint256(-resulting);
+            uint256 absPrevious = previous >= 0 ? uint256(previous) : uint256(-previous);
+            if (absResulting > absPrevious) {
+                uint256 notional18 = absResulting * markPrice[o.marketIndex] / (10 ** sizeDecimals);
+                uint256 requiredMargin18 = notional18 * requiredMarginBps / 10_000;
+                uint256 marginBalance18 = _collateralDecimals <= 18
+                    ? marginBalance * (10 ** (18 - _collateralDecimals))
+                    : marginBalance / (10 ** (_collateralDecimals - 18));
+                if (marginBalance18 < requiredMargin18) revert InsufficientMargin();
             }
         }
         delete _queue;

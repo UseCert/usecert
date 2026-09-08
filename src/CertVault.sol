@@ -28,10 +28,13 @@ contract CertVault {
     error CertVault_FillPriceOutOfBand();
     error CertVault_OnlyGovernance();
     error CertVault_NothingToClaim();
+    error CertVault_TargetMarginOutOfBounds();
+    error CertVault_UseQueuedRedeem();
 
     event Minted(address indexed user, uint256 amountIn, uint256 certOut, uint256 px18, uint256 fee);
     event MintRequested(uint256 indexed receiptId, address indexed user, uint256 amountIn);
     event MintSettled(uint256 indexed receiptId, uint256 certOut, uint256 fillPx18);
+    event MarginPosted(uint256 marginPosted, uint256 retainedAsHotBuffer);
 
     struct Deps {
         address lighter;
@@ -51,6 +54,7 @@ contract CertVault {
         uint256 redeemFeeBps;
         uint256 instantCap18;
         uint256 settleBandBps;
+        uint256 targetMarginBps;
     }
 
     struct MintReceipt {
@@ -62,6 +66,9 @@ contract CertVault {
     uint8 internal constant ORDER_TYPE_MARKET = 1;
     uint8 internal constant SIDE_BID = 0;
     uint8 internal constant SIDE_ASK = 1;
+
+    uint256 internal constant MIN_TARGET_MARGIN_BPS = 5_000;
+    uint256 internal constant MAX_TARGET_MARGIN_BPS = 10_000;
 
     ILighter public immutable lighter;
     ICertOracle public immutable oracle;
@@ -85,6 +92,9 @@ contract CertVault {
         capacity = ICapacityOracle(d.capacity);
         governance = d.governance;
         cfg = c;
+        if (c.targetMarginBps < MIN_TARGET_MARGIN_BPS || c.targetMarginBps > MAX_TARGET_MARGIN_BPS) {
+            revert CertVault_TargetMarginOutOfBounds();
+        }
         _collateralDecimals = IERC20Metadata(c.collateral).decimals();
 
         certificate = new Certificate(name_, symbol_, address(this));
@@ -110,6 +120,11 @@ contract CertVault {
         return lighter.addressToAccountIndex(address(this));
     }
 
+    /// @notice The vault's own collateral balance — the float that serves instant redemptions.
+    function hotBuffer() public view returns (uint256) {
+        return IERC20(cfg.collateral).balanceOf(address(this));
+    }
+
     /// @notice Pre-fund the buffer. Permissionless: it can only ever add value to the vault.
     function seedBuffer(uint256 amount) external {
         IERC20(cfg.collateral).safeTransferFrom(msg.sender, address(this), amount);
@@ -133,6 +148,7 @@ contract CertVault {
 
         IERC20(cfg.collateral).safeTransferFrom(msg.sender, address(this), amountIn);
         certificate.mint(msg.sender, certOut);
+        _postMargin(amountIn - fee);
         _hedge(certOut, px18, SIDE_BID);
 
         emit Minted(msg.sender, amountIn, certOut, px18, fee);
@@ -154,6 +170,7 @@ contract CertVault {
         receiptId = _nextReceiptId++;
         mintReceipts[receiptId] = MintReceipt({user: msg.sender, escrow: amountIn - fee, settled: false});
 
+        _postMargin(amountIn - fee);
         _hedge(indicative, px18, SIDE_BID);
         emit MintRequested(receiptId, msg.sender, amountIn);
     }
@@ -197,15 +214,19 @@ contract CertVault {
     event RedeemClaimed(uint256 indexed receiptId, uint256 amountOut);
     event ForceExited(uint256 indexed receiptId, address indexed user, uint256 certIn);
 
-    /// @notice Instant redemption from the vault's own collateral balance.
-    /// @dev Deliberately reads NOTHING about buffer health, capacity, or oracle pause state.
-    ///      Uses pxUnguarded so a stale feed cannot trap a holder (Law 2). An insufficient vault
-    ///      balance simply reverts on the ERC-20 transfer — the token's business, not a gate.
+    /// @notice Instant redemption from the vault's own collateral balance (the hot buffer).
+    /// @dev Deliberately reads NOTHING about buffer P&L health, capacity, or oracle pause state —
+    ///      only the hot buffer's raw size, purely to route a holder to the path that will
+    ///      actually pay them (Law 2's other paths remain unconditionally open; see
+    ///      requestRedeem/forceExit/claimRedeem). Uses pxUnguarded so a stale feed cannot trap a
+    ///      holder.
     function redeemInstant(uint256 certIn) external returns (uint256 amountOut) {
         (uint256 px18,) = oracle.pxUnguarded();
         uint256 gross18 = certIn * px18 / 1e18;
         uint256 fee18 = gross18 * cfg.redeemFeeBps / 10_000;
         amountOut = _from18(gross18 - fee18);
+
+        if (hotBuffer() < amountOut) revert CertVault_UseQueuedRedeem();
 
         certificate.burn(msg.sender, certIn);
         _hedge(certIn, px18, SIDE_ASK);
@@ -247,6 +268,12 @@ contract CertVault {
 
         _hedge(certIn, px18, SIDE_ASK);
 
+        uint256 owedCollateral = _from18(owed18);
+        uint256 fromMargin = owedCollateral * cfg.targetMarginBps / 10_000;
+        if (fromMargin > 0) {
+            lighter.withdraw(lighterAccountIndex(), cfg.collateralAssetIndex, cfg.routeType, uint64(fromMargin));
+        }
+
         if (isForce) emit ForceExited(receiptId, msg.sender, certIn);
         else emit RedeemRequested(receiptId, msg.sender, certIn, expiresAt);
     }
@@ -257,6 +284,11 @@ contract CertVault {
     function claimRedeem(uint256 receiptId) external returns (uint256 amountOut) {
         RedeemReceipt storage r = redeemReceipts[receiptId];
         if (r.user == address(0) || r.paid) revert CertVault_NothingToClaim();
+
+        uint128 pending = lighter.getPendingBalance(address(this), cfg.collateralAssetIndex);
+        if (pending > 0) {
+            lighter.withdrawPendingBalance(address(this), cfg.collateralAssetIndex, pending);
+        }
 
         amountOut = _from18(r.owed18);
         r.paid = true;
@@ -289,6 +321,17 @@ contract CertVault {
         uint48 baseAmount = uint48(certAmount18 * (10 ** cfg.sizeDecimals) / 1e18);
         uint32 tickPx = oracle.toTickPrice(px18);
         lighter.createOrder(lighterAccountIndex(), cfg.marketIndex, baseAmount, tickPx, side, ORDER_TYPE_MARKET);
+    }
+
+    /// @notice Deposit the target share of freshly received collateral to Lighter as margin.
+    /// @dev The retained remainder is the hot buffer that serves instant redemptions. Leverage is
+    ///      therefore 10_000 / targetMarginBps, capped at 2x by MIN_TARGET_MARGIN_BPS.
+    function _postMargin(uint256 netCollateral) internal returns (uint256 marginPosted) {
+        marginPosted = netCollateral * cfg.targetMarginBps / 10_000;
+        if (marginPosted == 0) return 0;
+        IERC20(cfg.collateral).forceApprove(address(lighter), marginPosted);
+        lighter.deposit(address(this), cfg.collateralAssetIndex, cfg.routeType, marginPosted);
+        emit MarginPosted(marginPosted, netCollateral - marginPosted);
     }
 
     function _to18(uint256 amount) internal view returns (uint256) {

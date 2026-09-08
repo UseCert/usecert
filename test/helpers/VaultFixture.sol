@@ -40,7 +40,7 @@ abstract contract VaultFixture is Test {
         vm.warp(1_800_000_000);
         usdg = new MockERC20("USDG", "USDG", 6);
         feed = new MockAggregatorV3(8, 355_86000000);
-        lighter = new MockLighter(IERC20(address(usdg)), ASSET_IDX);
+        lighter = new MockLighter(IERC20(address(usdg)), ASSET_IDX, 4);
         reg = new SolvencyRegistry(attester);
         oracle = new CertOracle(address(feed), attester, 2, 3600, 500, 100);
         cap = new CapacityOracle(address(reg), gov, 1000, 100, 3000, 300);
@@ -62,7 +62,8 @@ abstract contract VaultFixture is Test {
                 mintFeeBps: 10,
                 redeemFeeBps: 10,
                 instantCap18: 10_000e18,
-                settleBandBps: 500
+                settleBandBps: 500,
+                targetMarginBps: 9_000
             }),
             "UseCert TSLA",
             "uTSLA"
@@ -76,6 +77,11 @@ abstract contract VaultFixture is Test {
         oracle.setMarkPrice(PX);
         reg.attest(address(vault), 1, 0, 0, 1_190_000e18);
         vm.stopPrank();
+
+        // The venue's own mark price, used by MockLighter.settleBatch() to value margin
+        // requirements. Kept in sync with the oracle price so the margin gate is live for every
+        // test that fills an order, not just the margin-specific ones.
+        lighter.setMarkPrice(MARKET, PX);
 
         usdg.mint(alice, 1_000_000e6);
         usdg.mint(address(this), 1_000_000e6);

@@ -12,7 +12,7 @@ contract MockLighterTest is Test {
 
     function setUp() public {
         usdg = new MockERC20("USDG", "USDG", 6);
-        lighter = new MockLighter(IERC20(address(usdg)), 3);
+        lighter = new MockLighter(IERC20(address(usdg)), 3, 4);
         usdg.mint(address(this), 1_000_000e6);
         usdg.approve(address(lighter), type(uint256).max);
     }
