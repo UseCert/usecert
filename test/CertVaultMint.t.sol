@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {CertVault} from "../src/CertVault.sol";
 import {VaultFixture} from "./helpers/VaultFixture.sol";
+import {SolvencyRegistry} from "../src/SolvencyRegistry.sol";
 
 contract CertVaultMintTest is VaultFixture {
     function test_bootstrapRegistersLighterAccount() public view {
@@ -454,5 +455,90 @@ contract CertVaultMintTest is VaultFixture {
         );
         vm.expectRevert(CertVault.CertVault_NotBootstrapped.selector);
         fresh.mintInstant(1_000e6);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // M-5 (MEDIUM, external C1 audit), end to end. The finding is not that a setter was missing —
+    // it is that the CONSEQUENCE of losing the attester key was terminal for the whole mint
+    // pipeline: attestations stop, ageSec passes CapacityOracle.maxAttestationAgeSec, capacity
+    // goes to zero permanently, and rebalance() dies with it because batchId stops advancing.
+    // Redemption survives throughout (Law 2), which this test also asserts rather than assumes.
+    //
+    // The unit-level rotation mechanics live in SolvencyRegistry.t.sol and CertOracle.t.sol. This
+    // one is the whole vault recovering.
+    // ---------------------------------------------------------------------------------------
+
+    /// @dev VaultFixture deploys `reg` and `oracle`, so this test contract is their rotation
+    ///      authority (M-5 binds governance to msg.sender at construction). That is the deployment
+    ///      rule, not a test convenience — see docs/DEPLOYMENT-CHECKLIST.md.
+    function test_attesterRotationRepairsAVaultThatKeyLossHadBricked() public {
+        address newAttester = makeAddr("newAttester");
+
+        // A holder is in the vault before the key goes missing, so Law 2 has something to prove.
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+        uint256 bal = cert.balanceOf(alice);
+        assertGt(bal, 0);
+
+        // ---- The key is lost. Nothing can attest, so the attestation ages out.
+        vm.warp(block.timestamp + 10 days);
+        feed.set(int256(PX / 1e10), block.timestamp); // isolate the failure: the FEED is still fine
+        assertGt(reg.ageSec(address(vault)), 300, "the attestation was supposed to age out");
+        assertEq(cap.maxNotional18(address(vault), vault.bufferCapacity18()), 0, "capacity did not die");
+
+        // Minting is dead, and before M-5 it was dead forever.
+        vm.expectRevert(CertVault.CertVault_AtCapacity.selector);
+        vm.prank(alice);
+        vault.mintInstant(1_000e6);
+
+        // ---- LAW 2 HOLDS ANYWAY, and holds through the notice period below. The backstop needs no
+        //      attestation, no capacity and no live attester.
+        vm.prank(alice);
+        vault.forceExit(bal / 2);
+        assertEq(cert.balanceOf(alice), bal - bal / 2);
+
+        // ---- Recovery. Governance proposes on both attested-data contracts; neither is instant.
+        reg.proposeAttester(newAttester);
+        oracle.proposeAttester(newAttester);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_RotationNotDue.selector);
+        reg.acceptAttester();
+
+        vm.warp(block.timestamp + reg.ATTESTER_ROTATION_DELAY());
+        feed.set(int256(PX / 1e10), block.timestamp);
+
+        // Redemption still open during the window, before either rotation is installed. The
+        // balance is read into a local first: an external call in argument position consumes the
+        // prank, so vault.forceExit(cert.balanceOf(alice)) would run as this test contract.
+        uint256 rest = cert.balanceOf(alice);
+        vm.prank(alice);
+        vault.forceExit(rest);
+        assertEq(cert.balanceOf(alice), 0);
+
+        // Permissionless finalisation (Law 6): a stranger closes both rotations out.
+        address stranger = makeAddr("rotationStranger");
+        vm.startPrank(stranger);
+        reg.acceptAttester();
+        oracle.acceptAttester();
+        vm.stopPrank();
+        assertEq(reg.attester(), newAttester);
+        assertEq(oracle.attester(), newAttester);
+
+        // ---- The pipeline is repaired, not replaced. The new key attests, capacity returns, and
+        //      the vault mints again — on the SAME vault, with the same certificate.
+        vm.startPrank(newAttester);
+        oracle.setMarkPrice(PX);
+        reg.attest(address(vault), 2, 0, 0, 1_190_000e18);
+        vm.stopPrank();
+        assertGt(cap.maxNotional18(address(vault), vault.bufferCapacity18()), 0, "capacity did not return");
+
+        vm.prank(alice);
+        uint256 out = vault.mintInstant(1_000e6);
+        assertGt(out, 0, "the vault did not mint again");
+
+        // And rebalance()'s batchId advances again, which is the other half of the finding.
+        vm.prank(newAttester);
+        reg.attest(address(vault), 3, 0, 0, 1_190_000e18);
+        assertEq(vault.solvency().provenAtBatch, 3, "the batch id stopped advancing");
     }
 }

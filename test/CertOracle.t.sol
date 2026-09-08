@@ -504,4 +504,93 @@ contract CertOracleTest is Test {
 
         assertFalse(tinyOracle.mintAllowed());
     }
+
+    // ---------------------------------------------------------------------------------------
+    // M-5 (MEDIUM, external C1 audit). The attester was immutable with no rotation. Losing the key
+    // froze markPx18 forever — and because mintAllowed() requires markPx18 != 0 and measures the
+    // basis band against it, a frozen mark eventually holds minting shut with nothing able to
+    // reopen it. Compromise is worse: one key wrote the mark here AND open interest, notional and
+    // margin in SolvencyRegistry, plus the BufferBook ledger through CertVault.accrueFunding.
+    //
+    // Rotation is governance-gated behind an immutable notice period. Law 6 is untouched: this is
+    // a role change, not a trading power. Law 2 is untouched too, and that is asserted below —
+    // pxUnguarded() is not attester-writable and a pending rotation cannot reach it.
+    // ---------------------------------------------------------------------------------------
+
+    address internal recovered = makeAddr("recoveredAttester");
+
+    function test_governanceIsTheDeployer() public view {
+        assertEq(oracle.governance(), address(this));
+        assertEq(oracle.ATTESTER_ROTATION_DELAY(), 2 days);
+    }
+
+    function test_attesterRotationServesItsNoticePeriodThenWorks() public {
+        oracle.proposeAttester(recovered);
+        assertEq(oracle.attester(), attester, "proposing installed it immediately");
+
+        vm.expectRevert(CertOracle.CertOracle_RotationNotDue.selector);
+        oracle.acceptAttester();
+
+        vm.warp(block.timestamp + oracle.ATTESTER_ROTATION_DELAY());
+        vm.prank(stranger); // permissionless finalisation (Law 6)
+        oracle.acceptAttester();
+        assertEq(oracle.attester(), recovered);
+
+        // The new key writes the mark; the old one cannot.
+        vm.prank(recovered);
+        oracle.setMarkPrice(PX);
+        assertEq(oracle.markPx18(), PX);
+
+        vm.expectRevert(CertOracle.CertOracle_OnlyAttester.selector);
+        vm.prank(attester);
+        oracle.setMarkPrice(1e18);
+    }
+
+    function test_onlyGovernanceMayProposeARotation() public {
+        vm.expectRevert(CertOracle.CertOracle_OnlyGovernance.selector);
+        vm.prank(stranger);
+        oracle.proposeAttester(recovered);
+
+        vm.expectRevert(CertOracle.CertOracle_OnlyGovernance.selector);
+        vm.prank(attester);
+        oracle.proposeAttester(recovered);
+    }
+
+    function test_rotationCannotInstallTheZeroAddress() public {
+        vm.expectRevert(CertOracle.CertOracle_ZeroAddress.selector);
+        oracle.proposeAttester(address(0));
+    }
+
+    function test_acceptRevertsWithNothingPending() public {
+        vm.expectRevert(CertOracle.CertOracle_NoPendingAttester.selector);
+        oracle.acceptAttester();
+    }
+
+    /// @notice LAW 2 ACROSS THE WHOLE ROTATION. The published redemption price answers before the
+    ///         proposal, during the notice period, and after the install — a rotation cannot reach
+    ///         it, because pxUnguarded() reads the immutable feed and never the attester.
+    function test_pxUnguardedIsUnaffectedByAPendingOrCompletedRotation() public {
+        (uint256 pBefore,) = oracle.pxUnguarded();
+        assertEq(pBefore, PX);
+
+        oracle.proposeAttester(recovered);
+        (uint256 pDuring,) = oracle.pxUnguarded();
+        assertEq(pDuring, PX, "a pending rotation moved the redemption price");
+
+        vm.warp(block.timestamp + oracle.ATTESTER_ROTATION_DELAY());
+        oracle.acceptAttester();
+        // Keep the feed fresh so this measures the rotation and not staleness.
+        feed.set(int256(PX / 1e10), block.timestamp);
+        (uint256 pAfter,) = oracle.pxUnguarded();
+        assertEq(pAfter, PX, "the rotation moved the redemption price");
+    }
+
+    /// @notice L-3: the constructor names a bad dependency instead of failing later somewhere else.
+    function test_constructorRejectsZeroDependencies() public {
+        vm.expectRevert(CertOracle.CertOracle_ZeroAddress.selector);
+        new CertOracle(address(0), attester, 2, STALENESS, DEVIATION_BPS, 100);
+
+        vm.expectRevert(CertOracle.CertOracle_ZeroAddress.selector);
+        new CertOracle(address(feed), address(0), 2, STALENESS, DEVIATION_BPS, 100);
+    }
 }

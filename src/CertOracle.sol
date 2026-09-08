@@ -16,9 +16,44 @@ contract CertOracle is ICertOracle {
     ///      but has not yet held for a full staleness window, so the reference may not advance
     ///      onto it yet. Poke again once the window has elapsed.
     error CertOracle_ReferenceRateLimited();
+    /// @dev M-5: only the rotation authority bound at deploy may propose a new attester.
+    error CertOracle_OnlyGovernance();
+    /// @dev L-3, and M-5's hard floor: an attester of address(0) would freeze markPx18 and
+    ///      CertVault.accrueFunding forever. Never constructible, never installable.
+    error CertOracle_ZeroAddress();
+    error CertOracle_NoPendingAttester();
+    error CertOracle_RotationNotDue();
+
+    /// @dev M-5 (Law 3): a rotation is a public commitment with a published effective time.
+    event AttesterRotationProposed(address indexed attester, uint256 effectiveAt);
+    event AttesterRotated(address indexed previous, address indexed attester);
+
+    /// @notice The immutable notice period every attester rotation must serve.
+    /// @dev M-5. The full argument for why the ceiling bounds SPEED rather than magnitude, and why
+    ///      it is a constant rather than a per-deployment immutable, lives on
+    ///      SolvencyRegistry.ATTESTER_ROTATION_DELAY. It applies unchanged here, with one addition
+    ///      specific to this contract: the powers this attester holds are markPx18 (which feeds
+    ///      mintAllowed()'s basis band, so it can pause minting or unpause it, and which no
+    ///      redemption path reads) and, via CertVault.accrueFunding, the BufferBook ledger (which
+    ///      sits under a `min` since M-1 and can therefore only tighten capacity). pxUnguarded()
+    ///      — Law 2's price — is not attester-writable at all and is not affected by a rotation.
+    uint256 public constant ATTESTER_ROTATION_DELAY = 2 days;
 
     IAggregatorV3 public immutable feed;
-    address public immutable attester;
+    /// @notice The rotation authority. Immutable, bound to the deployer at construction.
+    /// @dev M-5: msg.sender rather than a constructor parameter, matching SolvencyRegistry so the
+    ///      two attested-data contracts bind the same role the same way and one deployment rule
+    ///      covers both. DEPLOYMENT REQUIREMENT (docs/DEPLOYMENT-CHECKLIST.md): deploy this
+    ///      DIRECTLY FROM the governance multisig. An explicit parameter is the C2 cleanup; see
+    ///      SolvencyRegistry.governance for why the arity is frozen in this pass.
+    address public immutable governance;
+    /// @notice Who may write markPx18 and relay the buffer accrual. No longer immutable.
+    address public attester;
+    /// @notice The proposed next attester and the timestamp from which it may be installed.
+    /// @dev Zero means none pending. Re-proposing overwrites and restarts the notice period;
+    ///      proposing the incumbent is how a rotation is abandoned.
+    address public pendingAttester;
+    uint256 public pendingAttesterAt;
     /// @dev market price_decimals; 2 for TSLA and NVDA
     uint8 public immutable priceDecimals;
     uint256 public immutable stalenessSeconds;
@@ -63,8 +98,14 @@ contract CertOracle is ICertOracle {
         uint256 _deviationBps,
         uint256 _basisBandBps
     ) {
+        // L-3: no constructor in src/ validated its dependencies, so a mistyped address deployed
+        // silently and failed later at an arbitrary call site. A zero feed is the sharpest case —
+        // _readFeed below would revert on it and take the whole deployment down anyway, but with an
+        // anonymous low-level failure rather than a named error.
+        if (_feed == address(0) || _attester == address(0)) revert CertOracle_ZeroAddress();
         feed = IAggregatorV3(_feed);
         attester = _attester;
+        governance = msg.sender;
         priceDecimals = _priceDecimals;
         stalenessSeconds = _stalenessSeconds;
         deviationBps = _deviationBps;
@@ -84,6 +125,32 @@ contract CertOracle is ICertOracle {
     function setMarkPrice(uint256 px18) external {
         if (msg.sender != attester) revert CertOracle_OnlyAttester();
         markPx18 = px18;
+    }
+
+    /// @notice Start an attester rotation. Governance-gated; effective no sooner than
+    ///         ATTESTER_ROTATION_DELAY from now.
+    /// @dev M-5: a role change, not a trading power (Law 6). It cannot move collateral, place an
+    ///      order, pause anything, or reach a redemption path.
+    function proposeAttester(address next) external {
+        if (msg.sender != governance) revert CertOracle_OnlyGovernance();
+        if (next == address(0)) revert CertOracle_ZeroAddress();
+        pendingAttester = next;
+        pendingAttesterAt = block.timestamp + ATTESTER_ROTATION_DELAY;
+        emit AttesterRotationProposed(next, pendingAttesterAt);
+    }
+
+    /// @notice Install a rotation whose notice period has elapsed. Permissionless (Law 6) — see
+    ///         SolvencyRegistry.acceptAttester for why anyone may finalise.
+    function acceptAttester() external {
+        address next = pendingAttester;
+        if (next == address(0)) revert CertOracle_NoPendingAttester();
+        if (block.timestamp < pendingAttesterAt) revert CertOracle_RotationNotDue();
+
+        address previous = attester;
+        attester = next;
+        pendingAttester = address(0);
+        pendingAttesterAt = 0;
+        emit AttesterRotated(previous, next);
     }
 
     function _readFeed() internal view returns (uint256 px18, uint256 updatedAt) {
