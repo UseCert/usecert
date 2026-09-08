@@ -587,4 +587,114 @@ contract CertVaultRefundTest is VaultFixture {
         lighter.settleBatch();
         assertLt(lighter.positionBase(MARKET), -HEDGE_TICKS, "the short did not grow, re-check this gap");
     }
+
+    // ---------------------------------------------------------------------------------------
+    // M-3 (MEDIUM, external C1 audit). closeAll() hardcoded SIDE_ASK while `baseAmount == 0`
+    // defaults to the full position SIZE and leaves the direction to the caller — so against a
+    // SHORT the governance wind-down of last resort submitted a full-size sell and DOUBLED it.
+    // The vault can genuinely be short, and this file already builds that state:
+    // test_zeroSupplyTrimCannotCloseADanglingShort reaches it through closeAll() then a staged
+    // refund whose open-loop ASK has nothing left to close.
+    //
+    // MockLighter now models the direction faithfully (see its settleBatch and
+    // test_zeroBaseAmountAskAgainstAShortDoublesIt), which is what makes these two observable.
+    // ---------------------------------------------------------------------------------------
+
+    /// @dev Reaches the dangling-SHORT state, exactly as test_zeroSupplyTrimCannotCloseADanglingShort
+    ///      does: wind the long down first, then stage a refund whose open-loop ASK opens a short of
+    ///      precisely the size requestMint once went long.
+    function _danglingShort() internal {
+        uint256 id = _drainThenRequestPastWindow();
+
+        vm.prank(gov);
+        vault.closeAll(); // ledger is long here, so this is an ASK and it flattens
+        lighter.settleBatch();
+        assertEq(lighter.positionBase(MARKET), 0, "closeAll did not flatten the long");
+        assertEq(vault.venuePositionBase(), 0, "the ledger did not follow the close");
+
+        vault.stageRefund(id);
+        lighter.settleBatch();
+        assertEq(lighter.positionBase(MARKET), -HEDGE_TICKS, "the open-loop close did not open a short");
+        assertEq(vault.venuePositionBase(), -HEDGE_TICKS, "the ledger did not follow the short");
+        assertEq(cert.totalSupply(), 0);
+    }
+
+    /// @notice The finding itself: closeAll() must close a short, not double it.
+    /// @dev LOAD-BEARING TWICE, and both were measured rather than reasoned about.
+    ///      (1) Restore `SIDE_ASK` in closeAll(): this fails on the ClosedAll event, then on
+    ///          `isAsk`, and with both of those assertions removed it fails on
+    ///          MockLighter.InsufficientMargin() at settleBatch — the venue's own initial-margin
+    ///          requirement refuses to fill a doubling of the short in THIS state, so the concrete
+    ///          consequence here is a wind-down that does not wind anything down. Where margin does
+    ///          permit the fill the position doubles outright; that is pinned separately and
+    ///          unambiguously by MockLighter.t.sol's test_zeroBaseAmountAskAgainstAShortDoublesIt.
+    ///          Either way the governance function of last resort fails to get flat.
+    ///      (2) Restore `resulting = 0` for `baseAmount == 0` in MockLighter: the isAsk assertion
+    ///          still fails, but the POSITION assertion passes — which is exactly why the mock had
+    ///          to be fixed first. Without it the venue-side consequence of the wrong side is
+    ///          invisible and the suite certifies a wind-down the venue would not perform.
+    function test_closeAllClosesAShortInsteadOfDoublingIt() public {
+        _danglingShort();
+
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit CertVault.ClosedAll(0, -HEDGE_TICKS); // 0 == SIDE_BID, derived from the ledger
+        vm.prank(gov);
+        vault.closeAll();
+
+        (, uint48 baseAmount,, uint8 isAsk,) = lighter.lastOrder();
+        assertEq(baseAmount, 0, "closeAll stopped using the full-size primitive");
+        assertEq(isAsk, 0, "closeAll still hardcodes the sell side");
+
+        lighter.settleBatch();
+        assertEq(lighter.positionBase(MARKET), 0, "the wind-down did not flatten the short");
+        assertEq(vault.venuePositionBase(), 0, "the ledger was not reset by the close");
+    }
+
+    /// @notice And it still closes a LONG with an ASK — the direction is derived, not inverted.
+    function test_closeAllStillClosesALongWithAnAsk() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+        int256 known = vault.venuePositionBase();
+        assertGt(known, 0, "the ledger did not record the mint hedge");
+        assertEq(lighter.positionBase(MARKET), known, "the ledger and the venue disagree");
+
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit CertVault.ClosedAll(1, known); // 1 == SIDE_ASK
+        vm.prank(gov);
+        vault.closeAll();
+
+        (,,, uint8 isAsk,) = lighter.lastOrder();
+        assertEq(isAsk, 1);
+        lighter.settleBatch();
+        assertEq(lighter.positionBase(MARKET), 0);
+    }
+
+    /// @notice At a flat ledger closeAll() FAILS CLOSED: it submits no directional order and still
+    ///         repatriates. Reverting instead would remove the wind-down in the state where the
+    ///         position is already on its way to zero (see test_windDownRecoversAllMargin).
+    function test_closeAllSubmitsNothingWhenTheLedgerIsFlat() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+        uint256 bal = cert.balanceOf(alice);
+
+        // The exit's own ASK is submitted but not yet filled: the vault is net flat on its own
+        // books while the venue still shows the long.
+        vm.prank(alice);
+        vault.forceExit(bal);
+        assertEq(vault.venuePositionBase(), 0, "the exit did not bring the ledger back to flat");
+        assertGt(lighter.positionBase(MARKET), 0, "the venue was supposed to still be lagging");
+
+        uint256 queuedBefore = lighter.queuedOrderCount();
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit CertVault.CloseAllSkippedFlat();
+        vm.prank(gov);
+        vault.closeAll(); // must not revert: the repatriation half is unconditional
+
+        assertEq(lighter.queuedOrderCount(), queuedBefore, "a directional order was guessed anyway");
+        // The queued exit still flattens the venue on its own, which is why skipping is correct.
+        lighter.settleBatch();
+        assertEq(lighter.positionBase(MARKET), 0, "the exit's own close did not flatten the venue");
+    }
 }

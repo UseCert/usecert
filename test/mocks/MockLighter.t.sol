@@ -150,4 +150,66 @@ contract MockLighterTest is Test {
         lighter.withdrawPendingBalance(address(this), 3, 100e6); // and it works again
         assertEq(lighter.getPendingBalance(address(this), 3), 0);
     }
+
+    // ---------------------------------------------------------------------------------------
+    // M-3 (MEDIUM, external C1 audit). `baseAmount == 0` defaults to the full position SIZE, and
+    // `isAsk` remains the caller's. This mock used to set `resulting = 0` for ANY zero-amount
+    // order, ignoring isAsk entirely — so CertVault.closeAll()'s hardcoded SIDE_ASK looked correct
+    // in every test, including against a short, where it in fact doubles the position. Modelling
+    // the direction is what makes the vault-side fix testable at all, so it is done here first.
+    //
+    // REQUIRES CONFIRMATION: the direction semantics come from the design spec's section 3.1
+    // table, not from Lighter source (not in this repo). This is the conservative reading — it
+    // makes a wrong-side close-all harmful — so a vault correct against this mock is correct
+    // against either interpretation.
+    // ---------------------------------------------------------------------------------------
+
+    /// @notice A full-size ASK against a SHORT doubles it. The behaviour no test could see before.
+    /// @dev LOAD-BEARING: restore `resulting = 0` for `baseAmount == 0` and this fails on the final
+    ///      assertion with the position at 0 instead of -1_000.
+    function test_zeroBaseAmountAskAgainstAShortDoublesIt() public {
+        lighter.deposit(address(this), 3, 0, 1_000_000e6);
+        uint48 idx = lighter.addressToAccountIndex(address(this));
+        lighter.setMarkPrice(16, 100e18);
+
+        // Open a short of 500 ticks.
+        lighter.createOrder(idx, 16, 500, 10_000, 1, 1);
+        lighter.settleBatch();
+        assertEq(lighter.positionBase(16), -500, "the short did not open");
+
+        // A close-all on the WRONG side: an ask for the full size of a short is another sell.
+        lighter.createOrder(idx, 16, 0, 10_000, 1, 1);
+        lighter.settleBatch();
+        assertEq(lighter.positionBase(16), -1_000, "a full-size ask against a short did not double it");
+    }
+
+    /// @notice And a full-size BID against a short is what actually closes it.
+    function test_zeroBaseAmountBidAgainstAShortClosesIt() public {
+        lighter.deposit(address(this), 3, 0, 1_000_000e6);
+        uint48 idx = lighter.addressToAccountIndex(address(this));
+        lighter.setMarkPrice(16, 100e18);
+
+        lighter.createOrder(idx, 16, 500, 10_000, 1, 1);
+        lighter.settleBatch();
+        assertEq(lighter.positionBase(16), -500);
+
+        lighter.createOrder(idx, 16, 0, 10_000, 0, 1);
+        lighter.settleBatch();
+        assertEq(lighter.positionBase(16), 0, "the correct side did not close the short");
+    }
+
+    /// @notice The symmetric wrong-side case on a long, so the model is pinned in both directions.
+    function test_zeroBaseAmountBidAgainstALongDoublesIt() public {
+        lighter.deposit(address(this), 3, 0, 1_000_000e6);
+        uint48 idx = lighter.addressToAccountIndex(address(this));
+        lighter.setMarkPrice(16, 100e18);
+
+        lighter.createOrder(idx, 16, 500, 10_000, 0, 1);
+        lighter.settleBatch();
+        assertEq(lighter.positionBase(16), 500);
+
+        lighter.createOrder(idx, 16, 0, 10_000, 0, 1);
+        lighter.settleBatch();
+        assertEq(lighter.positionBase(16), 1_000, "a full-size bid against a long did not double it");
+    }
 }

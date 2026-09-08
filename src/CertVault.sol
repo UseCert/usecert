@@ -93,6 +93,14 @@ contract CertVault {
     ///      getPendingBalance proves cash actually landed (_sweepPending).
     event MarginRecallRequested(uint256 amount);
     event MarginRecalled(uint256 amount, uint256 pendingAfter);
+    /// @dev M-3: `side` is DERIVED from venuePositionBase rather than hardcoded, and
+    ///      `knownPositionBase` publishes the ledger value the direction was taken from so a
+    ///      reader can check the decision against the vault's own books.
+    event ClosedAll(uint8 side, int256 knownPositionBase);
+    /// @dev M-3: the vault's own order ledger says the position a close-all would meet is already
+    ///      flat, so no directional order was submitted. The record of a deliberate refusal to
+    ///      guess, not a silent no-op.
+    event CloseAllSkippedFlat();
 
     struct Deps {
         address lighter;
@@ -315,6 +323,45 @@ contract CertVault {
     ///      larger value leaves the (retryable, non-redemption-path) cast revert reachable once
     ///      totalOwedOutstanding passes ~1.8e19 collateral units.
     uint256 public immutable venueWithdrawCap;
+
+    /// @notice The vault's own signed record of the base it has asked the venue to hold, in the
+    ///         venue's base ticks (sizeDecimals applied). Negative is short.
+    /// @dev M-3 (MEDIUM, external C1 audit). closeAll() hardcoded SIDE_ASK, and `baseAmount == 0`
+    ///      defaults to the full position SIZE, not to "go flat" — so against a SHORT the
+    ///      governance wind-down of last resort DOUBLED the short. The vault can genuinely be
+    ///      short: stageRefund's close is open-loop and its own comment says so.
+    ///
+    ///      ILighter exposes no position getter — the chain sees roots and blobs, not in-rollup
+    ///      state (spec section 3.1) — so the vault cannot read its own venue position and the side
+    ///      has to come from a local source of truth. This is that source, in the same shape as
+    ///      postedMargin and marginPendingRecall, which are local ledgers for exactly this reason.
+    ///
+    ///      WHAT IT IS, PRECISELY: the net of every order this contract has SUBMITTED, not of every
+    ///      order that has FILLED. Those differ, and the difference is not a defect here — it is
+    ///      what makes the counter the right predictor. Priority requests execute in queue order,
+    ///      so an order enqueued now acts on the position left by everything enqueued before it; a
+    ///      close-all submitted at this instant will therefore meet exactly this counter's value,
+    ///      even while the venue's current position still lags a batch behind it.
+    ///
+    ///      WHERE IT CAN STILL BE WRONG, stated rather than implied. Four things move the venue's
+    ///      position without moving this counter, and each can flip its SIGN, which is the only
+    ///      part closeAll() uses:
+    ///        1. an order accepted on L1 but refused inside the rollup (no on-chain signal — the
+    ///           same blindness that makes recallMargin() fail-open);
+    ///        2. a partial fill, since the on-chain path has no IOC or reduce-only flag (spec
+    ///           section 3.2) and a market order into a thin book can fill short of its size;
+    ///        3. liquidation, which flattens the venue position with nothing for the vault to see;
+    ///        4. desert mode / escape-hatch settlement.
+    ///      So this is a strict improvement on assuming long, not a proof. Under truthful,
+    ///      fully-filled execution it equals the venue position exactly; under the four above it
+    ///      degrades to the same guess closeAll() made unconditionally before. That is the honest
+    ///      C1 answer, and the real fix is an ILighter position getter or a SIGNED attestation —
+    ///      both interface changes outside this contract.
+    ///
+    ///      Deliberately NOT wired into stageRefund's open-loop close or rebalance()'s sign-blind
+    ///      trim. Both would be behaviour changes on paths this finding is not about, and
+    ///      test_zeroSupplyTrimCannotCloseADanglingShort exists to keep those two gaps visible.
+    int256 public venuePositionBase;
 
     /// @notice How long a mint receipt stays settleable before it can only be refunded.
     /// @dev C3: settleMint bands against the price recorded at requestMint, so a receipt must not
@@ -1267,14 +1314,39 @@ contract CertVault {
     ///         key otherwise — this is wind-down, not routine trading).
     function closeAll() external {
         if (msg.sender != governance) revert CertVault_OnlyGovernance();
-        (uint256 px18,) = oracle.pxUnguarded();
-        // Deliberately NOT routed through _hedge/_tryHedge: those now refuse baseAmount == 0
-        // (Finding 1, Task 10 review). closeAll() is the one legitimate caller of Lighter's
-        // baseAmount == 0 "close the entire position" primitive, so it calls createOrder directly
-        // with a literal 0 here, bypassing the zero-amount guards on purpose.
-        lighter.createOrder(
-            lighterAccountIndex(), cfg.marketIndex, 0, oracle.toTickPrice(px18), SIDE_ASK, ORDER_TYPE_MARKET
-        );
+
+        // M-3: the SIDE is derived from the vault's own order ledger, not assumed to be ASK.
+        // `baseAmount == 0` defaults to the full position SIZE and leaves `isAsk` to the caller, so
+        // a hardcoded ASK against a short submitted a full-size sell into a short and doubled it —
+        // in the one function whose entire purpose is to get flat. See venuePositionBase for what
+        // the ledger is and, more importantly, for the four ways it can still be wrong.
+        int256 known = venuePositionBase;
+        if (known == 0) {
+            // FAIL CLOSED. The vault's own books say the position a close-all order would meet is
+            // flat, so there is nothing to close and no direction to pick — and picking one anyway
+            // is how this finding happened. Deliberately NOT a revert: the repatriation below is
+            // unconditional and useful on its own, and reverting here would remove governance's
+            // wind-down entirely in the state where the position is already going to zero (the
+            // exit's own closing order is enqueued but not yet filled, which is precisely
+            // test_windDownRecoversAllMargin's shape). Emitted so a skipped close is a record and
+            // not a silent no-op.
+            emit CloseAllSkippedFlat();
+        } else {
+            uint8 side = known > 0 ? SIDE_ASK : SIDE_BID;
+            (uint256 px18,) = oracle.pxUnguarded();
+            // Deliberately NOT routed through _hedge/_tryHedge: those now refuse baseAmount == 0
+            // (Finding 1, Task 10 review). closeAll() is the one legitimate caller of Lighter's
+            // baseAmount == 0 "default to the full position size" primitive, so it calls
+            // createOrder directly with a literal 0 here, bypassing the zero-amount guards on
+            // purpose — and therefore also bypasses _recordOrder, which sizes off a base amount
+            // this order does not carry. The ledger is zeroed explicitly instead: a full-size close
+            // on the correct side lands the position at flat.
+            lighter.createOrder(
+                lighterAccountIndex(), cfg.marketIndex, 0, oracle.toTickPrice(px18), side, ORDER_TYPE_MARKET
+            );
+            venuePositionBase = 0;
+            emit ClosedAll(side, known);
+        }
         // C1: a wind-down must also repatriate. Without this, closeAll() closed the position and
         // withdrew nothing, leaving whatever the venue had already released sitting in the
         // pending balance while the receipts it belongs to went unpaid.
@@ -1644,6 +1716,25 @@ contract CertVault {
         uint48 baseAmount = SafeCast.toUint48(base);
         uint32 tickPx = oracle.toTickPrice(px18);
         lighter.createOrder(lighterAccountIndex(), cfg.marketIndex, baseAmount, tickPx, side, ORDER_TYPE_MARKET);
+        _recordOrder(base, side);
+    }
+
+    /// @dev M-3: maintain the vault's own signed record of what it has asked the venue to hold.
+    ///      Called from both hedge helpers, and only once an order has actually been accepted for
+    ///      submission — never for one the venue refused, which is what keeps the ledger a record
+    ///      of submissions rather than of attempts.
+    ///
+    ///      `unchecked` on purpose, and it is a Law 2 decision rather than a gas one: this runs
+    ///      inside _tryHedge's success path, which is forceExit's route, and a checked signed
+    ///      addition there would put an arithmetic revert back into the backstop for the sake of a
+    ///      bookkeeping counter — the exact class of mistake Finding 1 is about. `base` is bounded
+    ///      by type(uint48).max in both callers (SafeCast in _hedge, an explicit range check in
+    ///      _tryHedge), so wrapping an int256 needs ~4e62 consecutive maximum-size orders.
+    function _recordOrder(uint256 base, uint8 side) internal {
+        unchecked {
+            venuePositionBase =
+                side == SIDE_ASK ? venuePositionBase - int256(base) : venuePositionBase + int256(base);
+        }
     }
 
     /// @dev Fail-open counterpart to _hedge, used ONLY by the exit path (_queueExit, i.e.
@@ -1689,6 +1780,13 @@ contract CertVault {
         }
         try oracle.toTickPrice(px18) returns (uint32 tickPx) {
             try lighter.createOrder(accountIndex, cfg.marketIndex, baseAmount, tickPx, side, ORDER_TYPE_MARKET) {
+                // M-3: recorded only here, in the branch where the venue actually accepted the
+                // order. A refused close (the `catch` below, which is what CloseOrderNotPlaced
+                // reports) must leave the ledger alone, or the vault would believe it had closed an
+                // exposure it still carries — and closeAll() would then read the wrong sign off it.
+                // _recordOrder is unchecked precisely so this line cannot revert inside a fail-open
+                // helper; see it.
+                _recordOrder(base, side);
                 return true;
             } catch {
                 return false;

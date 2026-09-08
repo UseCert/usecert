@@ -211,8 +211,25 @@ contract MockLighter is ILighter {
             int256 signed = o.isAsk == 1 ? -int256(uint256(o.baseAmount)) : int256(uint256(o.baseAmount));
             int256 resulting;
             if (o.baseAmount == 0) {
-                // baseAmount == 0 means close the entire position
-                resulting = 0;
+                // M-3 (MEDIUM, external C1 audit). `baseAmount == 0` means "default to the full
+                // position SIZE" — the size, not the direction. `isAsk` is still the caller's, so
+                // this is an order for |position| units on the side the caller named, and an ASK
+                // against a SHORT therefore DOUBLES the short instead of closing it.
+                //
+                // This mock used to set `resulting = 0` for any zero-amount order, ignoring isAsk
+                // entirely, so no test in the suite could observe the difference — and
+                // CertVault.closeAll() hardcoded SIDE_ASK. The governance wind-down of last resort
+                // was therefore unverified in the one state where its direction matters. That is
+                // spec section 9.1's own lesson recurring: venue behaviour the vault depends on has
+                // to be modelled here, or the suite certifies a design the venue would reject.
+                //
+                // REQUIRES CONFIRMATION against Lighter source, which is not in this repo: the
+                // reading above comes from the design spec's section 3.1 table. It is the
+                // CONSERVATIVE reading — it makes a wrong-side close-all harmful rather than
+                // harmless — so a vault that is correct against this mock is correct against
+                // either interpretation. See docs/DEPLOYMENT-CHECKLIST.md.
+                uint256 magnitude = previous >= 0 ? uint256(previous) : uint256(-previous);
+                resulting = o.isAsk == 1 ? previous - int256(magnitude) : previous + int256(magnitude);
             } else {
                 resulting = previous + signed;
             }
