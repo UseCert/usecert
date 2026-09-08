@@ -399,4 +399,109 @@ contract CertVaultRedeemTest is VaultFixture {
         assertEq(outC, owedC, "an unrepresentable valuation blocked or shrank the payout");
         assertEq(usdg.balanceOf(alice), beforeC + owedC, "the holder was not paid in full");
     }
+
+    // ---------------------------------------------------------------------------------------
+    // FINDING 1 (external C1 audit, final wave). Law 2 says forceExit must always work for a
+    // holder with a balance. `certIn * px18 / 1e18` in _queueExit — forceExit's own body — panicked
+    // 0x11 at an extreme live feed price and took the backstop down with it.
+    //
+    // TWO tests, because the fix has two halves and each is load-bearing on its own. The audit
+    // brief's preferred remedy was Math.mulDiv, on the argument that its 512-bit intermediate makes
+    // overflow "unreachable for realistic supply". The first test is the case that argument covers.
+    // The second is the case it does not, and is why the price clamp exists: the argument bounds the
+    // QUANTITY and says nothing about the PRICE, whose range CertOracle leaves 77 decades wide.
+    // ---------------------------------------------------------------------------------------
+
+    /// @notice The price that used to panic forceExit, and the proof the holder loses nothing.
+    /// @dev LOAD-BEARING: restore `uint256 gross18 = certIn * px18 / 1e18;` in _queueExit and this
+    ///      fails with panic 0x11 (arithmetic overflow) on the forceExit call below — the exact
+    ///      Law 2 breach Finding 1 reports.
+    function test_forceExitSurvivesThePriceThatUsedToPanicIt() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+        uint256 bal = cert.balanceOf(alice);
+        assertGt(bal, 0, "nothing was minted to exit with");
+
+        // A live, unmocked feed value. The fixture's feed has 8 decimals, so 1e49 normalises to
+        // px18 = 1e59 — this is what CertOracle genuinely hands the vault for that answer.
+        feed.set(int256(1e49), block.timestamp);
+        (uint256 px18,) = oracle.pxUnguarded();
+        assertEq(px18, 1e59, "the feed value did not reach the vault unclamped");
+        // The plain product genuinely does not fit in a uint256: certIn * px18 > type(uint256).max.
+        assertGt(bal * (px18 / 1e18), type(uint256).max / 1e18, "the product does not actually overflow");
+
+        vm.prank(alice);
+        uint256 id = vault.forceExit(bal);
+
+        assertGt(id, 0, "no receipt was written");
+        assertEq(cert.balanceOf(alice), 0, "the certificates were not burned");
+        (address user, uint256 owed18,,, bool paid) = vault.redeemReceipts(id);
+        assertEq(user, alice, "the receipt is not the holder's");
+        assertFalse(paid);
+        assertGt(owed18, 0, "the receipt was written for nothing");
+        assertEq(vault.redeemCertIn(id), bal, "the quantity was not recorded");
+
+        // And the clamped ceiling costs the holder nothing real. owed18 is a CEILING (H-2), not the
+        // payout: restore a tradeable price and the claim pays the gross current value, to the wei,
+        // exactly as it would have with no absurd print in between.
+        _setPrice(PX);
+        uint256 expected = bal * PX / 1e18 / 1e12; // gross current value, in collateral units
+        uint256 before = usdg.balanceOf(alice);
+        vault.claimRedeem(id);
+        assertEq(usdg.balanceOf(alice) - before, expected, "the clamp cost the holder value");
+    }
+
+    /// @notice Math.mulDiv ALONE IS NOT ENOUGH. The largest price CertOracle can return overflows
+    ///         mulDiv's own 512-bit guard for a holder of about one certificate.
+    /// @dev LOAD-BEARING, and it is the clamp it bears on: delete the
+    ///      `if (px18 > MAX_VALUATION_PX18)` line from _value18 — keeping Math.mulDiv exactly as it
+    ///      is — and this fails with panic 0x11. mulDiv moves the failure from "the product exceeds
+    ///      uint256" to "the quotient exceeds uint256", which is 18 decades of headroom and would
+    ///      settle it if the price were bounded. It is not: _tryFeed admits any answer that still
+    ///      fits a uint256 once normalised, so px18 reaches ~1.16e77 on an honest read.
+    function test_forceExitSurvivesTheLargestPriceTheOracleCanReturn() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+        uint256 bal = cert.balanceOf(alice);
+
+        // The largest answer this 8-decimal feed can report that CertOracle will still normalise.
+        // Anything larger fails _tryFeed's own headroom check and pxUnguarded falls back instead.
+        int256 maxAnswer = int256(type(uint256).max / 1e10);
+        feed.set(maxAnswer, block.timestamp);
+        (uint256 px18,) = oracle.pxUnguarded();
+        assertEq(px18, uint256(maxAnswer) * 1e10, "the feed value did not reach the vault");
+        // The QUOTIENT overflows, not merely the product. (certIn / 1e18) * px18 > uint256 max
+        // implies certIn * px18 > max * 1e18, which is precisely where Math.mulDiv panics.
+        assertGt(px18, type(uint256).max / (bal / 1e18), "mulDiv would not have overflowed here");
+
+        vm.prank(alice);
+        uint256 id = vault.forceExit(bal);
+        assertGt(id, 0, "no receipt was written");
+        assertEq(cert.balanceOf(alice), 0, "the certificates were not burned");
+    }
+
+    /// @notice The same product in redeemInstant. Not the Law 2 backstop, but a redemption path
+    ///         must fail on a named error and never on arithmetic.
+    /// @dev LOAD-BEARING: restore `certIn * px18 / 1e18` in redeemInstant and this fails with panic
+    ///      0x11 instead of the expected CertVault_UseQueuedRedeem.
+    function test_redeemInstantRoutesToTheQueueAtAnAbsurdPriceRatherThanPanicking() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+        uint256 bal = cert.balanceOf(alice);
+
+        feed.set(int256(1e49), block.timestamp);
+
+        vm.expectRevert(CertVault.CertVault_UseQueuedRedeem.selector);
+        vm.prank(alice);
+        vault.redeemInstant(bal);
+
+        // Nothing was consumed, and the queued route is still open to the same holder.
+        assertEq(cert.balanceOf(alice), bal, "the failed instant redeem burned something");
+        vm.prank(alice);
+        vault.forceExit(bal);
+        assertEq(cert.balanceOf(alice), 0);
+    }
 }

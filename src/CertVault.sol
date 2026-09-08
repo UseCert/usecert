@@ -11,6 +11,7 @@ import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "openzeppelin-contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol";
 import {SafeCast} from "openzeppelin-contracts/utils/math/SafeCast.sol";
+import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 
 /// @notice One vault per asset. The vault IS a registered Lighter master account and submits its
 ///         own orders, deposits and withdrawals — there is no privileged trading key anywhere in
@@ -143,6 +144,66 @@ contract CertVault {
 
     uint256 internal constant MIN_TARGET_MARGIN_BPS = 5_000;
     uint256 internal constant MAX_TARGET_MARGIN_BPS = 10_000;
+
+    /// @notice Ceiling on the price any `quantity x price` valuation in this contract will use, in
+    ///         18 decimals. Published, immutable, and deliberately absurd: 1e36 is one million
+    ///         million million dollars per certificate.
+    /// @dev FINDING 1 (Law 2). `certIn * px18 / 1e18` in _queueExit panicked 0x11 at a live feed
+    ///      price around 1e59, and _queueExit is forceExit's body — the last-resort backstop Law 2
+    ///      says must always work for a holder with a balance. Every such product now goes through
+    ///      _value18(), which is a TOTAL function: it cannot revert for any pair of uint256 inputs.
+    ///
+    ///      Math.mulDiv ALONE DOES NOT CLOSE THIS, which is the part worth recording rather than
+    ///      assuming. Its 512-bit intermediate moves the failure from "the product exceeds uint256"
+    ///      to "the QUOTIENT exceeds uint256", i.e. from `certIn * px18 >= 2^256` (~1.16e77) to
+    ///      `certIn * px18 >= 1e18 * 2^256` (~1.16e95). That is 18 decades of headroom, and it
+    ///      would be enough if the price were bounded — but it is not. pxUnguarded() reads
+    ///      CertOracle, whose own normalisation guard admits any answer that fits a uint256 once
+    ///      scaled, so px18 can legitimately be as large as ~1.157e77 (an 8-decimal feed reporting
+    ///      1.157e67, which is inside int256). At that price mulDiv's quotient overflows for
+    ///      certIn >= ~1.003e18 — just over ONE certificate. So the "unreachable for realistic
+    ///      supply" argument is false as soon as the feed is hostile or broken, and mulDiv on its
+    ///      own would have left forceExit panicking for any holder of two certificates.
+    ///
+    ///      Hence both: mulDiv for the exact 512-bit intermediate, and this clamp to bound the
+    ///      factor mulDiv cannot bound for itself.
+    ///
+    ///      THE CLAMP IS ECONOMICALLY INERT, and that is why it is acceptable rather than a
+    ///      trade-off. Four reasons, in order of strength:
+    ///        1. No order can be placed at a price above ~4.3e25 anyway (CertOracle.toTickPrice
+    ///           reverts once px18 * 10**priceDecimals / 1e18 leaves the uint32 tick domain — for
+    ///           priceDecimals = 2 that is 4.295e25). This ceiling sits ten decades ABOVE the
+    ///           highest price the venue itself can represent, so it can only ever engage on a
+    ///           price the protocol demonstrably cannot transact at.
+    ///        2. No certificate was ever minted at such a price either, for the same reason: both
+    ///           mint paths route through the revert-capable _hedge, which calls toTickPrice.
+    ///        3. On the queued path owed18 is a CEILING on the payout, not the payout (H-2):
+    ///           claimRedeem pays min(owed18, certIn * px_now / 1e18). Clamping a ceiling that was
+    ///           already orders of magnitude beyond anything the vault holds changes no payout that
+    ///           can actually be funded — at any normal claim-time price the binding term is the
+    ///           current value, not the ceiling.
+    ///        4. redeemInstant refuses when hotBuffer() < amountOut, so an inflated valuation there
+    ///           routes to the queued path instead of paying anything.
+    ///      The one state where the clamp changes a number a holder receives is: exit above 1e36,
+    ///      claim while still above 1e36, and the vault holding collateral sized to a 1e36 price.
+    ///      That collateral does not exist.
+    uint256 public constant MAX_VALUATION_PX18 = 1e36;
+
+    /// @notice Ceiling on the quantity side of the same valuation, in 18 decimals.
+    /// @dev FINDING 1, belt and braces. With px18 clamped above, Math.mulDiv's own 512-bit guard
+    ///      can still trip on a large enough quantity: it panics once `qty18 * px18 >= 1e18 * 2^256`,
+    ///      which at px18 = MAX_VALUATION_PX18 needs qty18 >= 2^256 / 1e18, i.e. ~1.16e41
+    ///      certificates. This constant is exactly that boundary, expressed so the pair is provably
+    ///      safe: qty18 <= type(uint256).max / 1e18 and px18 <= 1e36 give a product of at most
+    ///      (2^256 - 1) * 1e18, which is strictly below the 1e18 * 2^256 at which mulDiv panics.
+    ///      _value18 is therefore total for EVERY uint256 pair, with no reachability argument
+    ///      required — which is the property Law 2 actually needs, since a Law 2 path must not
+    ///      depend on a supply bound the contract does not enforce.
+    ///      1.16e41 certificates is unreachable in any case: a mint's certOut is floored at
+    ///      net18 * 1e18 / px18 with px18 >= 1e16 (toTickPrice's lower tick bound at
+    ///      priceDecimals = 2), so it is bounded by 100 * net18, and net18 is bounded by the
+    ///      collateral token's own supply and by CapacityOracle's immutable maxAbsoluteCap.
+    uint256 public constant MAX_VALUATION_QTY18 = type(uint256).max / (MAX_VALUATION_PX18 / 1e18);
 
     ILighter public immutable lighter;
     ICertOracle public immutable oracle;
@@ -449,7 +510,12 @@ contract CertVault {
         // 7.087500 hedged before, exactly equal after.
         certOut = _quantiseToVenue(net18 * 1e18 / px18);
 
-        uint256 notional18 = certOut * px18 / 1e18;
+        // FINDING 1: routed through _value18 like every other quantity-times-price product in this
+        // file, so no reader has to reconstruct a per-site boundedness argument. This one IS
+        // structurally bounded — certOut is floored from net18 * 1e18 / px18, so certOut * px18
+        // cannot exceed net18 * 1e18 — but "bounded because of what the previous line did" is
+        // exactly the reasoning that left _queueExit panicking, so it is not relied on.
+        uint256 notional18 = _value18(certOut, px18);
         if (notional18 > cfg.instantCap18) revert CertVault_AboveInstantCap();
         _requireCapacity(notional18, px18);
 
@@ -470,7 +536,7 @@ contract CertVault {
         // it back would need a transfer out of a buffer that has just been partly posted as
         // margin. Non-negative by construction: certOut is floored from net18 / px18, so its cost
         // cannot exceed net18.
-        uint256 hedgeCost18 = certOut * px18 / 1e18;
+        uint256 hedgeCost18 = _value18(certOut, px18);
         if (net18 > hedgeCost18) buffer.accrue(address(this), SafeCast.toInt256(net18 - hedgeCost18));
 
         emit Minted(msg.sender, received, certOut, px18, fee);
@@ -494,7 +560,7 @@ contract CertVault {
         // that the hedge cannot cover is not merely discouraged, it is unrepresentable. The
         // remainder is escrow with no certificate against it and is reconciled in settleMint.
         uint256 indicative = _quantiseToVenue(net18 * 1e18 / px18);
-        uint256 notional18 = indicative * px18 / 1e18;
+        uint256 notional18 = _value18(indicative, px18);
         if (notional18 <= cfg.instantCap18) revert CertVault_BelowInstantCap();
         _requireCapacity(notional18, px18);
 
@@ -636,7 +702,7 @@ contract CertVault {
         certificate.mint(r.user, certOut);
 
         uint256 escrow18 = _to18(r.escrow);
-        uint256 hedgeCost18 = certOut * refPx / 1e18;
+        uint256 hedgeCost18 = _value18(certOut, refPx);
         if (escrow18 > hedgeCost18) buffer.accrue(address(this), SafeCast.toInt256(escrow18 - hedgeCost18));
 
         emit MintSettled(receiptId, certOut, fillPx18);
@@ -817,7 +883,11 @@ contract CertVault {
     function redeemInstant(uint256 certIn) external returns (uint256 amountOut) {
         if (certIn == 0) revert CertVault_ZeroAmount();
         (uint256 px18,) = oracle.pxUnguarded();
-        uint256 gross18 = certIn * px18 / 1e18;
+        // FINDING 1: was `certIn * px18 / 1e18`, which panics 0x11 at an extreme feed price. Second
+        // of the three redemption-path instances of that product. Not the Law 2 backstop itself
+        // (this path routes to the queue when the float is short) but a panic here is still a
+        // redemption reverting on arithmetic, and the fix costs nothing. See _value18.
+        uint256 gross18 = _value18(certIn, px18);
         uint256 fee18 = gross18 * cfg.redeemFeeBps / 10_000;
         amountOut = _from18(gross18 - fee18);
 
@@ -869,7 +939,20 @@ contract CertVault {
         // still routes through unconditionally.
         if (certIn == 0) revert CertVault_ZeroAmount();
         (uint256 px18,) = oracle.pxUnguarded();
-        uint256 gross18 = certIn * px18 / 1e18;
+        // FINDING 1 (CRITICAL, Law 2), THE ONE THIS FIX EXISTS FOR. This was
+        // `certIn * px18 / 1e18`. forceExit() is this function, and Law 2 says it must always work
+        // for a holder with a balance — but at a live feed price around px18 = 1e59 the plain
+        // multiplication overflowed and panicked 0x11, reverting the protocol's last-resort
+        // backstop for a holder whose certificates were perfectly good. A previous fix wave hit
+        // the identical expression inside claimRedeem's new payout cap, guarded it there, and
+        // correctly declined to guess at this twin.
+        //
+        // Declining to compute is NOT an option here the way it is in _payout18: that function is
+        // computing a CAP and can fall back to the uncapped figure, whereas this one is computing
+        // the obligation itself, so "no answer" means writing a receipt for zero and paying a
+        // burned holder nothing — the sharpest Law 2 breach the contract could contain. So the
+        // arithmetic had to be made total instead. See _value18 and MAX_VALUATION_PX18.
+        uint256 gross18 = _value18(certIn, px18);
         uint256 fee18 = gross18 * cfg.redeemFeeBps / 10_000;
         uint256 owed18 = gross18 - fee18;
         // C1: record the obligation the moment it is created, so recallMargin() can size its
@@ -1044,18 +1127,17 @@ contract CertVault {
     ///        - a receipt with no recorded quantity, i.e. any receipt written before this mapping
     ///          existed. There are none on a fresh deployment, and reading a missing quantity as
     ///          zero certificates would cap every such payout at zero, so it defers too;
-    ///        - a price so large that `certIn * px18` does not fit in uint256. This one was found
-    ///          by re-tracing the payout path for Law 2 AFTER writing the cap, and it was a real
-    ///          regression in the cap itself: _queueExit's own `certIn * px18` was bounded by the
-    ///          price AT REQUEST, but nothing bounds the price at CLAIM, so a feed reporting
-    ///          ~1e59 (18-decimal) against a receipt of ~10 certificates panicked 0x11 inside a
-    ///          payout — an unpayable receipt with the certificates already burned, which is the
-    ///          exact shape of the Critical this contract has been bitten by twice. Note the
-    ///          arithmetic direction: at any price that large the cap could not have bitten
-    ///          anyway (the certificates are worth astronomically more than the receipt), so
-    ///          returning owed18 here is not merely the safe answer, it is the right one.
-    ///      In all four the vault keeps the pre-H-2 behaviour, which is the only safe direction:
+    ///      In all three the vault keeps the pre-H-2 behaviour, which is the only safe direction:
     ///      a valuation the chain cannot compute must never become a reason not to pay.
+    ///
+    ///      A FOURTH branch used to sit here — "a price so large that `certIn * px18` does not fit
+    ///      in uint256" — and it is gone, replaced by arithmetic that has no such case. FINDING 1
+    ///      (the external audit's final wave) is that the same expression in _queueExit had no such
+    ///      guard, and that a guard was the wrong answer for it anyway: _queueExit computes the
+    ///      obligation, not a cap, so it has nothing safe to fall back TO. Both now call _value18,
+    ///      which is total for every uint256 pair. The observable behaviour of this function at an
+    ///      extreme price is identical to what the removed branch produced (owed18), for the reason
+    ///      that branch already gave: at any price that large the cap cannot bite.
     function _payout18(uint256 receiptId, uint256 owed18) internal view returns (uint256) {
         uint256 certIn = redeemCertIn[receiptId];
         if (certIn == 0) return owed18;
@@ -1067,11 +1149,18 @@ contract CertVault {
             return owed18;
         }
         if (px18 == 0) return owed18;
-        // certIn is non-zero above, so this division is safe, and it must come BEFORE the
-        // multiplication rather than being trusted not to matter — see the fourth bullet.
-        if (px18 > type(uint256).max / certIn) return owed18;
 
-        uint256 valueNow18 = certIn * px18 / 1e18;
+        // FINDING 1: the ad-hoc `px18 > type(uint256).max / certIn` bail-out that used to sit here
+        // is GONE, and its removal is the fix rather than a simplification. It was the right
+        // instinct in the wrong shape: it made the overflow unreachable by refusing to value the
+        // receipt at all, which is fine for a cap (returning owed18 uncapped is the safe direction)
+        // but was never a fix for the twin expression in _queueExit, where the same "refuse to
+        // compute" would mean paying a burned holder zero. Both now share one total helper, so
+        // there is a single overflow argument in this file instead of one guard here and a panic
+        // there. The outcome at an extreme price is unchanged: the clamped valuation is
+        // astronomically above any receipt written at a tradeable price, so the `min` below still
+        // returns owed18 — which the old bail-out returned directly.
+        uint256 valueNow18 = _value18(certIn, px18);
         return valueNow18 < owed18 ? valueNow18 : owed18;
     }
 
@@ -1301,7 +1390,13 @@ contract CertVault {
         s.provenAtBatch = a.batchId;
         s.ageSec = registry.ageSec(address(this));
 
-        required = s.supply * px18 / 1e18;
+        // FINDING 1: `supply * px18 / 1e18`. Not a redemption path (only solvency() and
+        // rebalance() reach it), so this is not a Law 2 fix — but it is the same product with the
+        // same unbounded price, and a panicking published backing figure is its own kind of
+        // dishonesty. At a clamped price the trim it feeds sizes a certEquivalent that floors to
+        // zero and rebalance() reverts CertVault_InBand, i.e. a named error rather than an
+        // anonymous 0x11, which is what a permissionless entry point owes its caller.
+        required = _value18(s.supply, px18);
         if (required == 0) {
             // required == 0 (no supply, or px18 == 0) means the vault owes no delta at all. What
             // that implies depends entirely on whether it is nonetheless carrying one:
@@ -1477,10 +1572,20 @@ contract CertVault {
     ///      bufferCapacity18() for the whole argument. Nothing else in this function changed.
     function _requireCapacity(uint256 addNotional18, uint256 px18) internal view {
         uint256 max = capacity.maxNotional18(address(this), bufferCapacity18());
-        uint256 own18 = (certificate.totalSupply() + pendingMintCerts) * px18 / 1e18;
+        // FINDING 1: `(totalSupply + pendingMintCerts) * px18 / 1e18`. A mint path, so a revert
+        // here is permitted (Laws 2 and 3 gate minting, never redemption) — but supply is NOT
+        // bounded relative to the CURRENT price the way a single mint's own certOut is (that one
+        // is floored from net18 / px18, so its product back with px18 can never exceed net18;
+        // this one values certificates minted at every past price against today's), so this was a
+        // genuinely reachable panic in admission control.
+        uint256 own18 = _value18(certificate.totalSupply() + pendingMintCerts, px18);
         uint256 attested18 = registry.latest(address(this)).notional18;
         uint256 current = own18 > attested18 ? own18 : attested18;
-        if (current + addNotional18 > max) revert CertVault_AtCapacity();
+        // FINDING 1 follow-on: `current + addNotional18 > max` could panic on the ADDITION once
+        // `current` was allowed to be large instead of unreachable. Rearranged so the comparison
+        // never adds — same predicate, and an over-cap mint gets the named CertVault_AtCapacity it
+        // was always meant to get.
+        if (current > max || addNotional18 > max - current) revert CertVault_AtCapacity();
     }
 
     /// @dev Hand a mint receipt's capacity reservation back, floored rather than checked-subtracted.
@@ -1603,6 +1708,22 @@ contract CertVault {
         lighter.deposit(address(this), cfg.collateralAssetIndex, cfg.routeType, marginPosted);
         postedMargin += marginPosted;
         emit MarginPosted(marginPosted, netCollateral - marginPosted);
+    }
+
+    /// @notice `qty18 * px18 / 1e18`, as a function that cannot revert for any uint256 inputs.
+    /// @dev FINDING 1 (Law 2). THE single place this contract multiplies a quantity by a price.
+    ///      Every `certIn * px18 / 1e18` and `supply * px18 / 1e18` in the file routes through it,
+    ///      so there is one overflow argument to check instead of nine. See MAX_VALUATION_PX18 for
+    ///      why mulDiv alone was not enough and why the clamps are economically inert.
+    ///
+    ///      Arithmetically identical to the plain expression for every non-overflowing input, in
+    ///      both the value and the rounding direction: mulDiv floors, `*` then `/` floors, and
+    ///      mulDiv's 512-bit intermediate only changes the answer where the plain form had no
+    ///      answer at all. So no economics move — only the panics go.
+    function _value18(uint256 qty18, uint256 px18) internal pure returns (uint256) {
+        if (px18 > MAX_VALUATION_PX18) px18 = MAX_VALUATION_PX18;
+        if (qty18 > MAX_VALUATION_QTY18) qty18 = MAX_VALUATION_QTY18;
+        return Math.mulDiv(qty18, px18, 1e18);
     }
 
     function _to18(uint256 amount) internal view returns (uint256) {
