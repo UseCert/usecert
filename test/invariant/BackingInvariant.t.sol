@@ -172,6 +172,74 @@ contract BackingInvariantTest is VaultFixture {
         assertEq(handler.claimAwaitingSettlementCount(), 1, "the retry did not succeed");
     }
 
+    /// @notice The mint-side twin of the test above, for the two-phase refund. The handler's
+    ///         refundMint catch used to be bare, which would have accepted "this escrow can never
+    ///         be paid" as indistinguishable from "not yet" — the exact reason a permanently
+    ///         strandable refund could ship past this suite. It now accepts only
+    ///         CertVault_RefundAwaitingSettlement, and this proves both halves: the retryable
+    ///         revert is not counted as a violation, AND the same receipt does eventually pay.
+    /// @dev Directed rather than fuzzed for a reason worth stating: the invariant fuzzer barely
+    ///      advances block.timestamp across a run, so settleWindow (1 day) never expires under
+    ///      fuzzing and neither refund action gets past its "window still open" filter. That is a
+    ///      pre-existing property of this fixture, not new here — settleMintWindowExpiredCount has
+    ///      never fired in a campaign either. These two directed tests are therefore the real
+    ///      coverage of the refund branches, and the fuzzed actions are there so the branches
+    ///      cannot silently stop being callable.
+    function test_refundAwaitingSettlementIsRetryableNotAViolation() public {
+        _drainHotBuffer(); // the vault cannot pay an escrow out of its own balance
+        handler.requestMint(20_000e6); // escrow 19_980e6, of which 17_982e6 goes to the venue
+        handler.settleBatch(); // the mint's own hedge fills
+        vm.warp(block.timestamp + SETTLE_WINDOW + 1);
+
+        assertEq(handler.stageRefundCount(), 0);
+        handler.stageRefund(0);
+        assertEq(handler.stageRefundCount(), 1, "phase 1 did not go through");
+        assertEq(handler.lawTwoViolations(), 0);
+
+        assertEq(handler.refundAwaitingSettlementCount(), 0);
+        handler.refundMint(0);
+        assertEq(handler.refundAwaitingSettlementCount(), 1, "CertVault_RefundAwaitingSettlement did not fire");
+        assertEq(handler.lawTwoViolations(), 0, "a retryable not-yet was counted as a violation");
+        assertEq(handler.refundMintCount(), 0);
+
+        // Now let the funds arrive through the permissionless paths this handler already drives,
+        // and refund the SAME receipt.
+        handler.recallMargin(); // submits the withdrawal staging made askable-for
+        handler.settleBatch(); // the staged hedge close fills
+        handler.recallMargin(); // sweeps what the venue released
+
+        uint256 before = usdg.balanceOf(address(handler));
+        handler.refundMint(0);
+        assertEq(handler.refundMintCount(), 1, "the receipt never actually refunded");
+        assertEq(usdg.balanceOf(address(handler)) - before, 19_980e6, "the escrow was not returned in full");
+        assertEq(handler.lawTwoViolations(), 0);
+        assertEq(handler.refundAwaitingSettlementCount(), 1);
+        assertEq(cert.totalSupply(), 0);
+        assertEq(lighter.positionBase(MARKET), 0, "the refund left the vault long against nothing");
+    }
+
+    /// @notice refundMint before stageRefund is a sequencing signal, not a violation — and only
+    ///         because staging is permanently available to anyone. Proves the handler tells the
+    ///         two apart, and that the receipt is not abandoned in the meantime.
+    function test_refundNotStagedIsRecognisedAndNotAViolation() public {
+        handler.requestMint(20_000e6);
+        handler.settleBatch();
+        vm.warp(block.timestamp + SETTLE_WINDOW + 1);
+
+        assertEq(handler.refundNotStagedCount(), 0);
+        handler.refundMint(0);
+        assertEq(handler.refundNotStagedCount(), 1, "the unstaged branch was not recognised");
+        assertEq(handler.lawTwoViolations(), 0);
+        assertEq(handler.refundMintCount(), 0);
+
+        // The route out is one permissionless call, and then the refund goes through: the fixture's
+        // buffer is untouched here, so no recall is even needed.
+        handler.stageRefund(0);
+        handler.refundMint(0);
+        assertEq(handler.refundMintCount(), 1);
+        assertEq(handler.lawTwoViolations(), 0);
+    }
+
     /// @notice C2: rebalance()'s per-batch bound is reachable through the handler's own surface,
     ///         and is not a Law 2 path.
     function test_rebalanceAlreadyThisBatchIsReachable() public {

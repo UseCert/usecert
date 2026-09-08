@@ -179,13 +179,17 @@ contract CertVaultMintTest is VaultFixture {
     }
 
     /// @notice Law 2's half of C3: the deadline must be a fork, not a dead end. An expired
-    ///         receipt returns the escrow to the user, and refundMint is permissionless so no
-    ///         off-chain service is needed to unstick it.
+    ///         receipt returns the escrow to the user, and both refund phases are permissionless
+    ///         so no off-chain service is needed to unstick it.
+    /// @dev The refund is two-phase since the strand fix: stageRefund() reallocates the counters
+    ///      and closes the hedge, refundMint() pays. This test is otherwise unchanged, and it is
+    ///      NOT the proof the fix works — it passes on the fixture's 100k seeded buffer, which is
+    ///      exactly why the strand shipped. See test/CertVaultRefund.t.sol.
     function test_refundMintReturnsEscrowAfterWindow() public {
         vm.prank(alice);
         uint256 id = vault.requestMint(50_000e6);
         lighter.settleBatch();
-        (, uint256 escrow,,,) = vault.mintReceipts(id);
+        (, uint256 escrow,,,,,) = vault.mintReceipts(id);
         assertEq(escrow, 49_950e6); // amountIn less the 10 bps mint fee
 
         vm.warp(block.timestamp + SETTLE_WINDOW + 1);
@@ -195,6 +199,8 @@ contract CertVaultMintTest is VaultFixture {
         uint256 strangerBefore = usdg.balanceOf(stranger);
 
         vm.prank(stranger); // permissionless, and it pays the user, never the caller
+        vault.stageRefund(id);
+        vm.prank(stranger);
         uint256 out = vault.refundMint(id);
 
         assertEq(out, escrow);
@@ -212,7 +218,7 @@ contract CertVaultMintTest is VaultFixture {
     /// @notice A refund must not strand the share of the escrow requestMint posted to the venue.
     ///         Nothing else would ever ask for it back — the certificates were never minted, so
     ///         no exit will ever allocate this receipt's share and recallMargin() sizes off
-    ///         counters that never learned about it. refundMint therefore reallocates it, and the
+    ///         counters that never learned about it. stageRefund therefore reallocates it, and the
     ///         reallocation is a transfer between the two counters, never new headroom.
     function test_refundMintReallocatesThePostedShareForRecall() public {
         vm.prank(alice);
@@ -225,6 +231,7 @@ contract CertVaultMintTest is VaultFixture {
         assertEq(expected, 44_955e6);
 
         vm.warp(block.timestamp + SETTLE_WINDOW + 1);
+        vault.stageRefund(id); // the reallocation lives here now, not in refundMint
         vault.refundMint(id);
 
         assertEq(vault.postedMargin(), postedBefore - expected);

@@ -44,19 +44,40 @@ contract CertVault {
     /// @dev C3: an unsettled mint receipt past its settleWindow. Not a dead end — refundMint()
     ///      is permissionless and returns the escrow, so the expiry is a fork, not a trap.
     error CertVault_SettleWindowExpired();
-    /// @dev C3: refundMint() before the window has expired. The holder's own route is
-    ///      settleMint(), which is still open, so nothing is stuck behind this.
+    /// @dev C3: stageRefund()/refundMint() before the window has expired. The holder's own route
+    ///      is settleMint(), which is still open, so nothing is stuck behind this. Deliberately
+    ///      reused by both refund phases rather than adding a second, synonymous
+    ///      "window still active" error: this one already means exactly "too early", and two
+    ///      errors for one condition would only force every caller to handle both.
     error CertVault_SettleWindowNotExpired();
     /// @dev M2: claimRedeem cannot pay right now. Deliberately reverts WITHOUT setting r.paid —
     ///      the receipt stays claimable forever, and recallMargin()/_sweepPending() are both
     ///      permissionless, so this is a retryable "not yet", never a gate.
     error CertVault_AwaitingSettlement();
+    /// @dev refundMint cannot pay this escrow out of the vault's own balance yet. The mint-side
+    ///      twin of CertVault_AwaitingSettlement, and a retryable "not yet" for the same reasons:
+    ///      it reverts WITHOUT setting r.settled, so the receipt stays refundable forever, and
+    ///      stageRefund() has ALREADY moved this escrow's posted share into marginPendingRecall,
+    ///      so the permissionless recallMargin() / _sweepPending() / seedBuffer trio can each
+    ///      create the funding condition. That last clause is the whole point: the previous shape
+    ///      of this function reallocated and paid atomically, so the reallocation was rolled back
+    ///      by the very revert that made it necessary and no external call could ever unstick the
+    ///      escrow. See stageRefund().
+    error CertVault_RefundAwaitingSettlement();
+    /// @dev refundMint before stageRefund. Escapable by anyone, immediately: stageRefund() is
+    ///      permissionless, takes no funding, and cannot revert on it.
+    error CertVault_RefundNotStaged();
 
     event Minted(address indexed user, uint256 amountIn, uint256 certOut, uint256 px18, uint256 fee);
     event MintRequested(uint256 indexed receiptId, address indexed user, uint256 amountIn);
     event MintSettled(uint256 indexed receiptId, uint256 certOut, uint256 fillPx18);
     /// @dev C3: the other side of the settle deadline — escrow returned, no certificates minted.
     event MintRefunded(uint256 indexed receiptId, address indexed user, uint256 amountOut);
+    /// @dev Phase 1 of a refund. marginReallocated is what moved from postedMargin into
+    ///      marginPendingRecall (so recallMargin() will ask the venue for it); hedgeClosePlaced
+    ///      records whether the closing order for the unsettled mint's hedge actually went in,
+    ///      since that step is fail-open and must never be silently lost when it does not.
+    event RefundStaged(uint256 indexed receiptId, uint256 marginReallocated, bool hedgeClosePlaced);
     event MarginPosted(uint256 marginPosted, uint256 retainedAsHotBuffer);
     /// @dev Task 8d: margin backing an open position is locked by the venue's initial margin
     ///      requirement until the closing order fills, so submitting a withdrawal and the cash
@@ -93,12 +114,19 @@ contract CertVault {
     ///      sit indefinitely and then be settled against a price that had moved arbitrarily far
     ///      from the one the user actually requested at — measured at 4_999 bps on a week-old
     ///      receipt, which minted 280.7 certificates against a hedge covering 140.4.
+    /// @dev refundStaged and indicativeCerts are the two-phase refund's state. refundStaged is
+    ///      what makes stageRefund idempotent-once and what refundMint requires; indicativeCerts
+    ///      is the certificate amount requestMint actually hedged, recorded so a refund can close
+    ///      exactly that exposure rather than guessing it back out of price at refund time (the
+    ///      price will have moved, and the hedge was sized at the request price).
     struct MintReceipt {
         address user;
         uint256 escrow;
         bool settled;
         uint256 requestPx18;
         uint64 requestedAt;
+        bool refundStaged;
+        uint256 indicativeCerts;
     }
 
     uint8 internal constant ORDER_TYPE_MARKET = 1;
@@ -267,7 +295,14 @@ contract CertVault {
             escrow: amountIn - fee,
             settled: false,
             requestPx18: px18,
-            requestedAt: uint64(block.timestamp)
+            requestedAt: uint64(block.timestamp),
+            refundStaged: false,
+            // Step 1 of the refund fix: record exactly what the _hedge below is about to open, so
+            // stageRefund can close that same exposure. Without it a refund left the vault long
+            // against certificates that were never minted (measured: totalSupply 0 against a
+            // 1,403,641-tick position on a 50k mint), breaching Law 1 until rebalance() — a
+            // bounded, attester-dependent trim — happened to grind it down.
+            indicativeCerts: indicative
         });
 
         _postMargin(amountIn - fee);
@@ -301,7 +336,60 @@ contract CertVault {
         emit MintSettled(receiptId, certOut, fillPx18);
     }
 
-    /// @notice Return the escrow on a mint receipt whose settle window has expired.
+    /// @notice Phase 1 of a refund: make the escrow's venue-side margin recallable, and close the
+    ///         hedge the unsettled mint opened. Permissionless, callable once per receipt after
+    ///         the settle window expires.
+    /// @dev Deliberately separate from refundMint, and it must stay that way. Solidity has no
+    ///      partial commit: a single function that reallocated the counters and then reverted on a
+    ///      funding check would roll the reallocation back with it, so the reallocation could
+    ///      never run in the one situation it exists for — an escrow the vault cannot currently
+    ///      afford. That is precisely how escrow became permanently stranded. This phase touches
+    ///      no balances and performs no transfer, so it always succeeds, and it can therefore be
+    ///      staged long before the vault can afford the payout.
+    ///
+    ///      Law 2: nothing here can hold user value behind it. refundMint's
+    ///      CertVault_RefundNotStaged is escaped by this call, which anyone may make; this call's
+    ///      own reverts are "already staged" and "window still open", and in the latter case
+    ///      settleMint is still the live path.
+    function stageRefund(uint256 receiptId) external {
+        MintReceipt storage r = mintReceipts[receiptId];
+        if (r.user == address(0) || r.settled) revert CertVault_BadReceipt();
+        if (block.timestamp <= uint256(r.requestedAt) + settleWindow) revert CertVault_SettleWindowNotExpired();
+        if (r.refundStaged) revert CertVault_BadReceipt();
+
+        r.refundStaged = true;
+
+        // Symmetric with _queueExit: move this receipt's posted share from the allocation counter
+        // into the recall counter so recallMargin() will actually ask the venue for it. requestMint
+        // posted targetMarginBps of this escrow via _postMargin and nothing else would ever ask for
+        // it back — the certificates were never minted, so no _queueExit will ever allocate this
+        // receipt's share, and recallMargin() sizes off counters that never learned about it.
+        // This is a TRANSFER between the two counters, capped at postedMargin, so it cannot exceed
+        // what was actually deposited and cannot double-count venue headroom (the failure mode
+        // that killed three earlier recall designs — see recallMargin's doc comment).
+        uint256 posted = r.escrow * cfg.targetMarginBps / 10_000;
+        if (posted > postedMargin) posted = postedMargin;
+        if (posted > 0) {
+            postedMargin -= posted;
+            marginPendingRecall += posted;
+        }
+
+        // Close the hedge this unsettled mint opened. requestMint hedged r.indicativeCerts at the
+        // request price; the certificates were never minted, so leaving it open makes the vault
+        // long against nothing (Law 1). Fail-open, using the exit path's _tryHedge and not _hedge:
+        // an unplaceable close must not block the refund, the event below records that it did not
+        // go in, and rebalance() remains the backstop.
+        bool placed = false;
+        if (r.indicativeCerts > 0) {
+            (uint256 px18,) = oracle.pxUnguarded();
+            placed = _tryHedge(r.indicativeCerts, px18, SIDE_ASK);
+        }
+
+        emit RefundStaged(receiptId, posted, placed);
+    }
+
+    /// @notice Phase 2 of a refund: return the escrow on a mint receipt whose settle window has
+    ///         expired. Requires stageRefund first.
     /// @dev Permissionless by necessity, not convenience (Law 2 and Law 6): settleMint gains a
     ///      deadline in C3, and a deadline with no refund would strand the user's collateral
     ///      behind an expired receipt — trading one Law 2 breach for another. So the expiry is
@@ -311,32 +399,33 @@ contract CertVault {
     ///
     ///      The escrow is paid out of the vault's own collateral balance, exactly as claimRedeem
     ///      does. requestMint posted targetMarginBps of it to the venue, so a refund may need
-    ///      recallMargin() to have brought that share home first; recallMargin() is
-    ///      permissionless and retryable, and this call is retryable too, so a refund that
-    ///      cannot be paid this second is a "not yet", never a "no".
+    ///      recallMargin() to have brought that share home first — which is what stageRefund
+    ///      makes possible, and why it is a precondition here rather than something this function
+    ///      does for itself. The counter reallocation deliberately does NOT live in this function:
+    ///      it must survive a failed payout, and anything inside this function does not.
+    ///
+    ///      r.settled is set only AFTER the funding check, so a refund that cannot be paid this
+    ///      second leaves the receipt fully refundable — a "not yet", never a "no".
     function refundMint(uint256 receiptId) external returns (uint256 amountOut) {
         MintReceipt storage r = mintReceipts[receiptId];
         if (r.user == address(0) || r.settled) revert CertVault_BadReceipt();
         if (block.timestamp <= uint256(r.requestedAt) + settleWindow) revert CertVault_SettleWindowNotExpired();
+        if (!r.refundStaged) revert CertVault_RefundNotStaged();
 
-        r.settled = true;
+        // Collect anything the venue has already released before deciding we cannot pay: without
+        // this, a refund would report "awaiting settlement" while the cash sat in the pending
+        // balance one permissionless call away.
+        _sweepPending();
+
         amountOut = r.escrow;
-
-        // requestMint posted targetMarginBps of this escrow to the venue via _postMargin. Nothing
-        // else would ever ask for it back: the certificates were never minted, so no _queueExit
-        // will ever allocate this receipt's share, and recallMargin() sizes off counters that
-        // never learned about it — the posted share would sit at the venue permanently
-        // unrecallable. So reallocate it here, exactly as _queueExit does on the redeem side.
-        // This is a TRANSFER between the two counters, capped at postedMargin, so it cannot
-        // exceed what was actually deposited and cannot double-count headroom (the failure mode
-        // that killed three earlier recall designs — see recallMargin's doc comment).
-        uint256 posted = amountOut * cfg.targetMarginBps / 10_000;
-        if (posted > postedMargin) posted = postedMargin;
-        if (posted > 0) {
-            postedMargin -= posted;
-            marginPendingRecall += posted;
+        if (IERC20(cfg.collateral).balanceOf(address(this)) < amountOut) {
+            // Retryable, not a dead end: stageRefund has already moved this escrow's posted share
+            // into marginPendingRecall, and recallMargin(), _sweepPending() and seedBuffer are all
+            // permissionless. The receipt stays unsettled and staged.
+            revert CertVault_RefundAwaitingSettlement();
         }
 
+        r.settled = true;
         IERC20(cfg.collateral).safeTransfer(r.user, amountOut);
         emit MintRefunded(receiptId, r.user, amountOut);
     }
@@ -514,6 +603,10 @@ contract CertVault {
 
         uint256 have = hotBuffer();
         uint256 need = totalOwedOutstanding > have ? totalOwedOutstanding - have : 0;
+        // A staged mint refund reaches this sizing through marginPendingRecall, not through
+        // totalOwedOutstanding: stageRefund() moves the escrow's posted share into that counter,
+        // and the `max` below therefore already asks the venue for it. Proven by test, not by
+        // reading — see test_recallMarginRequestsTheStagedRefundShare / ..._DoesNotRequestUnstaged.
         // Always recall at least the allocated basis; ask for the shortfall when it is larger,
         // because the venue fulfils min(request, available) and _sweepPending reconciles what
         // actually arrives.

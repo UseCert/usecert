@@ -95,6 +95,8 @@ contract VaultHandler is CommonBase, StdUtils {
     uint256 public callsMintInstant;
     uint256 public callsRequestMint;
     uint256 public callsSettleMint;
+    uint256 public callsStageRefund;
+    uint256 public callsRefundMint;
     uint256 public callsRedeemInstant;
     uint256 public callsRequestRedeem;
     uint256 public callsForceExit;
@@ -131,6 +133,13 @@ contract VaultHandler is CommonBase, StdUtils {
     ///      then be possible. Both counted so the report can say whether they were reached.
     uint256 public settleMintWindowExpiredCount;
     uint256 public refundMintCount;
+    /// @dev The two-phase refund. stageRefundCount is successful phase-1 calls;
+    ///      refundAwaitingSettlementCount is refundMint's retryable "not funded yet" (accepted,
+    ///      receipt pushed back); refundNotStagedCount is refundMint reached before staging
+    ///      (filtered before the call, so it is a reachability counter, not an accepted revert).
+    uint256 public stageRefundCount;
+    uint256 public refundAwaitingSettlementCount;
+    uint256 public refundNotStagedCount;
 
     constructor(
         CertVault _vault,
@@ -236,22 +245,85 @@ contract VaultHandler is CommonBase, StdUtils {
         }
     }
 
-    /// @notice C3's escape hatch for a mint receipt past its settle window. Permissionless, and
-    ///         it must always return the escrow to the receipt's user.
-    /// @dev Not counted as a violation when it reverts: before the window it is simply not the
-    ///      right call (settleMint still is), and a refund the vault cannot fund this second is
-    ///      retryable — recallMargin() brings the posted share home. Either way the receipt goes
-    ///      back on the list so it is never abandoned.
-    function refundMint(uint256 seed) external {
+    /// @notice Phase 1 of C3's escape hatch: reallocate the escrow's venue-side margin share so
+    ///         recallMargin() will ask for it, and close the hedge the unsettled mint opened.
+    /// @dev Documented as unable to revert on funding, so once the window has expired and the
+    ///      receipt is not yet staged, a revert here IS a Law 2 violation: refundMint is gated
+    ///      behind this call, so anything that can permanently refuse staging permanently strands
+    ///      the escrow. The two pre-window/already-staged cases are filtered out before calling
+    ///      rather than absorbed by a catch, so the catch below has nothing legitimate left to
+    ///      accept. The receipt is never taken off the pending list here (only a settled one is
+    ///      dropped) — staging does not retire a receipt, refundMint does.
+    function stageRefund(uint256 seed) external {
+        callsStageRefund++;
         if (pendingMintReceipts.length == 0) return;
         uint256 idx = bound(seed, 0, pendingMintReceipts.length - 1);
         uint256 receiptId = pendingMintReceipts[idx];
-        _removeMintReceipt(idx);
 
+        (,, bool settled,, uint64 requestedAt, bool alreadyStaged,) = vault.mintReceipts(receiptId);
+        if (settled) {
+            _removeMintReceipt(idx);
+            return;
+        }
+        // Not yet the right call: settleMint is still the live path, or staging already happened.
+        if (alreadyStaged || block.timestamp <= uint256(requestedAt) + vault.settleWindow()) return;
+
+        try vault.stageRefund(receiptId) {
+            stageRefundCount++;
+        } catch {
+            // Nothing legitimate reaches here — see the NatSpec above.
+            lawTwoViolations++;
+        }
+    }
+
+    /// @notice Phase 2 of C3's escape hatch for a mint receipt past its settle window.
+    ///         Permissionless, and it must always return the escrow to the receipt's user.
+    /// @dev The catch here is deliberately NOT bare (a Minor the re-review raised, and the reason
+    ///      this whole class of bug could ship unseen: a bare catch accepted "the vault can never
+    ///      pay this escrow" as indistinguishable from "not the right call yet"). Only
+    ///      CertVault_RefundAwaitingSettlement is accepted, and only because stageRefund has
+    ///      already made the escrow's margin share recallable and recallMargin()/settleBatch()
+    ///      (both driven by this handler) are the permissionless way to make the cash arrive.
+    ///      Every other revert increments lawTwoViolations. The two states in which refundMint
+    ///      legitimately refuses for a reason that is not about funding — window still open, not
+    ///      yet staged — are filtered out before the call rather than caught after it, so they
+    ///      cannot mask a real defect. Accepting the retryable revert is only legitimate because
+    ///      the receipt goes back onto pendingMintReceipts and can be retried.
+    function refundMint(uint256 seed) external {
+        callsRefundMint++;
+        if (pendingMintReceipts.length == 0) return;
+        uint256 idx = bound(seed, 0, pendingMintReceipts.length - 1);
+        uint256 receiptId = pendingMintReceipts[idx];
+
+        (,, bool settled,, uint64 requestedAt, bool staged,) = vault.mintReceipts(receiptId);
+        if (settled) {
+            _removeMintReceipt(idx);
+            return;
+        }
+        // Window still open: settleMint is the right call, not this one.
+        if (block.timestamp <= uint256(requestedAt) + vault.settleWindow()) return;
+        // Not staged: stageRefund above is the right call, not this one. Counted so the report can
+        // say the branch was reached, and left on the list because staging is always available.
+        if (!staged) {
+            refundNotStagedCount++;
+            return;
+        }
+
+        _removeMintReceipt(idx);
         try vault.refundMint(receiptId) returns (uint256 /* amountOut */ ) {
             refundMintCount++;
-        } catch {
-            pendingMintReceipts.push(receiptId);
+        } catch (bytes memory reason) {
+            if (_isSelector(reason, CertVault.CertVault_RefundAwaitingSettlement.selector)) {
+                refundAwaitingSettlementCount++;
+                console2.log("REFUND_AWAITING_SETTLEMENT", refundAwaitingSettlementCount);
+                pendingMintReceipts.push(receiptId);
+            } else {
+                // A staged, expired receipt that refuses to pay for any reason other than "not
+                // funded yet" is escrow the user cannot get back. Exactly the Critical this
+                // handler's old bare catch would have hidden.
+                lawTwoViolations++;
+                pendingMintReceipts.push(receiptId);
+            }
         }
     }
 
