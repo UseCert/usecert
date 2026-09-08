@@ -14,44 +14,53 @@ Each item states the assumption, what depends on it, and what happens if it is v
 
 ---
 
-## 0. BLOCKER — `CertFactory` exceeds the EIP-170 contract size limit
+## 0. RESOLVED — `CertFactory` is a registry, and vaults are deployed by script
 
-**`CertFactory` cannot be deployed to any EIP-170 chain as currently built.** Measured with this
-repo's `foundry.toml` (`optimizer = true`, `optimizer_runs = 200`, `via_ir = false`):
+**`CertFactory` no longer deploys vaults, because no contract can.** This section used to record an
+open blocker: the factory measured **28,205 B** of runtime against EIP-170's 24,576 B ceiling
+(**−3,629 B**) and could not be deployed to any chain that enforces the limit.
 
-| Contract | Runtime size | EIP-170 limit | Margin |
-| --- | --- | --- | --- |
-| `CertFactory` | **28,205 B** | 24,576 B | **−3,629 B** |
-| `CertVault` | 17,559 B | 24,576 B | +7,017 B |
+The cause was `deployVault`'s `new CertVault(...)`. A contract that can `new X` must carry X's
+entire **creation** code inside its own **runtime** code, and `CertVault`'s initcode measures
+**25,743 B** — which already exceeds the 24,576 B *runtime* limit on its own. So this was never a
+size budget that a leaner factory, a lower `optimizer_runs`, or a separate `CertVaultDeployer`
+helper could have won back: **no contract can ever deploy a `CertVault` via `new`.** The limit
+follows the bytecode, wherever it is parked.
 
-`CertFactory.deployVault` uses `new CertVault(...)`, so the factory's runtime bytecode embeds
-`CertVault`'s entire 25,743-byte creation code. The factory is therefore always larger than the
-vault it deploys, and the vault is already two thirds of the limit.
+`CertVault` deploys perfectly well **directly from an EOA, a multisig, or a deployment script**,
+where the relevant ceiling is EIP-3860's 49,152 B initcode limit and 25,743 B is comfortably under.
 
-**This is pre-existing, not introduced by the C1 audit fixes.** At commit `eb408d8`, before this
-pass, `CertFactory` measured 27,368 B (−2,792 B). The audit fixes added 461 B to `CertVault`'s
-runtime and so 837 B to the factory, deepening an existing overrun rather than creating one.
+**What changed.** `CertFactory` is now a registry over vaults deployed elsewhere:
 
-It is not caught by the test suite because Foundry does not enforce EIP-170 in tests, which is why
-`test/CertFactory.t.sol` passes.
+| | Before | After |
+| --- | --- | --- |
+| `CertFactory` runtime | 28,205 B (**−3,629 B**) | **2,323 B** (+22,253 B) |
+| `CertFactory` initcode | 28,577 B | 2,671 B |
+| `CertVault` | 17,559 B runtime / 25,743 B initcode | unchanged |
 
-**It does not block the protocol** — every test deploys `CertVault` directly, and so can a
-deployment script. It blocks *the factory*, i.e. the on-chain multi-vault deployment path.
+- **`registerVault(address vault, address certificate)`** — governance-only. Validates the vault
+  (non-zero, has code, not already registered, and its own `certificate()` equals the `certificate`
+  argument) and records it in `vaults` and `isVault`, then emits `VaultRegistered`. This is the
+  replacement for `deployVault`, and it is what makes `enable()` and every consumer of `vaults` /
+  `isVault` work exactly as before.
+- **`deployVault(...)`** — **retained as a reverting stub.** The signature and the governance check
+  are unchanged and in the same order, so an unauthorised caller still gets
+  `CertFactory_OnlyGovernance` (asserted by the external audit's frozen evidence file,
+  `test/AttackSuite.t.sol`); an authorised caller gets `CertFactory_UseRegisterVault`, a named
+  pointer at the replacement. It never deploys anything.
+- **`VaultDeployed` was renamed `VaultRegistered`**, same three fields
+  (`vault`, `certificate`, `marketIndex`). The old name would be a lie in the ABI. **Any indexer
+  subscribing to `VaultDeployed` must change the topic it watches.**
 
-**Options, none of which were taken here** (this pass was scoped not to modify `foundry.toml` and
-not to restructure the factory):
+**No other contract is at risk.** After this change the largest contract in `src/` is `CertVault` at
+17,559 B (+7,017 B of margin), and the only remaining contract-deploys-contract sites in `src/` are
+`CertVault`'s constructor creating its `Certificate` (3,051 B initcode) and its `BufferBook`
+(2,429 B initcode) — both an order of magnitude under the limit, and both already accounted for
+inside `CertVault`'s own 17,559 B.
 
-1. `via_ir = true`, and/or a much lower `optimizer_runs`, in `foundry.toml`. Cheapest, and worth
-   measuring first — but it changes codegen for every contract and must be re-audited, and
-   `CertFactory.deployVault`'s own NatSpec notes the flat signature already overflows the stack
-   window with `via_ir = false`.
-2. Stop embedding the creation code: deploy vaults via a minimal-proxy / clone-with-immutable-args
-   pattern, or a separate `CertVaultDeployer` the factory calls.
-3. Drop `CertFactory` from C1 and deploy vaults directly from the multisig, registering them with a
-   thin registry. The factory's only substance is `isVault`, `vaults`, and the L-1 marker.
-
-**Measure `forge build --sizes` and resolve this before mainnet.** Nothing else on this checklist
-matters if the deployment path itself will not fit on chain.
+**Foundry does not enforce EIP-170 in tests**, which is why the suite was green throughout the
+overrun. `forge build --sizes` is the check, and it must be run — and read — before every
+deployment. It exits non-zero when any contract exceeds the runtime limit.
 
 ---
 
@@ -153,22 +162,37 @@ An explicit `_governance` constructor parameter is the C2 cleanup. The arity is 
 
 ## 6. Bootstrap sequence
 
+**The vault is deployed by the script, not by the factory** (section 0). `CertFactory` is deployed
+before the vault only because `registerVault` needs to exist to be called — the vault does not
+depend on the factory at all, and holds no reference to it.
+
 1. Deploy `SolvencyRegistry` and `CertOracle` **from the multisig** (section 4).
-2. Deploy `CapacityOracle`, then `CertFactory`, then the vault.
-3. `setAbsoluteCap(vault, ...)` — governance. Without it the vault cannot mint.
-4. Transfer at least `10 ** collateralDecimals` of collateral to the vault (`seedBuffer` is the
+2. Deploy `CapacityOracle`, then `CertFactory`.
+3. **Deploy the vault directly** — `new CertVault(Deps{lighter, oracle, registry, capacity,
+   governance}, config, venueWithdrawCap, settleWindow, name, symbol)` from the deployment script or
+   the multisig. The vault's constructor deploys its own `Certificate` and `BufferBook`. Read
+   `vault.certificate()` back; you need it for the next step. **Do not attempt this through
+   `CertFactory.deployVault` — it reverts `CertFactory_UseRegisterVault` by construction.**
+   The four `Deps` addresses must be the same four the factory holds
+   (`factory.lighter()`, `factory.registry()`, `factory.capacity()`, `factory.governance()`);
+   `registerVault` does **not** check this for you, and section 9 is where you verify it.
+4. `CertFactory.registerVault(vault, certificate)` — **governance.** Records the vault in `vaults`
+   and `isVault`. Required before `enable()` will accept the vault; nothing else in `src/` reads the
+   registry, so a vault that is never registered still mints and redeems normally.
+5. `setAbsoluteCap(vault, ...)` — governance. Without it the vault cannot mint.
+6. Transfer at least `10 ** collateralDecimals` of collateral to the vault (`seedBuffer` is the
    permissionless way) — `bootstrap()` deposits exactly that much as registering dust and will
    revert without it.
-5. `bootstrap()` — one-time, permissionless, sets `bootstrapped`.
-6. **Wait for the rollup to execute the registering deposit.** `createOrder` reverts
+7. `bootstrap()` — one-time, permissionless, sets `bootstrapped`.
+8. **Wait for the rollup to execute the registering deposit.** `createOrder` reverts
    `AccountIsNotRegistered` until `addressToAccountIndex[vault]` is populated, so every mint reverts
    as one atomic transaction until then — nothing is pulled, posted or minted.
-7. Attest once (`attest`) and set the mark price (`setMarkPrice`) so `maxNotional18` and
+9. Attest once (`attest`) and set the mark price (`setMarkPrice`) so `maxNotional18` and
    `mintAllowed()` are live.
-8. `CertFactory.enable(vault)` — **optional and observational only (L-1).** Nothing in `src/` reads
-   the `enabled` flag; `CertVault` holds no reference to its factory and cannot consult it. Step 6
-   is the real sequencing guarantee and the chain enforces it. Call `enable` if you want the public
-   marker; skipping it changes nothing.
+10. `CertFactory.enable(vault)` — **optional and observational only (L-1).** Nothing in `src/` reads
+    the `enabled` flag; `CertVault` holds no reference to its factory and cannot consult it. Step 8
+    is the real sequencing guarantee and the chain enforces it. Call `enable` if you want the public
+    marker; skipping it changes nothing. It requires step 4.
 
 ## 7. Assumptions carried by Finding 1's valuation bounds
 
@@ -210,6 +234,16 @@ Read these back on-chain before funding:
 - [ ] `capacity.maxAbsoluteCap()` is the intended real number, and `absoluteCap18(vault)` is set
 - [ ] `vault.governance()`, `vault.lighter()`, `vault.oracle()`, `vault.registry()`,
       `vault.capacity()` are all correct — every one is immutable
+- [ ] `vault.lighter()`, `vault.registry()`, `vault.capacity()` and `vault.governance()` each equal
+      the factory's own `lighter()`, `registry()`, `capacity()` and `governance()`. **This is the
+      one thing the old `deployVault` guaranteed structurally and `registerVault` does not** — the
+      factory used to wire these from its own immutables, and now the deployment script does. A
+      mismatch is not repairable: every dependency on both sides is immutable, so the remedy is a
+      redeployment
+- [ ] `factory.isVault(vault)` is true and `factory.vaults(i) == vault` for exactly one `i`, and
+      `factory.vaultCount()` equals the number of vaults you actually deployed (section 6, step 4)
+- [ ] `vault.certificate()` equals the `certificate` argument you passed to `registerVault` —
+      `registerVault` enforces this, so this item is a read-back, not a check
 - [ ] `vault.cfg()` decimals and indices match the venue's market config (section 3)
 - [ ] `vault.venueWithdrawCap() <= type(uint64).max`
 - [ ] `vault.lighterAccountIndex() != 0` (the registering deposit has executed)
@@ -217,3 +251,6 @@ Read these back on-chain before funding:
       uint32 domain at the configured `priceDecimals`
 - [ ] a `forceExit` of a dust position succeeds on the live deployment — this is Law 2 and it is
       worth one real transaction
+- [ ] `forge build --sizes` was run against the exact commit being deployed and exited **zero**, with
+      every contract showing a positive runtime margin (section 0). Foundry does not enforce EIP-170
+      in `forge test`, so a green suite is not evidence for this item

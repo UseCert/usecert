@@ -227,11 +227,12 @@ account exists at all."
    |
    v
 CertVault[asset]  — IS a registered Lighter master account          CertFactory
-   |  - holds hot collateral buffer for instant settlement           deploys + bootstraps
-   |  - mints/burns Certificate at CertOracle px +/- fee             one vault + one
-   |  - submits its OWN hedge orders on-chain                       Certificate per asset
-   |  - submits its own closes and withdrawals
-   |  - BufferBook accrual; reads SolvencyRegistry
+   |  - holds hot collateral buffer for instant settlement           REGISTRY of the
+   |  - mints/burns Certificate at CertOracle px +/- fee             deployment's vaults.
+   |  - submits its OWN hedge orders on-chain                       It does NOT deploy
+   |  - submits its own closes and withdrawals                       them and never
+   |  - BufferBook accrual; reads SolvencyRegistry                   bootstrapped them -
+   |                                                                 EIP-170, see S5
    |
    +--> ZkLighter.deposit(vault, assetIdx, Perps, amt)      ---> margin credited in-rollup
    +--> ZkLighter.createOrder(idx, mkt, amt, px, isAsk, typ) ---> position opened / closed
@@ -261,7 +262,8 @@ Names match the front-end's architecture display, which is a hard constraint.
 ```solidity
 // Certificate.sol — ERC-20 per asset (uTSLA, uNVDA, uSPX). mint/burn only by its vault.
 
-// CertVault.sol — one per asset, factory-deployed. IS a Lighter master account.
+// CertVault.sol — one per asset, script-deployed then factory-REGISTERED (EIP-170, see
+//   CertFactory.sol below). IS a Lighter master account.
 //   mintInstant(amtIn)       : size <= instantCap. px = CertOracle.px(asset), guards applied.
 //                              out = (amtIn - fee) / px. Mints Certificate, credits hot buffer,
 //                              and submits its own ZkLighter.createOrder bid in the same tx.
@@ -310,10 +312,19 @@ Names match the front-end's architecture display, which is a hard constraint.
 
 // CERT.sol — governance and staking token. C3.
 
-// CertFactory.sol - deploys {CertVault, Certificate} and PUBLISHES when a vault's Lighter account
-//   index has resolved. C1 audit L-1: the `enabled` flag is an observational marker and gates
-//   NOTHING - see Section 3.3 for where the sequencing guarantee actually lives. Immutable fee
-//   bounds and draw order set at deploy. Timelocked upgrades.
+// CertFactory.sol - REGISTRY of the deployment's {CertVault, Certificate} pairs, which PUBLISHES
+//   when a vault's Lighter account index has resolved. C1 audit L-1: the `enabled` flag is an
+//   observational marker and gates NOTHING - see Section 3.3 for where the sequencing guarantee
+//   actually lives. Immutable fee bounds and draw order set at deploy. Timelocked upgrades.
+//
+//   IT DOES NOT DEPLOY VAULTS, and cannot. This used to read "deploys {CertVault, Certificate}",
+//   which described `deployVault`'s `new CertVault(...)`. A contract that can `new X` carries X's
+//   whole creation code in its own RUNTIME code, and CertVault's initcode is 25,743 B against
+//   EIP-170's 24,576 B runtime ceiling - so the factory measured 28,205 B and was undeployable,
+//   and NO contract can ever deploy a CertVault via `new`. Vaults are deployed by the deployment
+//   script (or the multisig) and handed to `registerVault(vault, certificate)`, governance-gated,
+//   which validates the pair and records it in `vaults`/`isVault`. `deployVault` is retained as a
+//   reverting stub that points at `registerVault`. See docs/DEPLOYMENT-CHECKLIST.md section 6.
 ```
 
 ---
@@ -681,6 +692,14 @@ not mocks — before mainnet.
   `CapacityOracle`, `SolvencyRegistry` (route A), `Zap`; `uTSLA` and `uNVDA`; delta-keeper,
   solvency-prover, fill-reporter; published reconstruction tool; public dashboard showing solvency
   **and capacity**. No off-chain trading key. A capped pilot, honestly labelled.
+  > **Amended (EIP-170).** `CertFactory` ships as a **registry**, not a deployer, so "deploy the
+  > factory, then have it deploy the vaults" is not the C1 build order and never can be. Each vault
+  > is deployed by the deployment script (or directly by the multisig) and then handed to
+  > `CertFactory.registerVault(vault, certificate)`. A contract that can `new CertVault` must carry
+  > the vault's 25,743-byte creation code inside its own runtime, against EIP-170's 24,576-byte
+  > ceiling — the factory measured 28,205 B and was undeployable to any chain that enforces the
+  > limit. `deployVault` is retained only as a reverting stub. Order of operations:
+  > docs/DEPLOYMENT-CHECKLIST.md section 6.
 - **C2** — capacity expansion: route B on-chain proofs, perpRFQ whitelisting (O-11) for size,
   `uSPX` / `uQQQ`, DEX seeding on Pleiades and Uniswap, lending integrations; optionally the
   Section 11.1 latency path if and only if O-8 resolves cleanly.
