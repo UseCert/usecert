@@ -15,12 +15,16 @@ contract CapacityOracleTest is Test {
     uint256 constant OI = 1_190_000e18; // TSLA open interest observed 2026-09-07
     uint256 constant ABSOLUTE_CAP = 5_000_000e18;
     uint256 constant HUGE_BUFFER = type(uint256).max;
+    /// @dev M4: the immutable ceiling on absoluteCap18. Well above the caps this suite sets
+    ///      (5M, and 100M in test_capacityGrowsWithTheMarket) so those still exercise what they
+    ///      always did, and the new ceiling test has a clear value to exceed.
+    uint256 constant MAX_ABSOLUTE_CAP = 1_000_000_000e18;
 
     function setUp() public {
         vm.warp(1_800_000_000);
         reg = new SolvencyRegistry(attester);
         // depthBps 1000 = 10%, bounds [100, 3000], absoluteCap 5M
-        cap = new CapacityOracle(address(reg), gov, 1000, 100, 3000, 300);
+        cap = new CapacityOracle(address(reg), gov, 1000, 100, 3000, 300, MAX_ABSOLUTE_CAP);
         vm.prank(gov);
         cap.setAbsoluteCap(asset, ABSOLUTE_CAP);
         vm.prank(attester);
@@ -80,6 +84,34 @@ contract CapacityOracleTest is Test {
     function test_nonGovernanceCannotTuneDepth() public {
         vm.expectRevert(CapacityOracle.CapacityOracle_OnlyGovernance.selector);
         cap.setDepthBps(2000);
+    }
+
+    /// @notice M4: absoluteCap18 is the single number bounding a compromised or lying attester,
+    ///         so governance must not be able to set it to any value instantly. The ceiling is
+    ///         immutable at deploy — governance tunes beneath it and can never remove it.
+    function test_setAbsoluteCapRejectsAboveCeiling() public {
+        vm.startPrank(gov);
+        vm.expectRevert(CapacityOracle.CapacityOracle_CapAboveCeiling.selector);
+        cap.setAbsoluteCap(asset, MAX_ABSOLUTE_CAP + 1);
+        vm.expectRevert(CapacityOracle.CapacityOracle_CapAboveCeiling.selector);
+        cap.setAbsoluteCap(asset, type(uint256).max);
+
+        // At the ceiling exactly is fine, and the cap really did not move on the rejected calls.
+        assertEq(cap.absoluteCap18(asset), ABSOLUTE_CAP);
+        cap.setAbsoluteCap(asset, MAX_ABSOLUTE_CAP);
+        assertEq(cap.absoluteCap18(asset), MAX_ABSOLUTE_CAP);
+        vm.stopPrank();
+    }
+
+    /// @notice The ceiling must actually bind the formula, not just the setter: with the cap
+    ///         pinned at the ceiling, a lying attester's open interest still cannot lift capacity
+    ///         above it.
+    function test_ceilingBoundsCapacityEvenAtTheMaximumCap() public {
+        vm.prank(gov);
+        cap.setAbsoluteCap(asset, MAX_ABSOLUTE_CAP);
+        vm.prank(attester);
+        reg.attest(asset, 2, 0, 0, type(uint128).max);
+        assertEq(cap.maxNotional18(asset, HUGE_BUFFER), MAX_ABSOLUTE_CAP);
     }
 
     function test_extremeOpenInterestClampsInsteadOfReverting() public {

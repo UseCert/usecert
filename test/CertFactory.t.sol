@@ -31,7 +31,7 @@ contract CertFactoryTest is Test {
         feed = new MockAggregatorV3(8, 355_86000000);
         lighter = new MockLighter(IERC20(address(usdg)), 3, 4);
         reg = new SolvencyRegistry(attester);
-        cap = new CapacityOracle(address(reg), gov, 1000, 100, 3000, 300);
+        cap = new CapacityOracle(address(reg), gov, 1000, 100, 3000, 300, 1_000_000_000e18);
         oracle = new CertOracle(address(feed), attester, 2, 3600, 500, 100);
         factory = new CertFactory(address(lighter), address(reg), address(cap), gov);
     }
@@ -53,7 +53,7 @@ contract CertFactoryTest is Test {
 
     function _deploy() internal returns (address v) {
         vm.prank(gov);
-        (v,) = factory.deployVault(address(oracle), _config(), "UseCert TSLA", "uTSLA");
+        (v,) = factory.deployVault(address(oracle), _config(), type(uint64).max, 1 days, "UseCert TSLA", "uTSLA");
     }
 
     function test_deployVaultCreatesPairAndRegisters() public {
@@ -93,6 +93,6 @@ contract CertFactoryTest is Test {
 
     function test_onlyGovernanceMayDeploy() public {
         vm.expectRevert(CertFactory.CertFactory_OnlyGovernance.selector);
-        factory.deployVault(address(oracle), _config(), "UseCert TSLA", "uTSLA");
+        factory.deployVault(address(oracle), _config(), type(uint64).max, 1 days, "UseCert TSLA", "uTSLA");
     }
 }

@@ -206,4 +206,117 @@ contract CertVaultRecallTest is VaultFixture {
         assertEq(vault.marginPendingRecall(), 0);
         assertEq(usdg.balanceOf(address(vault)), vaultBalBefore + pendingRecall);
     }
+
+    /// @notice M1 (final review wave): _sweepPending's lighter.withdrawPendingBalance call was
+    ///         unguarded — the FOURTH instance of that pattern on this branch. A venue refusing
+    ///         to release an already-credited pending balance therefore propagated into
+    ///         claimRedeem (blocking a payout outright) and into recallMargin (contradicting its
+    ///         own fail-open NatSpec). Both must now tolerate a zero sweep.
+    function test_claimRedeemSurvivesVenueRefusingPendingDrain() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+        uint256 bal = cert.balanceOf(alice);
+
+        vm.prank(alice);
+        uint256 id = vault.forceExit(bal);
+        lighter.settleBatch(); // the close fills, freeing IMR
+
+        vault.recallMargin(); // submits: the venue credits a pending balance
+        uint256 pendingAtVenue = lighter.getPendingBalance(address(vault), ASSET_IDX);
+        assertGt(pendingAtVenue, 0);
+        uint256 pendingRecall = vault.marginPendingRecall();
+
+        lighter.setShouldRevertDrain(true); // the venue now refuses to release it
+
+        // recallMargin is documented fail-open. It must survive the refusal and lose nothing.
+        vault.recallMargin();
+        assertEq(vault.marginPendingRecall(), pendingRecall, "a refused drain moved the counter");
+        assertEq(lighter.getPendingBalance(address(vault), ASSET_IDX), pendingAtVenue);
+
+        // And the payout must not be blocked by it: the hot buffer (the fixture's seed) can pay.
+        uint256 aliceBefore = usdg.balanceOf(alice);
+        vm.prank(alice);
+        uint256 out = vault.claimRedeem(id);
+        assertGt(out, 0);
+        assertEq(usdg.balanceOf(alice), aliceBefore + out);
+
+        // Once the venue relents, the same sweep still lands — nothing was lost, only deferred.
+        lighter.setShouldRevertDrain(false);
+        vault.recallMargin();
+        assertEq(vault.marginPendingRecall(), 0);
+        assertEq(lighter.getPendingBalance(address(vault), ASSET_IDX), 0);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // C1 (final review wave, CRITICAL): recallMargin() requested exactly marginPendingRecall —
+    // a pro-rata share of the DEPOSITED COST BASIS. What a receipt owes grows with price, so
+    // nothing in the contract ever asked the venue for more than basis and the position's
+    // realised gain could never come home: a permanently unpayable receipt, with the
+    // certificates already burned. Pro-rata stays as the allocation ledger between holders;
+    // only the request sizing changed (see recallMargin's `need` computation).
+    //
+    // Both tests below drain the fixture's 100k seeded hot buffer first, so the payout can only
+    // come from what the vault actually recalls from the venue. Without that, the seed alone
+    // covers the receipt and the test proves nothing.
+    // ---------------------------------------------------------------------------------------
+
+    /// @dev The shared body of C1's proof at an arbitrary multiple of the mint price. Returns
+    ///      (owed, recalledIntoVault, paid) in collateral units so the caller can assert on the
+    ///      exact arithmetic.
+    function _proveReceiptPayableAt(uint256 mult) internal returns (uint256 owed, uint256 recalled, uint256 paid) {
+        _drainHotBuffer();
+
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch(); // the hedge fills; MockLighter records entryPrice = PX
+        uint256 bal = cert.balanceOf(alice);
+
+        _setPrice(PX * mult); // oracle AND venue mark, so the position really gains
+
+        vm.prank(alice);
+        uint256 id = vault.forceExit(bal);
+        (, uint256 owed18,,,) = vault.redeemReceipts(id);
+        owed = owed18 / 1e12; // USDG has 6 decimals
+
+        uint256 bufferBefore = vault.hotBuffer();
+        vault.recallMargin(); // submits a request sized by what is OWED, not by basis
+        lighter.settleBatch(); // the closing order fills
+        vault.recallMargin(); // sweeps what actually landed
+        recalled = vault.hotBuffer() - bufferBefore;
+
+        uint256 aliceBefore = usdg.balanceOf(alice);
+        vm.prank(alice);
+        paid = vault.claimRedeem(id);
+        assertEq(usdg.balanceOf(alice), aliceBefore + paid, "payout did not reach the holder");
+    }
+
+    /// @notice THE test C1 was missing. It asserts the holder is paid IN FULL — not merely that
+    ///         nothing reverted, which is exactly the omission that let C1 ship (see
+    ///         CertVaultMargin.t.sol's test_forceExitSurvivesAfterLargePriceRise).
+    function test_receiptIsPayableAfterLargePriceRise() public {
+        (uint256 owed, uint256 recalled, uint256 paid) = _proveReceiptPayableAt(10);
+
+        // 9.99 certificates at 3_558.60, less the 10 bps redeem fee.
+        assertEq(owed, 35_514_863_586, "owed changed: recheck the arithmetic below");
+        assertEq(paid, owed, "holder was not paid in full");
+        // The gain is the whole point: what came home must exceed the deposited cost basis
+        // (3_200.537260 USDG), which is all the pre-fix recallMargin() could ever ask for.
+        assertEq(recalled, 35_155_800_846, "recall did not bring the position's gain home");
+        assertGt(recalled, vault.postedMargin() + 3_200_537_260);
+        assertEq(vault.totalOwedOutstanding(), 0, "obligation ledger not cleared by the payout");
+    }
+
+    /// @notice The whole-branch review measured C1 at 2x. Same proof, same fixture, that price.
+    function test_receiptIsPayableAfterPriceDoubles() public {
+        (uint256 owed, uint256 recalled, uint256 paid) = _proveReceiptPayableAt(2);
+
+        // 9.99 certificates at 711.72, less the 10 bps redeem fee -> the review's 7_102.97.
+        assertEq(owed, 7_102_972_717, "owed does not match the review's measured figure");
+        assertEq(paid, owed, "holder was not paid in full");
+        // Pre-fix the vault could recall at most the 3_200.537260 basis; the receipt needed
+        // 6_743.909977 on top of the 359.062740 the mint left in the hot buffer.
+        assertEq(recalled, 6_743_909_977, "recall did not bring the position's gain home");
+        assertEq(vault.totalOwedOutstanding(), 0, "obligation ledger not cleared by the payout");
+    }
 }

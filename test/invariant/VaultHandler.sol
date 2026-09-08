@@ -121,6 +121,16 @@ contract VaultHandler is CommonBase, StdUtils {
     uint256 public settleMintAtCapacityCount;
     uint256 public rebalanceInBandCount;
     uint256 public settleBatchInsufficientMarginCount;
+    /// @dev M2: claimRedeem's retryable "not yet". Counted, never asserted on — the Law 2
+    ///      property is that the receipt survives and eventually pays, which is enforced by
+    ///      pushing it back onto pendingRedeemReceipts rather than by this counter.
+    uint256 public claimAwaitingSettlementCount;
+    /// @dev C2: rebalance()'s per-batch bound. Counted for the same reason.
+    uint256 public rebalanceAlreadyThisBatchCount;
+    /// @dev C3: an unsettled mint receipt whose settle window expired, and the refund that must
+    ///      then be possible. Both counted so the report can say whether they were reached.
+    uint256 public settleMintWindowExpiredCount;
+    uint256 public refundMintCount;
 
     constructor(
         CertVault _vault,
@@ -213,8 +223,35 @@ contract VaultHandler is CommonBase, StdUtils {
             if (_isSelector(reason, CertVault.CertVault_AtCapacity.selector)) {
                 settleMintAtCapacityCount++;
                 console2.log("SETTLE_MINT_AT_CAPACITY", settleMintAtCapacityCount);
+            } else if (_isSelector(reason, CertVault.CertVault_SettleWindowExpired.selector)) {
+                // C3: the receipt can no longer be settled, only refunded. Put it back so
+                // refundMint() below can find it — dropping it here would silently abandon the
+                // handler's own escrow, which is the exact Law 2 problem refundMint exists to
+                // prevent, and would hide it from this suite rather than test it.
+                settleMintWindowExpiredCount++;
+                console2.log("SETTLE_MINT_WINDOW_EXPIRED", settleMintWindowExpiredCount);
+                pendingMintReceipts.push(receiptId);
             }
             // else: stale/settled receipt — not a Law 2 concern (settleMint never redeems).
+        }
+    }
+
+    /// @notice C3's escape hatch for a mint receipt past its settle window. Permissionless, and
+    ///         it must always return the escrow to the receipt's user.
+    /// @dev Not counted as a violation when it reverts: before the window it is simply not the
+    ///      right call (settleMint still is), and a refund the vault cannot fund this second is
+    ///      retryable — recallMargin() brings the posted share home. Either way the receipt goes
+    ///      back on the list so it is never abandoned.
+    function refundMint(uint256 seed) external {
+        if (pendingMintReceipts.length == 0) return;
+        uint256 idx = bound(seed, 0, pendingMintReceipts.length - 1);
+        uint256 receiptId = pendingMintReceipts[idx];
+        _removeMintReceipt(idx);
+
+        try vault.refundMint(receiptId) returns (uint256 /* amountOut */ ) {
+            refundMintCount++;
+        } catch {
+            pendingMintReceipts.push(receiptId);
         }
     }
 
@@ -283,10 +320,24 @@ contract VaultHandler is CommonBase, StdUtils {
 
         try vault.claimRedeem(receiptId) returns (uint256 /* amountOut */ ) {
             // paid
-        } catch {
-            // A payout failure on a receipt this handler itself holds, and has not already
-            // claimed, is exactly as much a Law 2 violation as a gated request would be.
-            lawTwoViolations++;
+        } catch (bytes memory reason) {
+            if (_isSelector(reason, CertVault.CertVault_AwaitingSettlement.selector)) {
+                // M2 (final review wave): the vault cannot pay this receipt out of its own
+                // balance yet. This is a routing signal of the same kind as
+                // CertVault_UseQueuedRedeem, not a failure: claimRedeem reverts BEFORE setting
+                // r.paid, so the receipt is untouched and still claimable, and recallMargin()
+                // (which this handler also calls) is the permissionless way to make the funds
+                // arrive. Accepting it is only legitimate because the receipt goes back on the
+                // pending list — an accept that dropped the receipt would hide a real Law 2
+                // violation behind bookkeeping.
+                claimAwaitingSettlementCount++;
+                console2.log("CLAIM_AWAITING_SETTLEMENT", claimAwaitingSettlementCount);
+                pendingRedeemReceipts.push(receiptId);
+            } else {
+                // Any other payout failure on a receipt this handler itself holds, and has not
+                // already claimed, is exactly as much a Law 2 violation as a gated request.
+                lawTwoViolations++;
+            }
         }
     }
 
@@ -319,6 +370,11 @@ contract VaultHandler is CommonBase, StdUtils {
             if (_isSelector(reason, CertVault.CertVault_InBand.selector)) {
                 rebalanceInBandCount++;
                 console2.log("REBALANCE_IN_BAND", rebalanceInBandCount);
+            } else if (_isSelector(reason, CertVault.CertVault_AlreadyRebalancedThisBatch.selector)) {
+                // C2: this batch has already been acted on. Not a Law 2 path, and retryable the
+                // moment attest() below posts a new batchId.
+                rebalanceAlreadyThisBatchCount++;
+                console2.log("REBALANCE_ALREADY_THIS_BATCH", rebalanceAlreadyThisBatchCount);
             }
             // else: an unplaceable order at an extreme price. rebalance() is not a redemption
             // path, so Law 2 does not apply to it either way.

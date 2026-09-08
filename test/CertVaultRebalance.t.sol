@@ -187,6 +187,86 @@ contract CertVaultRebalanceTest is VaultFixture {
         assertEq(lighter.positionBase(MARKET), posBefore); // not force-closed
     }
 
+    // ---------------------------------------------------------------------
+    // C2 (final review wave, CRITICAL): rebalance() bounded notional PER CALL
+    // (MAX_REBALANCE_NOTIONAL_18) but nothing bounded calls per unit of information. It reads a
+    // *stale* attestation, so the same gap is still there on the next call — a stranger made 25
+    // calls in one block and pushed 250_000e18 of notional against a 119_000e18 ceiling.
+    // rebalance() is the only function that moves position size without posting margin, so this
+    // levers the vault for the price of gas. The fix ties it to attestation freshness: one
+    // rebalance per new batchId. It stays permissionless (Law 6) — no access-control gate — and
+    // the per-call bound finally means something, because a call can only ever act on data it
+    // has not already acted on.
+    // ---------------------------------------------------------------------
+
+    /// @dev Puts the vault well out of band: a large mint's hedge is filled, then the attester
+    ///      reports the position as fully unhedged, so the gap is ~50_000e18 against a
+    ///      MAX_REBALANCE_NOTIONAL_18 of 10_000e18.
+    function _driveLargeDelta(uint64 batchId) internal {
+        vm.prank(attester);
+        reg.attest(address(vault), batchId, 0, 600_000e18, 1_190_000e18);
+    }
+
+    function test_rebalanceCannotBeSpammedWithinOneBatch() public {
+        vm.prank(alice);
+        uint256 id = vault.requestMint(50_000e6);
+        lighter.settleBatch();
+        vault.settleMint(id, PX);
+        _driveLargeDelta(2);
+
+        int256 posBefore = lighter.positionBase(MARKET);
+        address stranger = makeAddr("rebalanceSpammer");
+
+        // 25 calls in one block, exactly the griefing sequence the review measured.
+        vm.startPrank(stranger);
+        vault.rebalance(); // the first one acts on batch 2
+        for (uint256 i = 0; i < 24; ++i) {
+            vm.expectRevert(CertVault.CertVault_AlreadyRebalancedThisBatch.selector);
+            vault.rebalance();
+        }
+        vm.stopPrank();
+
+        assertEq(lighter.queuedOrderCount(), 1, "more than one rebalance order was queued");
+        assertEq(vault.lastRebalancedBatch(), 2);
+
+        // Total notional actually moved across all 25 attempts must stay inside the per-call
+        // bound — which is the property the per-call bound was always supposed to deliver.
+        lighter.settleBatch();
+        int256 moved = lighter.positionBase(MARKET) - posBefore;
+        assertGt(moved, 0);
+        uint256 movedNotional18 = uint256(moved) * PX / (10 ** 4); // sizeDecimals = 4
+        assertLe(movedNotional18, vault.MAX_REBALANCE_NOTIONAL_18());
+
+        // Fresh information re-opens it: still permissionless, still bounded per call.
+        _driveLargeDelta(3);
+        vm.prank(stranger);
+        vault.rebalance();
+        assertEq(lighter.queuedOrderCount(), 1);
+        assertEq(vault.lastRebalancedBatch(), 3);
+    }
+
+    /// @notice The freshness gate must not become a Law 6 access gate: a stranger is still the
+    ///         one who may act, and a reverted attempt must not consume the batch for everyone.
+    function test_inBandRebalanceDoesNotConsumeTheBatch() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+
+        // In band -> reverts InBand, which rolls back lastRebalancedBatch.
+        vm.prank(attester);
+        reg.attest(address(vault), 2, 3_554e18, 3_600e18, 1_190_000e18);
+        vm.expectRevert(CertVault.CertVault_InBand.selector);
+        vault.rebalance();
+        assertEq(vault.lastRebalancedBatch(), 0, "a reverted attempt consumed the batch");
+
+        // Same batch, now genuinely out of band: a real trim must still be possible.
+        vm.prank(attester);
+        reg.attest(address(vault), 3, 1_777e18, 3_600e18, 1_190_000e18);
+        vm.prank(makeAddr("anyone"));
+        vault.rebalance();
+        assertEq(lighter.queuedOrderCount(), 1);
+    }
+
     /// The guards above must not break closeAll(), the one legitimate caller of Lighter's
     /// baseAmount == 0 primitive.
     function test_closeAllStillClosesEverything() public {

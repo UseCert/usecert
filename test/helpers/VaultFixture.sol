@@ -35,6 +35,14 @@ abstract contract VaultFixture is Test {
     uint256 internal constant PX = 355.86e18;
     uint16 internal constant MARKET = 16; // TSLA
     uint16 internal constant ASSET_IDX = 3;
+    /// @dev C1: the venue's per-asset withdrawal ceiling. Set effectively unbounded here so the
+    ///      clamp never masks what a test is actually measuring; MockLighter's own
+    ///      depositCapTicks is the knob tests use to model a venue refusing a request.
+    uint256 internal constant VENUE_WITHDRAW_CAP = type(uint64).max;
+    /// @dev C3: how long a mint receipt stays settleable before it can only be refunded.
+    uint256 internal constant SETTLE_WINDOW = 1 days;
+    /// @dev M4: CapacityOracle's immutable ceiling on any absoluteCap18 governance may set.
+    uint256 internal constant MAX_ABSOLUTE_CAP = 1_000_000_000e18;
 
     function setUp() public virtual {
         vm.warp(1_800_000_000);
@@ -43,7 +51,7 @@ abstract contract VaultFixture is Test {
         lighter = new MockLighter(IERC20(address(usdg)), ASSET_IDX, 4);
         reg = new SolvencyRegistry(attester);
         oracle = new CertOracle(address(feed), attester, 2, 3600, 500, 100);
-        cap = new CapacityOracle(address(reg), gov, 1000, 100, 3000, 300);
+        cap = new CapacityOracle(address(reg), gov, 1000, 100, 3000, 300, MAX_ABSOLUTE_CAP);
 
         vault = new CertVault(
             CertVault.Deps({
@@ -65,6 +73,8 @@ abstract contract VaultFixture is Test {
                 settleBandBps: 500,
                 targetMarginBps: 9_000
             }),
+            VENUE_WITHDRAW_CAP,
+            SETTLE_WINDOW,
             "UseCert TSLA",
             "uTSLA"
         );
@@ -93,5 +103,30 @@ abstract contract VaultFixture is Test {
         vault.seedBuffer(100_000e6);
         vault.bootstrap();
         lighter.settleBatch();
+    }
+
+    /// @dev Moves the Chainlink feed AND keeps the Lighter mark / oracle mark price in sync with
+    ///      it, mirroring what setUp() does for the initial price. pxUnguarded() (what _queueExit
+    ///      prices redemptions off) reads the feed, not markPx18 — see CertOracle. Keeping the
+    ///      venue's mark in sync is what makes MockLighter's mark-to-market (M3) move, which is
+    ///      what makes C1 observable at all.
+    /// @dev Lifted here from CertVaultMargin.t.sol (final review wave) so the recall tests can use
+    ///      the same price move; behaviour is unchanged.
+    function _setPrice(uint256 px18) internal {
+        feed.set(int256(px18 / 1e10), block.timestamp); // feed has 8 decimals
+        vm.prank(attester);
+        oracle.setMarkPrice(px18);
+        lighter.setMarkPrice(MARKET, px18);
+    }
+
+    /// @dev Empties the vault's ERC20 hot buffer without touching BufferBook's ledger (so mint
+    ///      capacity is unaffected), the same way CertVaultMargin's
+    ///      test_redeemInstantRoutesToQueuedWhenHotBufferShort does. Used by tests that must prove
+    ///      a payout came from the venue rather than from the fixture's 100k seed.
+    function _drainHotBuffer() internal {
+        uint256 buf = vault.hotBuffer();
+        if (buf == 0) return;
+        vm.prank(address(vault));
+        usdg.transfer(makeAddr("bufferSink"), buf);
     }
 }

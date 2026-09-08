@@ -40,9 +40,16 @@ contract CertFactory {
     /// @dev Takes CertVault's own VaultConfig struct rather than flattening its ten fields into
     ///      loose parameters: with this repo's `via_ir = false`, a flat signature here overflows
     ///      the EVM's 16-slot stack window (Stack too deep) before the body even runs.
+    /// @param venueWithdrawCap_ The venue's per-asset withdrawal ceiling for this vault's
+    ///        collateral (C1: recallMargin() clamps its request to it). Per-asset, so it is a
+    ///        per-deployment argument rather than a factory-wide immutable.
+    /// @param settleWindow_ How long one of this vault's mint receipts stays settleable before it
+    ///        can only be refunded (C3).
     function deployVault(
         address oracle,
         CertVault.VaultConfig calldata config,
+        uint256 venueWithdrawCap_,
+        uint256 settleWindow_,
         string calldata name_,
         string calldata symbol_
     ) external returns (address vault, address certificate) {
@@ -53,6 +60,8 @@ contract CertFactory {
                 lighter: lighter, oracle: oracle, registry: registry, capacity: capacity, governance: governance
             }),
             config,
+            venueWithdrawCap_,
+            settleWindow_,
             name_,
             symbol_
         );

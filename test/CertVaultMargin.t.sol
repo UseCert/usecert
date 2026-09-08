@@ -93,6 +93,8 @@ contract CertVaultMarginTest is VaultFixture {
                 settleBandBps: 500,
                 targetMarginBps: 4_999
             }),
+            VENUE_WITHDRAW_CAP,
+            SETTLE_WINDOW,
             "UseCert TSLA",
             "uTSLA"
         );
@@ -120,6 +122,8 @@ contract CertVaultMarginTest is VaultFixture {
                 settleBandBps: 500,
                 targetMarginBps: 10_001
             }),
+            VENUE_WITHDRAW_CAP,
+            SETTLE_WINDOW,
             "UseCert TSLA",
             "uTSLA"
         );
@@ -186,15 +190,8 @@ contract CertVaultMarginTest is VaultFixture {
         assertEq(usdg.balanceOf(alice), before + out);
     }
 
-    /// @dev Moves the Chainlink feed AND keeps the Lighter mark / oracle mark price in sync with
-    ///      it, mirroring what VaultFixture.setUp() does for the initial price. pxUnguarded() (what
-    ///      _queueExit prices redemptions off) reads the feed, not markPx18 — see CertOracle.
-    function _setPrice(uint256 px18) internal {
-        feed.set(int256(px18 / 1e10), block.timestamp); // feed has 8 decimals
-        vm.prank(attester);
-        oracle.setMarkPrice(px18);
-        lighter.setMarkPrice(MARKET, px18);
-    }
+    // _setPrice now lives in VaultFixture (final review wave) so CertVaultRecall.t.sol can drive
+    // the same price move for C1's payability proof. Its behaviour is unchanged.
 
     /// @notice Task 8c's core proof: the margin withdrawal request tracks the holder's share of
     ///         what was actually posted, not a recomputation off the (now higher) price.
@@ -264,6 +261,13 @@ contract CertVaultMarginTest is VaultFixture {
     ///         outgrow postedMargin after a large price move, and forceExit — the Law 2
     ///         backstop — could hard-revert on the venue's depositCapTicks check. The task-8c
     ///         report records verifying this test fails when the old sizing is restored.
+    /// @dev SCOPE (C1, final review wave): this test asserts only that forceExit does not revert.
+    ///      It does NOT assert the resulting receipt is payable, and that omission is precisely
+    ///      why C1 shipped — the vault could queue this exit and then never ask the venue for
+    ///      more than the deposited cost basis, leaving a burned holder with an unpayable
+    ///      receipt. Payability after a large price rise is covered by
+    ///      CertVaultRecall.t.sol's test_receiptIsPayableAfterLargePriceRise, which asserts the
+    ///      holder is paid IN FULL. Do not read non-reversion here as payability.
     function test_forceExitSurvivesAfterLargePriceRise() public {
         vm.prank(alice);
         vault.mintInstant(3_558.6e6);

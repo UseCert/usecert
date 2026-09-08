@@ -136,4 +136,57 @@ contract BackingInvariantTest is VaultFixture {
         handler.forceExit(minted);
         assertEq(handler.lawTwoViolations(), 0, "forceExit was blocked by a negative buffer");
     }
+
+    // ----------------------------------------------------------------------------------------
+    // Final review wave: the same directed-regression treatment for the two new revert branches
+    // this handler has to tell apart from a real violation. Both are deterministic here rather
+    // than left to a fuzz seed, for the same reason the three above are.
+    // ----------------------------------------------------------------------------------------
+
+    /// @notice M2: claimRedeem's CertVault_AwaitingSettlement must be understood by this handler
+    ///         as a retryable "not yet" and NOT as a Law 2 violation — which is only legitimate
+    ///         because the receipt survives untouched and does eventually pay. This proves both
+    ///         halves; the first assertion alone would not be enough.
+    function test_claimAwaitingSettlementIsRetryableNotAViolation() public {
+        handler.mintInstant(5_000e6);
+        uint256 minted = cert.balanceOf(address(handler));
+        assertGt(minted, 0);
+        handler.forceExit(minted);
+        _drainHotBuffer(); // the vault cannot pay out of its own balance right now
+
+        assertEq(handler.claimAwaitingSettlementCount(), 0);
+        handler.claimRedeem(0);
+        assertEq(handler.claimAwaitingSettlementCount(), 1, "CertVault_AwaitingSettlement did not fire");
+        assertEq(handler.lawTwoViolations(), 0, "a retryable not-yet was counted as a violation");
+
+        // Now let the funds arrive through permissionless paths and claim the SAME receipt.
+        lighter.settleBatch(); // the close fills at the venue
+        handler.recallMargin(); // submits
+        handler.recallMargin(); // sweeps
+        vault.seedBuffer(1_000e6); // permissionless top-up for the drained remainder
+
+        uint256 before = usdg.balanceOf(address(handler));
+        handler.claimRedeem(0);
+        assertGt(usdg.balanceOf(address(handler)), before, "the receipt never actually paid");
+        assertEq(handler.lawTwoViolations(), 0);
+        assertEq(handler.claimAwaitingSettlementCount(), 1, "the retry did not succeed");
+    }
+
+    /// @notice C2: rebalance()'s per-batch bound is reachable through the handler's own surface,
+    ///         and is not a Law 2 path.
+    function test_rebalanceAlreadyThisBatchIsReachable() public {
+        handler.mintInstant(5_000e6);
+        assertGt(cert.totalSupply(), 0);
+        handler.attest(type(uint256).max, 0, 0); // fresh batch, notional 0 -> far out of band
+
+        assertEq(handler.rebalanceAlreadyThisBatchCount(), 0);
+        handler.rebalance(); // acts on the new batch
+        assertEq(handler.rebalanceAlreadyThisBatchCount(), 0, "the first call should have acted");
+        handler.rebalance(); // same batch: refused
+        assertEq(handler.rebalanceAlreadyThisBatchCount(), 1, "CertVault_AlreadyRebalancedThisBatch did not fire");
+
+        handler.attest(type(uint256).max, 0, 0); // new information re-opens it
+        handler.rebalance();
+        assertEq(handler.rebalanceAlreadyThisBatchCount(), 1);
+    }
 }

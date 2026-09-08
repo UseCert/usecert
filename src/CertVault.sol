@@ -41,10 +41,22 @@ contract CertVault {
     ///      the revert-capable _hedge, so an amount that rounds to zero after size-decimals
     ///      conversion must revert instead of hedging nothing (an unhedged mint breaks Law 1).
     error CertVault_ZeroHedgeAmount();
+    /// @dev C3: an unsettled mint receipt past its settleWindow. Not a dead end — refundMint()
+    ///      is permissionless and returns the escrow, so the expiry is a fork, not a trap.
+    error CertVault_SettleWindowExpired();
+    /// @dev C3: refundMint() before the window has expired. The holder's own route is
+    ///      settleMint(), which is still open, so nothing is stuck behind this.
+    error CertVault_SettleWindowNotExpired();
+    /// @dev M2: claimRedeem cannot pay right now. Deliberately reverts WITHOUT setting r.paid —
+    ///      the receipt stays claimable forever, and recallMargin()/_sweepPending() are both
+    ///      permissionless, so this is a retryable "not yet", never a gate.
+    error CertVault_AwaitingSettlement();
 
     event Minted(address indexed user, uint256 amountIn, uint256 certOut, uint256 px18, uint256 fee);
     event MintRequested(uint256 indexed receiptId, address indexed user, uint256 amountIn);
     event MintSettled(uint256 indexed receiptId, uint256 certOut, uint256 fillPx18);
+    /// @dev C3: the other side of the settle deadline — escrow returned, no certificates minted.
+    event MintRefunded(uint256 indexed receiptId, address indexed user, uint256 amountOut);
     event MarginPosted(uint256 marginPosted, uint256 retainedAsHotBuffer);
     /// @dev Task 8d: margin backing an open position is locked by the venue's initial margin
     ///      requirement until the closing order fills, so submitting a withdrawal and the cash
@@ -76,10 +88,17 @@ contract CertVault {
         uint256 targetMarginBps;
     }
 
+    /// @dev C3: requestPx18 and requestedAt are the request's context, and settleMint is banded
+    ///      against requestPx18 rather than the settle-time price. Without them a receipt could
+    ///      sit indefinitely and then be settled against a price that had moved arbitrarily far
+    ///      from the one the user actually requested at — measured at 4_999 bps on a week-old
+    ///      receipt, which minted 280.7 certificates against a hedge covering 140.4.
     struct MintReceipt {
         address user;
         uint256 escrow;
         bool settled;
+        uint256 requestPx18;
+        uint64 requestedAt;
     }
 
     uint8 internal constant ORDER_TYPE_MARKET = 1;
@@ -120,12 +139,49 @@ contract CertVault {
     ///      refused inside the rollup with no on-chain signal (see recallMargin()).
     uint256 public marginPendingRecall;
 
-    constructor(Deps memory d, VaultConfig memory c, string memory name_, string memory symbol_) {
+    /// @notice Total collateral owed to queued redemption receipts that have not yet been paid.
+    /// @dev C1 (final review wave): the number recallMargin() sizes its REQUEST off. It is
+    ///      deliberately not the same quantity as marginPendingRecall: that one is the pro-rata
+    ///      share of the deposited cost basis, which is the right allocation ledger BETWEEN
+    ///      HOLDERS (it keeps them fair to each other and can never exceed what was posted), but
+    ///      it is the wrong size for the request, because what a receipt owes grows with price
+    ///      while basis does not. Increased in _queueExit, decreased in claimRedeem. In collateral
+    ///      units, floored on subtraction — an over-large sweep must never underflow it.
+    uint256 public totalOwedOutstanding;
+
+    /// @notice The venue's per-asset withdrawal ceiling (AssetConfig.depositCapTicks upstream).
+    /// @dev C1: recallMargin() now deliberately over-requests when a receipt owes more than the
+    ///      basis behind it. Over-requesting is safe — the venue fulfils min(request, available)
+    ///      and refuses insufficiency silently inside the rollup — but a request above the
+    ///      venue's own per-asset cap reverts on-chain, so clamp to it rather than relying on
+    ///      recallMargin's fail-open catch to absorb a request we could have sized correctly.
+    ///      DEPLOYMENT NOTE: set this at or below type(uint64).max. recallMargin clamps to it
+    ///      before SafeCast.toUint64, so a value within uint64 makes that cast unreachable; a
+    ///      larger value leaves the (retryable, non-redemption-path) cast revert reachable once
+    ///      totalOwedOutstanding passes ~1.8e19 collateral units.
+    uint256 public immutable venueWithdrawCap;
+
+    /// @notice How long a mint receipt stays settleable before it can only be refunded.
+    /// @dev C3: settleMint bands against the price recorded at requestMint, so a receipt must not
+    ///      be allowed to sit indefinitely and be settled against a price that has moved
+    ///      arbitrarily far from the one the user requested at.
+    uint256 public immutable settleWindow;
+
+    constructor(
+        Deps memory d,
+        VaultConfig memory c,
+        uint256 venueWithdrawCap_,
+        uint256 settleWindow_,
+        string memory name_,
+        string memory symbol_
+    ) {
         lighter = ILighter(d.lighter);
         oracle = ICertOracle(d.oracle);
         registry = ISolvencyRegistry(d.registry);
         capacity = ICapacityOracle(d.capacity);
         governance = d.governance;
+        venueWithdrawCap = venueWithdrawCap_;
+        settleWindow = settleWindow_;
         cfg = c;
         if (c.targetMarginBps < MIN_TARGET_MARGIN_BPS || c.targetMarginBps > MAX_TARGET_MARGIN_BPS) {
             revert CertVault_TargetMarginOutOfBounds();
@@ -206,7 +262,13 @@ contract CertVault {
 
         IERC20(cfg.collateral).safeTransferFrom(msg.sender, address(this), amountIn);
         receiptId = _nextReceiptId++;
-        mintReceipts[receiptId] = MintReceipt({user: msg.sender, escrow: amountIn - fee, settled: false});
+        mintReceipts[receiptId] = MintReceipt({
+            user: msg.sender,
+            escrow: amountIn - fee,
+            settled: false,
+            requestPx18: px18,
+            requestedAt: uint64(block.timestamp)
+        });
 
         _postMargin(amountIn - fee);
         _hedge(indicative, px18, SIDE_BID);
@@ -215,12 +277,19 @@ contract CertVault {
 
     /// @notice Mint at the price actually filled, so the vault carries no execution risk on
     ///         large mints. Permissionless — the fill price is checkable against the attestation.
+    /// @dev C3: the band is measured against the receipt's OWN requestPx18, not against
+    ///      oracle.pxUnguarded() at settle time. Banding against the settle-time price made the
+    ///      band vacuous over time: the reference itself drifts with the market, so a fill
+    ///      arbitrarily far from what the user requested at is "in band" as long as it tracks
+    ///      wherever the price has since gone. Paired with settleWindow below, so a receipt
+    ///      cannot sit indefinitely waiting for a favourable moment.
     function settleMint(uint256 receiptId, uint256 fillPx18) external {
         MintReceipt storage r = mintReceipts[receiptId];
         if (r.user == address(0) || r.settled) revert CertVault_BadReceipt();
+        if (block.timestamp > uint256(r.requestedAt) + settleWindow) revert CertVault_SettleWindowExpired();
         if (fillPx18 == 0) revert CertVault_FillPriceOutOfBand();
 
-        (uint256 refPx,) = oracle.pxUnguarded();
+        uint256 refPx = r.requestPx18;
         uint256 diff = fillPx18 > refPx ? fillPx18 - refPx : refPx - fillPx18;
         if (refPx == 0 || diff * 10_000 / refPx > cfg.settleBandBps) revert CertVault_FillPriceOutOfBand();
 
@@ -230,6 +299,46 @@ contract CertVault {
         _requireCapacity(certOut * fillPx18 / 1e18);
         certificate.mint(r.user, certOut);
         emit MintSettled(receiptId, certOut, fillPx18);
+    }
+
+    /// @notice Return the escrow on a mint receipt whose settle window has expired.
+    /// @dev Permissionless by necessity, not convenience (Law 2 and Law 6): settleMint gains a
+    ///      deadline in C3, and a deadline with no refund would strand the user's collateral
+    ///      behind an expired receipt — trading one Law 2 breach for another. So the expiry is
+    ///      not a dead end: it is a fork, and this is the other branch. Anyone may call it, it
+    ///      always pays r.user and never msg.sender, and it marks the receipt settled so it can
+    ///      neither be refunded twice nor settled afterwards.
+    ///
+    ///      The escrow is paid out of the vault's own collateral balance, exactly as claimRedeem
+    ///      does. requestMint posted targetMarginBps of it to the venue, so a refund may need
+    ///      recallMargin() to have brought that share home first; recallMargin() is
+    ///      permissionless and retryable, and this call is retryable too, so a refund that
+    ///      cannot be paid this second is a "not yet", never a "no".
+    function refundMint(uint256 receiptId) external returns (uint256 amountOut) {
+        MintReceipt storage r = mintReceipts[receiptId];
+        if (r.user == address(0) || r.settled) revert CertVault_BadReceipt();
+        if (block.timestamp <= uint256(r.requestedAt) + settleWindow) revert CertVault_SettleWindowNotExpired();
+
+        r.settled = true;
+        amountOut = r.escrow;
+
+        // requestMint posted targetMarginBps of this escrow to the venue via _postMargin. Nothing
+        // else would ever ask for it back: the certificates were never minted, so no _queueExit
+        // will ever allocate this receipt's share, and recallMargin() sizes off counters that
+        // never learned about it — the posted share would sit at the venue permanently
+        // unrecallable. So reallocate it here, exactly as _queueExit does on the redeem side.
+        // This is a TRANSFER between the two counters, capped at postedMargin, so it cannot
+        // exceed what was actually deposited and cannot double-count headroom (the failure mode
+        // that killed three earlier recall designs — see recallMargin's doc comment).
+        uint256 posted = amountOut * cfg.targetMarginBps / 10_000;
+        if (posted > postedMargin) posted = postedMargin;
+        if (posted > 0) {
+            postedMargin -= posted;
+            marginPendingRecall += posted;
+        }
+
+        IERC20(cfg.collateral).safeTransfer(r.user, amountOut);
+        emit MintRefunded(receiptId, r.user, amountOut);
     }
 
     // ---------------------------------------------------------------- redeem
@@ -302,6 +411,9 @@ contract CertVault {
         uint256 gross18 = certIn * px18 / 1e18;
         uint256 fee18 = gross18 * cfg.redeemFeeBps / 10_000;
         uint256 owed18 = gross18 - fee18;
+        // C1: record the obligation the moment it is created, so recallMargin() can size its
+        // request off what is actually owed rather than off the deposited cost basis.
+        totalOwedOutstanding += _from18(owed18);
 
         uint256 supplyBefore = certificate.totalSupply(); // capture BEFORE certificate.burn
         certificate.burn(msg.sender, certIn);
@@ -346,6 +458,14 @@ contract CertVault {
     /// @notice Pull-payment once the queued exit is ready. Callable by anyone on the holder's
     ///         behalf; always pays the receipt's owner, never msg.sender. Reads nothing but the
     ///         receipt itself and the vault's own balance — no buffer, capacity or oracle gate.
+    /// @dev M2: redeemInstant refuses when hotBuffer() < amountOut and routes to the queued path,
+    ///      but this function had no equivalent check — so a queued claim could consume the very
+    ///      buffer that gate protects, making the gate decorative, and could let a later receipt
+    ///      effectively jump an earlier one when funds are scarce. The check below is NOT a gate:
+    ///      it reverts before touching r.paid, so the receipt stays claimable forever, and both
+    ///      recallMargin() and the sweep inside this function are permissionless, so anyone can
+    ///      make the funds arrive. Deliberately NOT FIFO: forcing receipts to be claimed in order
+    ///      would let one absent holder block everyone behind them, which WOULD breach Law 2.
     function claimRedeem(uint256 receiptId) external returns (uint256 amountOut) {
         RedeemReceipt storage r = redeemReceipts[receiptId];
         if (r.user == address(0) || r.paid) revert CertVault_NothingToClaim();
@@ -353,6 +473,15 @@ contract CertVault {
         _sweepPending();
 
         amountOut = _from18(r.owed18);
+        if (hotBuffer() < amountOut) revert CertVault_AwaitingSettlement();
+
+        // C1: retire the obligation before paying it, so recallMargin() stops asking for it.
+        // Floored, never checked-subtracted: r.owed18 is fixed at queue time while
+        // totalOwedOutstanding is a running counter, and an underflow here would revert a
+        // payout — a Law 2 breach in exchange for accounting tidiness.
+        uint256 applied = amountOut < totalOwedOutstanding ? amountOut : totalOwedOutstanding;
+        totalOwedOutstanding -= applied;
+
         r.paid = true;
         IERC20(cfg.collateral).safeTransfer(r.user, amountOut);
         emit RedeemClaimed(receiptId, amountOut);
@@ -367,9 +496,31 @@ contract CertVault {
     ///      a TTL'd per-receipt hold was built and judged fatal for double-counting headroom).
     ///      Fail-open: the venue performs no balance check and rejects insufficient requests
     ///      silently inside the rollup, so a failure here must never revert the caller.
+    ///
+    ///      C1 (final review wave): this used to request exactly marginPendingRecall — a pro-rata
+    ///      share of the DEPOSITED COST BASIS. What a receipt owes grows with price, so nothing
+    ///      here ever asked the venue for more than basis and a position's realised gain could
+    ///      never come home: a receipt could be permanently unpayable with its certificates
+    ///      already burned, the sharpest possible breach of Law 2. Task 8c was right that a
+    ///      price-derived request outgrows what was posted, and right to make the ALLOCATION
+    ///      pro-rata (that is what keeps holders fair to each other, and it is kept, in
+    ///      _queueExit). It was wrong to also make the REQUEST pro-rata. Over-requesting is safe
+    ///      and always was: the venue fulfils min(request, available), refuses insufficiency
+    ///      silently inside the rollup, this function is already fail-open, and _sweepPending
+    ///      floors its counter application at min(swept, marginPendingRecall) — so a larger
+    ///      arrival simply lands in the hot buffer, which is exactly where a gain belongs.
     function recallMargin() external {
         _sweepPending();
-        uint256 want = marginPendingRecall;
+
+        uint256 have = hotBuffer();
+        uint256 need = totalOwedOutstanding > have ? totalOwedOutstanding - have : 0;
+        // Always recall at least the allocated basis; ask for the shortfall when it is larger,
+        // because the venue fulfils min(request, available) and _sweepPending reconciles what
+        // actually arrives.
+        uint256 want = need > marginPendingRecall ? need : marginPendingRecall;
+        // Clamp to the venue's own per-asset withdrawal ceiling: over-requesting is safe, but a
+        // request above that cap reverts on-chain rather than being silently trimmed in-rollup.
+        if (want > venueWithdrawCap) want = venueWithdrawCap;
         if (want == 0) return;
 
         // A request above uint64 is unreachable below ~$18.4T; revert loudly rather than truncate.
@@ -396,12 +547,24 @@ contract CertVault {
         lighter.createOrder(
             lighterAccountIndex(), cfg.marketIndex, 0, oracle.toTickPrice(px18), SIDE_ASK, ORDER_TYPE_MARKET
         );
+        // C1: a wind-down must also repatriate. Without this, closeAll() closed the position and
+        // withdrew nothing, leaving whatever the venue had already released sitting in the
+        // pending balance while the receipts it belongs to went unpaid.
+        _sweepPending();
     }
 
     // ---------------------------------------------------------------- solvency & rebalance
 
     error CertVault_InBand();
     error CertVault_OnlyAttester();
+    /// @dev C2: rebalance() reads a per-batch attestation. Acting on the same batch twice is
+    ///      acting twice on one piece of information, which is what turned a per-call notional
+    ///      bound into no bound at all. Not a Law 2 concern: rebalance() is not a redemption
+    ///      path, and it is retryable the moment a new batch is attested (~60s).
+    error CertVault_AlreadyRebalancedThisBatch();
+
+    /// @notice The newest attestation batchId rebalance() has already acted on.
+    uint64 public lastRebalancedBatch;
 
     /// @dev Delta tolerance in bps, and the maximum notional a single rebalance() call may move.
     ///      Bounding the latter is what keeps rebalance() permissionless without letting any
@@ -462,7 +625,17 @@ contract CertVault {
     ///      succeed. No on-chain bounty is paid here: C1 has no fee/reward token to draw one
     ///      from (FeeVault/CERT are C3 concerns) — "permissionless" is itself what makes an
     ///      off-chain keeper incentive possible on top of this function, not inside it.
+    /// @dev C2: bounded per call AND per unit of information. The per-call notional bound alone
+    ///      was decorative, because the attestation rebalance() reads does not move between
+    ///      calls: a stranger could re-observe the same gap 25 times in one block and move 25x
+    ///      the bound. Requiring a batchId strictly newer than the last one acted on keeps this
+    ///      permissionless (anyone may still call it, Law 6 — deliberately NO access-control
+    ///      gate) while making the per-call bound the real per-batch bound it was meant to be.
     function rebalance() external {
+        uint64 batchId = registry.latest(address(this)).batchId;
+        if (batchId <= lastRebalancedBatch) revert CertVault_AlreadyRebalancedThisBatch();
+        lastRebalancedBatch = batchId;
+
         (Solvency memory s, uint256 required, uint256 px18) = _solvency();
 
         uint256 lo = 10_000 - DELTA_BAND_BPS;
@@ -500,12 +673,24 @@ contract CertVault {
     /// @dev min(...) guards against a sweep larger than marginPendingRecall (e.g. funding credited
     ///      by the venue landing in the same pending balance) flooring the counter at 0 instead of
     ///      underflowing.
+    /// @dev M1: the withdrawPendingBalance call is wrapped. This is the fourth instance of the
+    ///      same pattern on this branch (see _tryHedge, recallMargin, CertOracle._tryFeed): an
+    ///      unguarded venue call sitting inside a path that must not revert. Unwrapped, a venue
+    ///      refusal here propagated into claimRedeem (blocking a payout outright) and into
+    ///      recallMargin (contradicting its own fail-open NatSpec). On failure this returns 0 and
+    ///      leaves both counters untouched, so the caller simply retries later; both callers
+    ///      already tolerate a zero sweep.
     function _sweepPending() internal returns (uint256 swept) {
         uint128 pending = lighter.getPendingBalance(address(this), cfg.collateralAssetIndex);
         if (pending == 0) return 0;
 
-        lighter.withdrawPendingBalance(address(this), cfg.collateralAssetIndex, pending);
-        swept = uint256(pending);
+        try lighter.withdrawPendingBalance(address(this), cfg.collateralAssetIndex, pending) {
+            swept = uint256(pending);
+        } catch {
+            // Venue refused to release an already-credited pending balance. Nothing arrived, so
+            // nothing is applied — the pending balance stays where it is and remains sweepable.
+            return 0;
+        }
 
         uint256 applied = swept < marginPendingRecall ? swept : marginPendingRecall;
         marginPendingRecall -= applied;
