@@ -25,6 +25,7 @@ contract CertVault {
     error CertVault_AboveInstantCap();
     error CertVault_BelowInstantCap();
     error CertVault_BadReceipt();
+    error CertVault_FillPriceOutOfBand();
 
     event Minted(address indexed user, uint256 amountIn, uint256 certOut, uint256 px18, uint256 fee);
     event MintRequested(uint256 indexed receiptId, address indexed user, uint256 amountIn);
@@ -47,6 +48,7 @@ contract CertVault {
         uint256 mintFeeBps;
         uint256 redeemFeeBps;
         uint256 instantCap18;
+        uint256 settleBandBps;
     }
 
     struct MintReceipt {
@@ -159,9 +161,16 @@ contract CertVault {
     function settleMint(uint256 receiptId, uint256 fillPx18) external {
         MintReceipt storage r = mintReceipts[receiptId];
         if (r.user == address(0) || r.settled) revert CertVault_BadReceipt();
+        if (fillPx18 == 0) revert CertVault_FillPriceOutOfBand();
+
+        (uint256 refPx,) = oracle.pxUnguarded();
+        uint256 diff = fillPx18 > refPx ? fillPx18 - refPx : refPx - fillPx18;
+        if (refPx == 0 || diff * 10_000 / refPx > cfg.settleBandBps) revert CertVault_FillPriceOutOfBand();
+
         r.settled = true;
 
         uint256 certOut = _to18(r.escrow) * 1e18 / fillPx18;
+        _requireCapacity(certOut * fillPx18 / 1e18);
         certificate.mint(r.user, certOut);
         emit MintSettled(receiptId, certOut, fillPx18);
     }

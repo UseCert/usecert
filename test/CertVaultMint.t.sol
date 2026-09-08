@@ -57,7 +57,8 @@ contract CertVaultMintTest is Test {
                 sizeDecimals: 4,
                 mintFeeBps: 10,
                 redeemFeeBps: 10,
-                instantCap18: 10_000e18
+                instantCap18: 10_000e18,
+                settleBandBps: 500
             }),
             "UseCert TSLA",
             "uTSLA"
@@ -169,6 +170,26 @@ contract CertVaultMintTest is Test {
         vault.settleMint(999, PX);
     }
 
+    function test_settleMintCannotSettleTwice() public {
+        vm.prank(alice);
+        uint256 id = vault.requestMint(50_000e6);
+
+        lighter.settleBatch();
+        vault.settleMint(id, PX * 101 / 100);
+
+        vm.expectRevert(CertVault.CertVault_BadReceipt.selector);
+        vault.settleMint(id, PX * 101 / 100);
+    }
+
+    function test_settleMintRejectsOutOfBandFillPrice() public {
+        vm.prank(alice);
+        uint256 id = vault.requestMint(50_000e6);
+
+        lighter.settleBatch();
+        vm.expectRevert(CertVault.CertVault_FillPriceOutOfBand.selector);
+        vault.settleMint(id, 1);
+    }
+
     function test_mintBeforeBootstrapReverts() public {
         CertVault fresh = new CertVault(
             CertVault.Deps({
@@ -186,7 +207,8 @@ contract CertVaultMintTest is Test {
                 sizeDecimals: 4,
                 mintFeeBps: 10,
                 redeemFeeBps: 10,
-                instantCap18: 10_000e18
+                instantCap18: 10_000e18,
+                settleBandBps: 500
             }),
             "UseCert TSLA",
             "uTSLA"
