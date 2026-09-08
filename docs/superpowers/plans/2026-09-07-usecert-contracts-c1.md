@@ -1547,7 +1547,7 @@ git commit -m "feat(contracts): BufferBook accrual with published thresholds and
 **Interfaces:**
 - Consumes: `ILighter` (T2), `Certificate` (T3), `ICertOracle` (T4), `ISolvencyRegistry` (T5), `ICapacityOracle` (T6), `BufferBook` (T7).
 - Produces:
-  - `struct VaultConfig { address collateral; uint16 collateralAssetIndex; uint8 routeType; uint16 marketIndex; uint8 sizeDecimals; uint256 mintFeeBps; uint256 redeemFeeBps; uint256 instantCap18; uint256 settleBandBps; }`
+  - `struct VaultConfig { address collateral; uint16 collateralAssetIndex; uint8 routeType; uint16 marketIndex; uint8 sizeDecimals; uint256 mintFeeBps; uint256 redeemFeeBps; uint256 instantCap18; uint256 settleBandBps; uint256 targetMarginBps; }`
   - `mintInstant(uint256 amountIn) returns (uint256 certOut)`
   - `requestMint(uint256 amountIn) returns (uint256 receiptId)`
   - `settleMint(uint256 receiptId, uint256 fillPx18)`
@@ -2519,7 +2519,7 @@ contract CertFactoryTest is Test {
     function _deploy() internal returns (address v) {
         vm.prank(gov);
         (v,) = factory.deployVault(
-            address(oracle), address(usdg), 3, 0, 16, 4, 10, 10, 10_000e18, 500, "UseCert TSLA", "uTSLA"
+            address(oracle), address(usdg), 3, 0, 16, 4, 10, 10, 10_000e18, 500, 9_000, "UseCert TSLA", "uTSLA"
         );
     }
 
@@ -2555,7 +2555,7 @@ contract CertFactoryTest is Test {
     function test_onlyGovernanceMayDeploy() public {
         vm.expectRevert(CertFactory.CertFactory_OnlyGovernance.selector);
         factory.deployVault(
-            address(oracle), address(usdg), 3, 0, 16, 4, 10, 10, 10_000e18, 500, "UseCert TSLA", "uTSLA"
+            address(oracle), address(usdg), 3, 0, 16, 4, 10, 10, 10_000e18, 500, 9_000, "UseCert TSLA", "uTSLA"
         );
     }
 }
@@ -2614,6 +2614,7 @@ contract CertFactory {
         uint256 redeemFeeBps,
         uint256 instantCap18,
         uint256 settleBandBps,
+        uint256 targetMarginBps,
         string memory name_,
         string memory symbol_
     ) external returns (address vault, address certificate) {
@@ -2636,7 +2637,8 @@ contract CertFactory {
                 mintFeeBps: mintFeeBps,
                 redeemFeeBps: redeemFeeBps,
                 instantCap18: instantCap18,
-                settleBandBps: settleBandBps
+                settleBandBps: settleBandBps,
+                targetMarginBps: targetMarginBps
             }),
             name_,
             symbol_
