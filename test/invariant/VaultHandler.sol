@@ -72,6 +72,33 @@ contract VaultHandler is CommonBase, StdUtils {
     uint256 public totalMinted;
     uint256 public totalBurned;
 
+    /// @notice The mint-side ground truth this handler was MISSING, and the reason C-1 could fire
+    ///         in every campaign with nothing watching.
+    /// @dev `totalMinted` above records what the vault actually minted (a `cert.balanceOf` delta),
+    ///      so `invariant_supplyMatchesMintedMinusBurned` measured the vault against its own
+    ///      transcript: whatever it minted became the expected figure, and no over-mint could
+    ///      falsify it. These two ghosts are computed OUTSIDE the vault, from the only three
+    ///      things the caller actually chose — the collateral paid in, the published mintFeeBps,
+    ///      and the oracle price at the moment of the call (which is also the price the hedge is
+    ///      sized at on both mint paths) — and never from anything the vault returned. Any excess
+    ///      of actual over expected is accumulated in `overMintTotal`, which the supply invariant
+    ///      now asserts is zero.
+    uint256 public totalMintedExpected;
+    uint256 public overMintTotal;
+    uint256 public overMintCount;
+
+    /// @dev Per-receipt expected certificate amount for the queued mint path, recorded at
+    ///      requestMint time from escrow / requestPx — i.e. the amount the hedge submitted in that
+    ///      same transaction was sized for. settleMint is measured against this, never against the
+    ///      caller-supplied fill price, which is the whole point: a settle that mints more than
+    ///      this was minted against nothing.
+    mapping(uint256 => uint256) public expectedCertsFor;
+
+    /// @notice The vault's published mint fee, read once at construction so the expectation above
+    ///         is derived from config rather than from a number the vault handed back.
+    uint256 public immutable mintFeeBps;
+    uint8 public immutable collateralDecimals;
+
     // ------------------------------------------------------------------------------- margin ground truth
     /// @notice Ghost accumulator: every observed INCREASE in vault.postedMargin() across any call
     ///         this handler makes, seeded with whatever postedMargin already was at construction
@@ -162,8 +189,34 @@ contract VaultHandler is CommonBase, StdUtils {
         totalDepositedToVenue = _vault.postedMargin(); // bootstrap's dust, deposited before we existed
         nextBatchId = reg.latest(address(_vault)).batchId;
 
-        (,,,, uint8 sizeDecimals,,,,,) = _vault.cfg();
+        (,,,, uint8 sizeDecimals, uint256 mintFeeBps_,,,,) = _vault.cfg();
         dustFloorCert = 10 ** (18 - sizeDecimals);
+        mintFeeBps = mintFeeBps_;
+        collateralDecimals = _usdg.decimals();
+    }
+
+    /// @dev The certificate amount a mint of `amountIn` collateral is entitled to at the current
+    ///      oracle price, computed entirely outside the vault: escrow (amountIn less the published
+    ///      mint fee) divided by the price the hedge is sized at. An upper bound, deliberately —
+    ///      it does NOT model the venue's size-decimals flooring, so it stays a valid ceiling
+    ///      whether or not the vault quantises what it mints to the venue's own granularity.
+    function _expectedCerts(uint256 amountIn, uint256 px18) internal view returns (uint256) {
+        if (px18 == 0) return 0;
+        uint256 escrow = amountIn - (amountIn * mintFeeBps / 10_000);
+        uint256 escrow18 = collateralDecimals <= 18
+            ? escrow * (10 ** (18 - collateralDecimals))
+            : escrow / (10 ** (collateralDecimals - 18));
+        return escrow18 * 1e18 / px18;
+    }
+
+    function _recordMint(uint256 actual, uint256 expected) internal {
+        totalMinted += actual;
+        totalMintedExpected += expected;
+        if (actual > expected) {
+            overMintTotal += actual - expected;
+            overMintCount++;
+            console2.log("OVER_MINT", actual - expected);
+        }
     }
 
     // ---------------------------------------------------------------------------------------- mint
@@ -175,8 +228,9 @@ contract VaultHandler is CommonBase, StdUtils {
         usdg.approve(address(vault), amount);
 
         uint256 postedBefore = vault.postedMargin();
+        (uint256 pxAtCall,) = oracle.pxUnguarded();
         try vault.mintInstant(amount) returns (uint256 certOut) {
-            totalMinted += certOut;
+            _recordMint(certOut, _expectedCerts(amount, pxAtCall));
         } catch (bytes memory reason) {
             if (_isSelector(reason, CertVault.CertVault_AtCapacity.selector)) {
                 mintAtCapacityCount++;
@@ -198,8 +252,12 @@ contract VaultHandler is CommonBase, StdUtils {
         usdg.approve(address(vault), amount);
 
         uint256 postedBefore = vault.postedMargin();
+        (uint256 pxAtCall,) = oracle.pxUnguarded();
         try vault.requestMint(amount) returns (uint256 receiptId) {
             pendingMintReceipts.push(receiptId);
+            // Recorded HERE, at the price the hedge in this same transaction was sized at — not
+            // at settle time, where the caller supplies a price of their own choosing.
+            expectedCertsFor[receiptId] = _expectedCerts(amount, pxAtCall);
         } catch (bytes memory reason) {
             if (_isSelector(reason, CertVault.CertVault_AtCapacity.selector)) {
                 requestMintAtCapacityCount++;
@@ -227,7 +285,12 @@ contract VaultHandler is CommonBase, StdUtils {
 
         uint256 balBefore = cert.balanceOf(address(this));
         try vault.settleMint(receiptId, fillPx18) {
-            totalMinted += cert.balanceOf(address(this)) - balBefore;
+            // The tautology this suite shipped with lived on the next line: it recorded whatever
+            // the vault happened to mint and then asserted supply equalled that sum, so a settle
+            // that minted against nothing was self-certifying. The actual is still recorded, but
+            // it is now measured against expectedCertsFor[receiptId] — escrow over the REQUEST
+            // price, fixed before this call existed and outside this caller's control.
+            _recordMint(cert.balanceOf(address(this)) - balBefore, expectedCertsFor[receiptId]);
         } catch (bytes memory reason) {
             if (_isSelector(reason, CertVault.CertVault_AtCapacity.selector)) {
                 settleMintAtCapacityCount++;

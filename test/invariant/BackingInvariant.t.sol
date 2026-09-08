@@ -29,12 +29,20 @@ import {CertVault} from "../../src/CertVault.sol";
 contract BackingInvariantTest is VaultFixture {
     VaultHandler handler;
 
+    /// @notice The vault's own capital at the start of the campaign — the fixture's 100_000e6
+    ///         buffer seed, less the bootstrap dust, all of it still on the venue or in the vault.
+    ///         invariant_backingCoversSupply requires this to survive on top of the certificate
+    ///         obligation, so the seed can never be counted as certificate backing.
+    uint256 internal startingCapital18;
+
     /// @dev VaultFixture.setUp() already builds the stack, seeds the buffer, bootstraps and
     ///      settles. Extend it, do not rebuild it.
     function setUp() public override {
         super.setUp();
         handler = new VaultHandler(vault, usdg, lighter, reg, cap, attester, gov);
         targetContract(address(handler));
+        startingCapital18 = _venueBacking18();
+        assertEq(cert.totalSupply(), 0, "the campaign must start with nothing outstanding");
     }
 
     /// @notice Law 2, expressed as an invariant: every non-zero redemption attempt the handler
@@ -44,11 +52,69 @@ contract BackingInvariantTest is VaultFixture {
         assertEq(handler.lawTwoViolations(), 0);
     }
 
+    /// @notice LAW 1, the design's first law and the property spec §13 promised and this suite
+    ///         never asserted: the certificates outstanding must be covered by value the vault and
+    ///         the venue actually hold, and never by the vault's own starting capital.
+    ///
+    ///         Measured against VENUE GROUND TRUTH, the way test_A6_lawOneBreachedAgainstVenue-
+    ///         GroundTruth does it: nothing here reads postedMargin, marginPendingRecall,
+    ///         SolvencyRegistry's attestation, BufferBook's ledger, or any figure the vault
+    ///         computed for itself. Backing is the vault's real ERC20 balance plus what MockLighter
+    ///         actually holds for it — cash margin, the position's mark-to-market gain or loss, and
+    ///         any withdrawal the venue has credited but not yet released.
+    ///
+    /// @dev THE FORM MATTERS, and the literal reading of Law 1 does not work. Written as the design
+    ///      states it — `supply x px <= position notional + margin` (plus the vault's own
+    ///      collateral) — this invariant is unfalsifiable, and it was MEASURED so before being
+    ///      replaced: a full 256x32 campaign passed it while
+    ///      invariant_supplyMatchesMintedMinusBurned was failing on a two-call over-mint. The
+    ///      reason is double counting. The margin is what BOUGHT the notional, so at
+    ///      targetMarginBps = 9_000 the sum `notional + margin` is about 1.9x the collateral that
+    ///      actually came in, and no over-mint the capacity cap can admit will ever eat that much
+    ///      slack. So backing is measured here as value, not as value plus the exposure bought
+    ///      with it: cash at the vault, cash at the venue, and the position's PnL (which is what
+    ///      makes the hedge show up — an under-hedged book fails this as soon as the price moves,
+    ///      which is exactly the risk Law 1 exists to bound).
+    ///
+    ///      The second reason the literal form cannot bite is the fixture's own 100_000e6 buffer
+    ///      seed. That capital is the vault's, not the certificate holders' — it is there to absorb
+    ///      funding and basis — so counting it as certificate backing lets any over-mint smaller
+    ///      than the seed hide behind it. `startingCapital18` is therefore required to survive
+    ///      untouched on top of the obligation. It is captured from the live stack in setUp rather
+    ///      than hardcoded, and it is deliberately NOT BufferBook's balance: accrueFunding() lets
+    ///      the attester declare that number anything at all (see
+    ///      test_A7_publishedBufferIsNotBackedByAnything), which would make this invariant a
+    ///      measurement of the attester's honesty instead of the vault's solvency.
+    function invariant_backingCoversSupply() public view {
+        (uint256 px18,) = oracle.pxUnguarded();
+        uint256 obligation18 = cert.totalSupply() * px18 / 1e18;
+        assertGe(_venueBacking18(), startingCapital18 + obligation18, "LAW 1: backing must cover supply x px");
+    }
+
+    /// @dev Everything the vault and the venue actually hold for it, in 18 decimals. equity() is
+    ///      MockLighter's own cash-plus-mark-to-market figure (M3); the pending balance is margin
+    ///      the venue has debited but not yet released, which would otherwise read as a hole in
+    ///      the backing for the window between recallMargin()'s request and its sweep.
+    function _venueBacking18() internal view returns (uint256) {
+        return _to18(usdg.balanceOf(address(vault))) + _to18(lighter.equity())
+            + _to18(lighter.getPendingBalance(address(vault), ASSET_IDX));
+    }
+
     /// @notice Certificate supply always equals what this run minted minus what it burned — no
     ///         certificate appears or disappears off-ledger across mint/settleMint/redeem/queued
     ///         exits.
+    /// @dev The equality below measures the vault against its own transcript (VaultHandler
+    ///      recorded whatever balance delta the vault produced), so no over-mint could ever
+    ///      falsify it. The first assertion is the missing half: VaultHandler now also computes,
+    ///      outside the vault, what each mint was entitled to — escrow over the price the hedge
+    ///      was sized at — and accumulates every excess in overMintTotal.
     function invariant_supplyMatchesMintedMinusBurned() public view {
+        assertEq(handler.overMintTotal(), 0, "a mint exceeded the certificates its hedge was sized for");
         assertEq(cert.totalSupply(), handler.totalMinted() - handler.totalBurned());
+    }
+
+    function _to18(uint256 amount) internal pure returns (uint256) {
+        return amount * 1e12; // 6-decimal collateral
     }
 
     /// @notice Margin conservation: the vault can never be carrying more margin (posted, plus
