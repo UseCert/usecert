@@ -231,4 +231,86 @@ contract CertVaultRedeemTest is VaultFixture {
         assertEq(user, alice); // receipt still exists
         assertFalse(paid);
     }
+
+    /// CRITICAL B, and the Law 2 proof for it. `CertOracle._tryFeed` computed
+    /// `block.timestamp - t` inside the SUCCESS block of `try feed.latestRoundData()`, which that
+    /// try's own catch does not cover. A feed reporting an `updatedAt` in the FUTURE underflowed
+    /// it and panicked (0x11) uncaught, straight through `pxUnguarded()` — documented never to
+    /// revert — and through `_queueExit`, reverting `forceExit`, the protocol's last-resort
+    /// backstop. Both the feed and the oracle are immutable, so a holder had no way out and the
+    /// `lastGoodPx18` fallback that exists for precisely this case was unreachable.
+    ///
+    /// This is the end-to-end trace, deliberately on the two-phase mint path so real margin is
+    /// posted and a real position is open when the feed breaks. LOAD-BEARING: reverting the
+    /// `t > block.timestamp` guard in CertOracle._tryFeed fails this test with
+    /// `panic: arithmetic underflow or overflow (0x11)`.
+    function test_forceExitSurvivesFutureFeedTimestamp() public {
+        vm.prank(alice);
+        uint256 mintId = vault.requestMint(50_000e6);
+        lighter.settleBatch();
+        vault.settleMint(mintId, PX);
+
+        uint256 bal = cert.balanceOf(alice);
+        assertGt(bal, 0);
+        assertGt(vault.postedMargin(), 0, "no real margin was posted");
+        assertNotEq(lighter.positionBase(MARKET), int256(0), "no real position is open");
+
+        // The feed reports one day into the future and freezes there. Note the price is also
+        // moved, so if the guard let the live branch through, the exit would price off 999.99e18
+        // rather than the last-good PX.
+        feed.set(999_99000000, block.timestamp + 1 days);
+
+        vm.prank(alice);
+        uint256 id = vault.forceExit(bal); // must not revert, and must not panic
+
+        assertEq(cert.balanceOf(alice), 0, "certificates were not burned");
+        assertEq(cert.totalSupply(), 0);
+        (address user, uint256 owed18,,, bool paid) = vault.redeemReceipts(id);
+        assertEq(user, alice);
+        assertFalse(paid);
+        // Priced off last-good (PX), not off the malfunctioning feed's live value.
+        uint256 expectedOwed18 = bal * PX / 1e18;
+        expectedOwed18 -= expectedOwed18 * 10 / 10_000; // redeemFeeBps = 10
+        assertEq(owed18, expectedOwed18, "the exit did not price off the last-good snapshot");
+    }
+
+    /// The third unguarded read on the Law 2 path, found by re-tracing forceExit end to end for
+    /// CRITICAL B and fixed in the same commit. `_tryHedge` evaluated `lighterAccountIndex()` in
+    /// ARGUMENT position inside its own `try lighter.createOrder(...)`, and argument evaluation
+    /// runs before the protected call, so that try's catch never covered it. A venue whose
+    /// `addressToAccountIndex` view reverts — paused behind a proxy, storage layout moved by an
+    /// upgrade — therefore reverted `forceExit` outright, and `stageRefund` with it. Same class
+    /// as the arithmetic-in-a-try's-success-block defect this commit fixes in CertOracle.
+    ///
+    /// LOAD-BEARING: with the read moved back into argument position, this test fails with
+    /// `AccountIndexReadRefused()` propagating out of forceExit.
+    function test_forceExitSurvivesAVenueThatRefusesTheAccountIndexRead() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+        uint256 bal = cert.balanceOf(alice);
+        int256 posBefore = lighter.positionBase(MARKET);
+
+        // Only the vault's own account-index read is broken; every other venue call still works.
+        vm.mockCallRevert(
+            address(lighter),
+            abi.encodeWithSignature("addressToAccountIndex(address)", address(vault)),
+            abi.encodeWithSignature("AccountIndexReadRefused()")
+        );
+
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit CertVault.CloseOrderNotPlaced(bal);
+
+        vm.prank(alice);
+        uint256 id = vault.forceExit(bal); // must not revert
+
+        assertEq(cert.balanceOf(alice), 0, "the burn did not happen");
+        (address user,,,, bool paid) = vault.redeemReceipts(id);
+        assertEq(user, alice);
+        assertFalse(paid);
+        // Fail-open means the close was skipped, not silently mis-submitted.
+        vm.clearMockedCalls();
+        lighter.settleBatch();
+        assertEq(lighter.positionBase(MARKET), posBefore, "an order went in after all");
+    }
 }

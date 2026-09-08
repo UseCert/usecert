@@ -267,6 +267,36 @@ contract CertVaultRebalanceTest is VaultFixture {
         assertEq(lighter.queuedOrderCount(), 1);
     }
 
+    /// @notice CRITICAL A follow-on, so the new branch is not dead. `_solvency`'s `required` is
+    ///         `supply * px18 / 1e18`, so a px18 of 0 makes it 0 even with supply outstanding.
+    ///         Before CRITICAL A that state reported deltaBps == 10_000 and rebalance() stopped at
+    ///         CertVault_InBand, which incidentally hid the fact that `certEquivalent`'s division
+    ///         by px18 was below it. Now that a zero `required` with a non-zero attested notional
+    ///         is out of band, that division is genuinely reachable — so it gets a named error
+    ///         rather than an anonymous panic in a permissionless entry point.
+    /// @dev A px18 of 0 with ok == true is real, not contrived: a 19-decimal feed reporting
+    ///      answer = 1 normalises to 1 / 10 == 0, which is what
+    ///      CertOracle.test_mintAllowedFalseWhenFeedTruncatesToZero already pins.
+    ///      LOAD-BEARING: without the px18 guard this test fails with
+    ///      `panic: division or modulo by zero (0x12)` instead of CertVault_NoPrice.
+    function test_rebalanceRevertsNamedErrorWhenThePriceIsZero() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+
+        feed.setDecimals(19);
+        feed.set(1, block.timestamp);
+        (uint256 px18,) = oracle.pxUnguarded();
+        assertEq(px18, 0, "the feed did not actually truncate to zero");
+
+        vm.prank(attester);
+        reg.attest(address(vault), 2, 3_554e18, 3_600e18, 1_190_000e18);
+        assertEq(vault.solvency().deltaBps, vault.DELTA_UNBOUNDED_BPS(), "a zero price is not a hedged vault");
+
+        vm.expectRevert(CertVault.CertVault_NoPrice.selector);
+        vault.rebalance();
+    }
+
     /// The guards above must not break closeAll(), the one legitimate caller of Lighter's
     /// baseAmount == 0 primitive.
     function test_closeAllStillClosesEverything() public {

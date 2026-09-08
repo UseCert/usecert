@@ -309,8 +309,10 @@ contract CertVault {
             // for, so stageRefund can close that exposure. Without it a refund left the vault long
             // against certificates that were never minted (measured: totalSupply 0 against a
             // 1,403,641-tick position on a 50k mint), breaching Law 1 with NO permissionless way
-            // back — rebalance() cannot trim it, because _solvency reports deltaBps == 10_000 at
-            // zero supply and rebalance() therefore reverts CertVault_InBand.
+            // back — rebalance() could not trim it, because _solvency reported deltaBps == 10_000
+            // at zero supply and rebalance() therefore reverted CertVault_InBand. That second
+            // half is CRITICAL A and is now fixed: see DELTA_UNBOUNDED_BPS. Both halves matter,
+            // so neither this record nor indicativeCerts is redundant.
             indicativeCerts: indicative
         });
 
@@ -354,10 +356,11 @@ contract CertVault {
     ///      never run in the one situation it exists for — an escrow the vault cannot currently
     ///      afford. That is precisely how escrow became permanently stranded. This phase touches
     ///      no balances and performs no transfer, so nothing in it can fail on funding, and it can
-    ///      therefore be staged long before the vault can afford the payout. (It is not
-    ///      unconditionally infallible: it inherits _tryHedge's one unguarded read, the
-    ///      lighterAccountIndex() argument evaluated inside _tryHedge's own try — see _tryHedge.
-    ///      That is pre-existing and equally true of _queueExit, the Law 2 backstop.)
+    ///      therefore be staged long before the vault can afford the payout. (_tryHedge's one
+    ///      remaining unguarded read — the lighterAccountIndex() argument evaluated inside its own
+    ///      try, which that try's catch does not cover — is now wrapped too; see _tryHedge. It was
+    ///      equally an exposure for _queueExit, the Law 2 backstop, which is why it is fixed here
+    ///      rather than deferred again.)
     ///
     ///      Law 2: nothing here can hold user value behind it. refundMint's
     ///      CertVault_RefundNotStaged is escaped by this call, which anyone may make. This call's
@@ -405,16 +408,21 @@ contract CertVault {
         // since oracle.px() reverts on a non-positive answer, and toTickPrice is inside
         // _tryHedge's try either way.
         //
-        // OPEN, NOT FIXED (see refund-fix-report.md): this close is open-loop. ILighter exposes no
-        // position getter, so nothing here can net r.indicativeCerts against what the vault
-        // actually holds. If closeAll() or rebalance() has already flattened or trimmed the
-        // position, this ASK opens a SHORT instead of closing a long — and rebalance() cannot
-        // undo it, because _solvency reports deltaBps == 10_000 (dead centre of the band) whenever
-        // supply is 0, so rebalance() reverts CertVault_InBand at exactly the moment a trim is
-        // needed. Closing that gap needs a design decision (a position counter here, a getter on
-        // ILighter, or a rebalance() that treats a position at zero supply as maximally
-        // out-of-band), not a comment. Do not restate "rebalance() is the backstop" here: it is
-        // not, and an earlier version of this comment said so wrongly.
+        // STILL OPEN-LOOP, now with a permissionless way back. ILighter exposes no position
+        // getter, so nothing here can net r.indicativeCerts against what the vault actually
+        // holds: if closeAll() or a rebalance() trim has already flattened or reduced the
+        // position, this ASK opens a SHORT instead of closing a long. That much is unchanged and
+        // needs an ILighter change or a vault-side position counter to fix properly.
+        //
+        // What HAS changed (CRITICAL A, see DELTA_UNBOUNDED_BPS) is the consequence, which is
+        // what made it a Critical: rebalance() used to revert CertVault_InBand at zero supply
+        // because _solvency reported deltaBps == 10_000 there, so the dangling position could be
+        // freed only by governance's closeAll() while the venue's initial-margin lock on it
+        // blocked the recall this refund depends on. A zero obligation with a non-zero attested
+        // notional is now maximally out of band, so permissionless rebalance() trims it back to
+        // flat over successive attested batches. Do not restate "rebalance() is the backstop"
+        // unqualified: it is a backstop only from the next attestation onward, and only for the
+        // portion the attester reports.
         bool placed = false;
         if (r.indicativeCerts > 0) {
             placed = _tryHedge(r.indicativeCerts, r.requestPx18, SIDE_ASK);
@@ -686,6 +694,9 @@ contract CertVault {
 
     error CertVault_InBand();
     error CertVault_OnlyAttester();
+    /// @dev rebalance() cannot size a notional gap without a price. Named so a permissionless
+    ///      caller gets an error instead of an anonymous division-by-zero panic; see rebalance().
+    error CertVault_NoPrice();
     /// @dev C2: rebalance() reads a per-batch attestation. Acting on the same batch twice is
     ///      acting twice on one piece of information, which is what turned a per-call notional
     ///      bound into no bound at all. Not a Law 2 concern: rebalance() is not a redemption
@@ -700,6 +711,27 @@ contract CertVault {
     ///      single caller push the vault's position around (Law 6).
     uint256 public constant DELTA_BAND_BPS = 100;
     uint256 public constant MAX_REBALANCE_NOTIONAL_18 = 10_000e18;
+
+    /// @notice Published sentinel deltaBps for "the obligation is zero but the vault still
+    ///         carries an attested position" — i.e. hedge-to-obligation ratio with a zero
+    ///         denominator, which is unbounded, not 100%.
+    /// @dev CRITICAL A (C1 final review). _solvency used to report deltaBps == 10_000 for ANY
+    ///      zero-`required` state, so zero certificates outstanding against a live position read
+    ///      as dead centre of the band — perfectly hedged — when it is in fact pure unhedged
+    ///      directional risk and the single worst state the vault can be in. That is not a
+    ///      cosmetic mis-report: it made rebalance() revert CertVault_InBand at exactly the
+    ///      moment a trim was needed, so a position left dangling by stageRefund's open-loop
+    ///      close (or by a rebalance() trim, or after closeAll()) could be freed by NOTHING
+    ///      permissionless — forceExit/requestRedeem need certificates and supply is 0 — leaving
+    ///      governance's closeAll() as the sole escape while the venue's initial-margin lock on
+    ///      the unwanted position blocked the very recall the refund depended on.
+    ///      type(uint256).max rather than a finite "very out of band" number for two reasons: it
+    ///      is the honest value of a ratio whose denominator is zero, and it cannot collide with
+    ///      any ratio the real computation can produce, so a reader can tell the sentinel from a
+    ///      measurement. It is unambiguously above 10_000 + DELTA_BAND_BPS, which is the
+    ///      over-hedged side — the direction that makes rebalance() SELL, which is what a zero
+    ///      obligation demands.
+    uint256 public constant DELTA_UNBOUNDED_BPS = type(uint256).max;
 
     struct Solvency {
         uint256 supply;
@@ -736,9 +768,22 @@ contract CertVault {
         s.ageSec = registry.ageSec(address(this));
 
         required = s.supply * px18 / 1e18;
-        // required == 0 (no supply, or px18 == 0) means there is nothing to hedge: report fully
-        // at-target (10_000 bps == 100%) rather than dividing by zero.
-        s.deltaBps = required == 0 ? 10_000 : a.notional18 * 10_000 / required;
+        if (required == 0) {
+            // required == 0 (no supply, or px18 == 0) means the vault owes no delta at all. What
+            // that implies depends entirely on whether it is nonetheless carrying one:
+            //
+            //  - attested notional 0 too: nothing to hedge and nothing hedged. Genuinely
+            //    at-target; report 10_000 bps so rebalance() reverts CertVault_InBand.
+            //  - attested notional non-zero: a live position against a zero obligation. This is
+            //    the CRITICAL A case (see DELTA_UNBOUNDED_BPS). It is maximally OUT of band on
+            //    the over-hedged side, and reporting it as 10_000 was both a false published
+            //    figure and the reason nothing permissionless could trim it.
+            //
+            // Either way this branch is also what keeps the division below from dividing by zero.
+            s.deltaBps = a.notional18 == 0 ? 10_000 : DELTA_UNBOUNDED_BPS;
+        } else {
+            s.deltaBps = a.notional18 * 10_000 / required;
+        }
     }
 
     /// @notice Permissionless delta trim: pulls the vault's Lighter position back toward the
@@ -767,10 +812,30 @@ contract CertVault {
 
         (Solvency memory s, uint256 required, uint256 px18) = _solvency();
 
+        // CRITICAL A follow-on: the certEquivalent division below divides by px18. Before the
+        // fix a zero px18 forced required == 0 and therefore deltaBps == 10_000, so the in-band
+        // revert masked it; now that a zero `required` with a live position is out of band, that
+        // division is genuinely reachable at px18 == 0 and would panic (0x12) anonymously.
+        // pxUnguarded() can report 0 (an ok feed whose answer normalises down to 0 at high
+        // decimals — see CertOracle._tryFeed and test_mintAllowedFalseWhenFeedTruncatesToZero),
+        // so name the condition rather than leaving a panic in a permissionless entry point.
+        // Not a Law 2 concern: rebalance() is not a redemption path, and it is retryable.
+        if (px18 == 0) revert CertVault_NoPrice();
+
         uint256 lo = 10_000 - DELTA_BAND_BPS;
         uint256 hi = 10_000 + DELTA_BAND_BPS;
         if (s.deltaBps >= lo && s.deltaBps <= hi) revert CertVault_InBand();
 
+        // At required == 0 with a non-zero attested notional (CRITICAL A) this is the false
+        // branch, so the trim is a SELL of the whole attested notional — bounded by
+        // MAX_REBALANCE_NOTIONAL_18 exactly as any other gap is, so a dangling position larger
+        // than the bound is walked to flat one attested batch at a time rather than in one call.
+        // Convergence, not oscillation: each trim reduces the position, the next batch attests
+        // the smaller notional, and the sequence terminates on whichever comes first — an
+        // attested notional of 0 (deltaBps back to 10_000, CertVault_InBand) or a remainder whose
+        // baseAmount floors to 0 (the dust guard below, also CertVault_InBand). Nothing here can
+        // overshoot into the opposite direction on truthful attestations, because the trim is
+        // sized off the attested notional itself, never off a fraction of it.
         bool underHedged = s.notional18 < required;
         uint256 gap18 = underHedged ? required - s.notional18 : s.notional18 - required;
         if (gap18 > MAX_REBALANCE_NOTIONAL_18) gap18 = MAX_REBALANCE_NOTIONAL_18;
@@ -874,8 +939,10 @@ contract CertVault {
     ///      transaction. Two things can revert inside _hedge: oracle.toTickPrice() (an external
     ///      view call that reverts CertOracle_TickOverflow when the encoded tick is 0 or exceeds
     ///      uint32, reachable at extreme prices) and lighter.createOrder() (unguarded, can revert
-    ///      for any venue reason). Both are wrapped in try/catch here; either failure returns
-    ///      false instead of propagating. mintInstant, requestMint and rebalance() deliberately
+    ///      for any venue reason). A third, lighter.addressToAccountIndex() via
+    ///      lighterAccountIndex(), used to sit in argument position where no catch reached it —
+    ///      see the comment in the body. All three are wrapped in try/catch here; any failure
+    ///      returns false instead of propagating. mintInstant, requestMint and rebalance() deliberately
     ///      keep calling the revert-capable _hedge — minting and rebalancing may be gated, but
     ///      redemption may never be (Laws 2 and 3).
     function _tryHedge(uint256 certAmount18, uint256 px18, uint8 side) internal returns (bool placed) {
@@ -885,9 +952,25 @@ contract CertVault {
         // as defence in depth — nothing here may ever forward a zero to createOrder. Treat it the
         // same as any other unplaceable close: report "not placed" rather than submitting it.
         if (baseAmount == 0) return false;
+        // THIRD unguarded read, surfaced by CRITICAL B's "re-trace forceExit end to end" and the
+        // last one left in this helper. lighterAccountIndex() used to be evaluated in ARGUMENT
+        // position inside the createOrder try below, and argument evaluation happens BEFORE the
+        // protected call, so that try's catch does not cover it — the same class of mistake as
+        // arithmetic in a try's success block (CertOracle._tryFeed) and with the same
+        // consequence: it is an unguarded external view call on the venue, so a venue whose
+        // addressToAccountIndex reverted (paused behind a proxy, storage layout changed by an
+        // upgrade) propagated straight out of this deliberately fail-open helper and reverted
+        // forceExit, the Law 2 backstop, and stageRefund with it. Reading it into a local first,
+        // inside its own try, is the whole fix. _hedge is left alone on purpose: it is the
+        // revert-capable path for mint and rebalance, which may be gated (Laws 2 and 3).
+        uint48 accountIndex;
+        try lighter.addressToAccountIndex(address(this)) returns (uint48 idx) {
+            accountIndex = idx;
+        } catch {
+            return false;
+        }
         try oracle.toTickPrice(px18) returns (uint32 tickPx) {
-            try lighter.createOrder(lighterAccountIndex(), cfg.marketIndex, baseAmount, tickPx, side, ORDER_TYPE_MARKET)
-            {
+            try lighter.createOrder(accountIndex, cfg.marketIndex, baseAmount, tickPx, side, ORDER_TYPE_MARKET) {
                 return true;
             } catch {
                 return false;

@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {VaultHandler} from "./VaultHandler.sol";
 import {VaultFixture} from "../helpers/VaultFixture.sol";
+import {CertVault} from "../../src/CertVault.sol";
 
 /// @notice Task 12: proves under randomised call sequences the properties the whole design rests
 ///         on — Law 2 (redemption is never gated) and supply integrity — plus a third added for
@@ -17,8 +18,11 @@ import {VaultFixture} from "../helpers/VaultFixture.sol";
 ///         `invariant_capacityNeverExceedsAbsoluteCap`, has been replaced below by a plain
 ///         `test_capacityNeverExceedsAbsoluteCap` — see that function's NatSpec for why it is not
 ///         a fuzz-worthy stateful property with this fixture. Three directed regression tests were
-///         also added (`test_mintInstantCanHitCapacity`, `test_rebalanceCanHitInBandAtZeroSupply`,
-///         `test_redeemSurvivesNegativeBuffer`) as deterministic, always-reproducible proof that
+///         also added (`test_mintInstantCanHitCapacity`,
+///         `test_rebalanceInBandIsReachableAtZeroSupplyWithNoPosition` — renamed from
+///         `test_rebalanceCanHitInBandAtZeroSupply` by CRITICAL A, which narrowed when zero supply
+///         is legitimately in band — and `test_redeemSurvivesNegativeBuffer`) as deterministic,
+///         always-reproducible proof that
 ///         the branches Finding 1 flagged as unreachable are now genuinely reachable — the fuzz
 ///         campaign itself reaches them too (see the Fix report's console-log evidence), but a
 ///         fuzz hit is seed-dependent, so these directed tests are the durable regression guard.
@@ -102,15 +106,122 @@ contract BackingInvariantTest is VaultFixture {
         assertEq(handler.totalMinted(), 0, "a capacity-gated mint must not have minted anything");
     }
 
-    /// @notice Proves CertVault_InBand is reachable from rebalance() now that the handler exercises
-    ///         it at all. No attest() needed: CertVault._solvency() defines deltaBps = 10_000
-    ///         (dead centre of the [9_900, 10_100] band) whenever supply == 0, which is exactly the
-    ///         state of a freshly constructed handler before any mint has happened.
-    function test_rebalanceCanHitInBandAtZeroSupply() public {
+    /// @notice Proves CertVault_InBand is reachable from rebalance() now that the handler
+    ///         exercises it at all — the reachability half of what
+    ///         `test_rebalanceCanHitInBandAtZeroSupply` used to cover, kept here so the handler's
+    ///         `rebalanceInBandCount` branch does not become dead when CRITICAL A's fix narrows
+    ///         the zero-supply case.
+    /// @dev The old NatSpec stated the reason as "deltaBps = 10_000 whenever supply == 0", which
+    ///      was CRITICAL A itself. The correct reason is narrower and is asserted below: nothing
+    ///      outstanding AND nothing attested. A fresh handler is in that state because the
+    ///      fixture's setUp() attests notional18 = 0. With a non-zero attested notional at zero
+    ///      supply, rebalance() must NOT be in band — see
+    ///      test_rebalanceTrimsDanglingPositionAtZeroSupply.
+    function test_rebalanceInBandIsReachableAtZeroSupplyWithNoPosition() public {
         assertEq(cert.totalSupply(), 0);
+        // Assert the real precondition, so a fixture change cannot make this test vacuous the way
+        // the "supply == 0 is enough" reading of it silently was.
+        assertEq(reg.latest(address(vault)).notional18, 0, "there is an attested position after all");
+        assertEq(vault.solvency().deltaBps, 10_000);
+
         assertEq(handler.rebalanceInBandCount(), 0);
         handler.rebalance();
         assertEq(handler.rebalanceInBandCount(), 1, "CertVault_InBand did not fire");
+    }
+
+    /// @notice CRITICAL A. `_solvency` reported `deltaBps = 10_000` — dead centre of the
+    ///         [9_900, 10_100] band, i.e. perfectly hedged — for ANY state with `required == 0`,
+    ///         including zero certificates outstanding against a live position. That is backwards:
+    ///         a position with no obligation behind it is pure unhedged directional risk, the
+    ///         single worst state the vault can be in, and it must be maximally OUT of band. The
+    ///         consequence was not cosmetic: `rebalance()` reverted CertVault_InBand at exactly
+    ///         the moment a trim was needed, `forceExit`/`requestRedeem` need certificates and
+    ///         there were none, and `stageRefund` is once-only — so governance's `closeAll()` was
+    ///         the ONLY escape, while the venue's initial-margin lock on the unwanted position
+    ///         blocked the very margin recall a refund depends on.
+    ///
+    ///         Replaces `test_rebalanceCanHitInBandAtZeroSupply`, which asserted the reachability
+    ///         of CertVault_InBand from a state that only *incidentally* satisfied it (the
+    ///         fixture attests notional18 = 0) while its NatSpec claimed the buggy rule. The
+    ///         reachability coverage it really provided is preserved above; this is what should
+    ///         have been true instead.
+    /// @dev LOAD-BEARING: with `_solvency`'s `required == 0` branch restored to an unconditional
+    ///      10_000, this test fails at the first rebalance() with
+    ///      `CertVault_InBand()` — measured, see final-criticals-report.md.
+    function test_rebalanceTrimsDanglingPositionAtZeroSupply() public {
+        handler.mintInstant(5_000e6);
+        handler.settleBatch();
+        uint256 minted = cert.balanceOf(address(handler));
+        assertGt(minted, 0);
+        int256 dangling = lighter.positionBase(MARKET);
+        assertGt(dangling, 0, "no position was opened to dangle");
+
+        // Strand the position at zero supply. The exit's closing order has to be UNPLACEABLE for
+        // that: px18 = 1e15 makes CertOracle.toTickPrice floor its tick to 0 and revert
+        // CertOracle_TickOverflow inside _tryHedge, which is fail-open (Law 2), so the burn and
+        // the receipt stand while the venue-side position does not move. This is precisely the
+        // state CertVault's own CloseOrderNotPlaced event exists to record (see
+        // test_forceExitSurvivesUnplaceableCloseOrder), not a manufactured one.
+        feed.set(1e5, block.timestamp); // 8 feed decimals -> px18 = 1e15
+        handler.forceExit(minted);
+        assertEq(handler.lawTwoViolations(), 0, "forceExit itself was blocked");
+        assertEq(cert.totalSupply(), 0, "supply is not zero");
+        assertEq(lighter.positionBase(MARKET), dangling, "the position closed after all");
+
+        _setPrice(PX); // a usable price again, so rebalance()'s own order can be placed
+
+        // Attest that dangling notional truthfully. This is the state the fix is about.
+        uint256 notional18 = uint256(dangling) * PX / (10 ** 4); // sizeDecimals = 4
+        vm.prank(attester);
+        reg.attest(address(vault), 2, notional18, 3_600e18, 1_190_000e18);
+        assertEq(
+            vault.solvency().deltaBps,
+            vault.DELTA_UNBOUNDED_BPS(),
+            "a live position against a zero obligation still reads as in band"
+        );
+
+        // Permissionless (Law 6): a stranger with no certificates and no collateral trims it.
+        vm.prank(makeAddr("danglingTrimmer"));
+        vault.rebalance();
+        (, uint48 baseAmount,, uint8 isAsk,) = lighter.lastOrder();
+        assertEq(isAsk, 1, "the trim was not a SELL");
+        assertGt(baseAmount, 0, "a zero baseAmount is the venue's close-all primitive");
+        lighter.settleBatch();
+
+        int256 afterFirst = lighter.positionBase(MARKET);
+        assertLt(afterFirst, dangling, "the position was not trimmed");
+        assertGe(afterFirst, 0, "the trim overshot through flat into a short");
+
+        // Convergence, across a SECOND attested batch: the next attestation reports the smaller
+        // remainder, the next trim takes it, and the sequence ends flat rather than oscillating.
+        // Bounded per batch by MAX_REBALANCE_NOTIONAL_18 as always, so this loop is what "walk it
+        // to flat one batch at a time" actually looks like.
+        uint64 batchId = 3;
+        for (uint256 i = 0; i < 8 && lighter.positionBase(MARKET) != 0; ++i) {
+            uint256 remaining18 = uint256(lighter.positionBase(MARKET)) * PX / (10 ** 4);
+            vm.prank(attester);
+            reg.attest(address(vault), batchId++, remaining18, 3_600e18, 1_190_000e18);
+            vm.prank(makeAddr("danglingTrimmer"));
+            try vault.rebalance() {
+                lighter.settleBatch();
+            } catch (bytes memory reason) {
+                // The only acceptable stop is the dust guard: a remainder too small to trade.
+                assertEq(bytes4(reason), CertVault.CertVault_InBand.selector, "rebalance stopped for the wrong reason");
+                break;
+            }
+        }
+        assertEq(lighter.positionBase(MARKET), 0, "the dangling position never reached flat");
+
+        // And once flat, a truthful attestation puts the vault back in band: it stops, it does
+        // not keep selling into a short.
+        vm.prank(attester);
+        reg.attest(address(vault), 99, 0, 3_600e18, 1_190_000e18);
+        assertEq(vault.solvency().deltaBps, 10_000);
+        vm.expectRevert(CertVault.CertVault_InBand.selector);
+        vault.rebalance();
+
+        // No governance call anywhere above (Law 6): closeAll() was never needed.
+        assertEq(handler.lawTwoViolations(), 0);
     }
 
     /// @notice The headline invariant is named invariant_redemptionNeverBlockedByBuffer, but

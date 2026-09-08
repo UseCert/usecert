@@ -434,8 +434,12 @@ contract VaultHandler is CommonBase, StdUtils {
     /// @dev Reachable via CertVault_InBand: once attest() below can move registry.latest(vault)'s
     ///      notional18 (previously frozen at the fixture's setUp value of 0), rebalance()'s
     ///      deltaBps can land inside [10_000 - DELTA_BAND_BPS, 10_000 + DELTA_BAND_BPS], and does
-    ///      unconditionally whenever no mint has yet created supply (required == 0 forces
-    ///      deltaBps == 10_000 exactly, dead centre of the band).
+    ///      whenever no mint has yet created supply AND nothing is attested (required == 0 with a
+    ///      zero attested notional forces deltaBps == 10_000 exactly, dead centre of the band).
+    ///      CRITICAL A corrected the other half of that: required == 0 with a NON-zero attested
+    ///      notional is a live position against no obligation and now reports
+    ///      DELTA_UNBOUNDED_BPS, so this action can also place a real trim under fuzzing rather
+    ///      than always bouncing off CertVault_InBand at zero supply.
     function rebalance() external {
         callsRebalance++;
         try vault.rebalance() {} catch (bytes memory reason) {

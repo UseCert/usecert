@@ -298,18 +298,29 @@ contract CertVaultRefundTest is VaultFixture {
     ///         `CertOracle._tryFeed` computes `block.timestamp - t` inside a try's SUCCESS block,
     ///         which that try's own catch does not cover, so a feed reporting a future
     ///         `updatedAt` panics straight through `pxUnguarded()` and its `lastGoodPx18` fallback
-    ///         is unreachable. `oracle` and `feed` are both immutable, so there is no swap. This
-    ///         proves the panic is real and that `stageRefund` no longer touches the oracle at all.
+    ///         is unreachable. `oracle` and `feed` are both immutable, so there is no swap.
     ///         Found in self-review, not by the brief.
+    /// @dev UPDATED for CRITICAL B, which fixed the underflow this test originally *asserted*:
+    ///      the first assertion below used to be `vm.expectRevert(); oracle.pxUnguarded();`,
+    ///      recording the panic as the finding. `CertOracle._tryFeed` now short-circuits
+    ///      `t > block.timestamp` before the subtraction, so `pxUnguarded()` reaches its
+    ///      `lastGoodPx18` fallback instead of panicking, and that first assertion is now false.
+    ///      It is replaced with the stronger statement of the same property — the read is
+    ///      revert-free AND returns last-good — not deleted. Nothing else in this test changed:
+    ///      the point that `stageRefund` must not depend on an oracle read at all is independent
+    ///      of whether the oracle happens to be revert-free today, and is still asserted below.
+    ///      (See test/CertOracle.t.sol's test_pxUnguardedSurvivesFutureFeedTimestamp and
+    ///      test_pxRevertsNamedErrorOnFutureTimestamp for CRITICAL B's own direct coverage.)
     function test_stageRefundSurvivesAnOracleThatPanicsOnRead() public {
         uint256 id = _drainThenRequestPastWindow();
 
         // The feed starts reporting a timestamp in the future and freezes there.
         feed.set(int256(PX / 1e10), block.timestamp + 1 days);
 
-        // The documented-never-to-revert read does revert. This assertion is the finding.
-        vm.expectRevert(); // Panic(0x11), arithmetic underflow, raised inside CertOracle
-        oracle.pxUnguarded();
+        // Post-CRITICAL B: the documented-never-to-revert read genuinely does not revert, and
+        // answers with the last-good snapshot rather than the malfunctioning feed's live value.
+        (uint256 unguardedPx,) = oracle.pxUnguarded();
+        assertEq(unguardedPx, PX, "pxUnguarded did not fall back to last-good");
 
         // stageRefund does not care: it prices the close off the receipt's own requestPx18.
         vault.stageRefund(id);
@@ -427,5 +438,147 @@ contract CertVaultRefundTest is VaultFixture {
         }
         assertEq(uint256(lighter.getPendingBalance(address(vault), ASSET_IDX)), 0, "something was requested");
         assertEq(vault.hotBuffer(), RETAINED, "the buffer moved without a staged reallocation");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // CRITICAL A (C1 final review): the escalation in refund-fix-report.md section 8.1.
+    // stageRefund's hedge close is open-loop (ILighter exposes no position getter), so a refund
+    // can end with a position still open at zero outstanding supply. That much is still true.
+    // What made it a CRITICAL rather than a delta breach was the second half: _solvency reported
+    // deltaBps == 10_000 for ANY state with required == 0, so the vault claimed to be perfectly
+    // hedged with zero certificates outstanding and a live position, and rebalance() reverted
+    // CertVault_InBand at exactly the moment a trim was needed. forceExit/requestRedeem need
+    // certificates and there were none; stageRefund is once-only. Governance's closeAll() was the
+    // only escape, and the venue's initial-margin lock on the unwanted position blocked the very
+    // recall the refund depended on. That second half is what these two tests are about.
+    // ---------------------------------------------------------------------------------------
+
+    /// @notice The full refund sequence in the state that used to be terminal, then the proof that
+    ///         a permissionless caller walks the vault back to flat with NO governance involvement
+    ///         (Law 6). Every call below is made by a stranger holding no certificates and no
+    ///         collateral, except the attestations, which are the attester's ordinary per-batch
+    ///         duty that C2's one-rebalance-per-batch bound is defined in terms of - not a
+    ///         privileged intervention, and specifically not closeAll().
+    /// @dev The stranding is produced by the venue REFUSING the closing order, which is exactly
+    ///      what _tryHedge's fail-open catch and CertVault's CloseOrderNotPlaced event exist for.
+    ///      It is the only way to strand a position at zero supply that does not also flatten the
+    ///      position being stranded: staging prices its close off r.requestPx18, so no oracle
+    ///      state can make it unplaceable (see test_stageRefundSurvivesAnOracleThatPanicsOnRead).
+    /// @dev LOAD-BEARING: with _solvency's `required == 0` branch restored to an unconditional
+    ///      10_000, the first rebalance() below reverts CertVault_InBand and this test fails on
+    ///      "the dangling position never reached flat" with the position still at 1_403_641.
+    function test_refundDoesNotLeaveVaultPermanentlyOverHedged() public {
+        uint256 id = _drainThenRequestPastWindow();
+        address stranger = makeAddr("overHedgeStranger");
+
+        // Phase 1, with the venue refusing orders: staging must still succeed (fail-open), and
+        // it records that the close did NOT go in.
+        lighter.setShouldRevertCreateOrder(true);
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit CertVault.RefundStaged(id, POSTED, false);
+        vm.prank(stranger);
+        vault.stageRefund(id);
+        lighter.setShouldRevertCreateOrder(false);
+
+        assertEq(lighter.positionBase(MARKET), HEDGE_TICKS, "the close went in after all");
+        assertEq(cert.totalSupply(), 0, "no certificate was ever minted for this receipt");
+
+        // Phase 2 still pays in full, through permissionless calls only.
+        vm.prank(stranger);
+        vault.recallMargin();
+        lighter.settleBatch();
+        vm.prank(stranger);
+        vault.recallMargin();
+        uint256 aliceBefore = usdg.balanceOf(alice);
+        vm.prank(stranger);
+        vault.refundMint(id);
+        assertEq(usdg.balanceOf(alice) - aliceBefore, ESCROW, "the user was not made whole");
+
+        // Here is the CRITICAL A state: escrow returned, zero supply, full hedge still open.
+        assertEq(cert.totalSupply(), 0);
+        assertEq(lighter.positionBase(MARKET), HEDGE_TICKS, "the setup did not leave a dangling position");
+
+        // 1_403_641 ticks is ~49_950e18 of notional against a MAX_REBALANCE_NOTIONAL_18 of
+        // 10_000e18, so this deliberately takes SEVERAL attested batches: the point is that it
+        // converges to flat, not that one call fixes it.
+        uint64 batchId = 2;
+        uint256 rebalances;
+        for (uint256 i = 0; i < 12 && lighter.positionBase(MARKET) != 0; ++i) {
+            uint256 remaining18 = uint256(lighter.positionBase(MARKET)) * PX / (10 ** 4);
+            vm.prank(attester);
+            reg.attest(address(vault), batchId++, remaining18, 0, 1_190_000e18);
+            assertEq(vault.solvency().deltaBps, vault.DELTA_UNBOUNDED_BPS(), "still reported as in band");
+
+            int256 posBefore = lighter.positionBase(MARKET);
+            vm.prank(stranger);
+            try vault.rebalance() {
+                ++rebalances;
+                lighter.settleBatch();
+                assertLt(lighter.positionBase(MARKET), posBefore, "a trim did not reduce the position");
+                assertGe(lighter.positionBase(MARKET), 0, "a trim overshot through flat into a short");
+            } catch (bytes memory reason) {
+                // The only acceptable stop short of flat is the sub-tick dust guard.
+                assertEq(bytes4(reason), CertVault.CertVault_InBand.selector, "rebalance stopped for the wrong reason");
+                break;
+            }
+        }
+
+        assertEq(lighter.positionBase(MARKET), 0, "the dangling position never reached flat");
+        assertGt(rebalances, 1, "this was supposed to need more than one batch");
+        assertEq(cert.totalSupply(), 0);
+    }
+
+    /// @notice KNOWN GAP, asserted rather than left in a report: the zero-supply trim is SIGN
+    ///         BLIND, because ISolvencyRegistry.Attestation.notional18 is a uint256 and carries no
+    ///         direction. At zero supply the vault therefore always SELLS, which flattens a
+    ///         dangling LONG (the test above) but ENLARGES a dangling SHORT.
+    ///
+    ///         That matters because the shortest route to a dangling position - closeAll(), then
+    ///         a staged refund whose open-loop ASK has nothing left to close - produces a SHORT,
+    ///         and this fix does not rescue it: rebalance() sells into it, one bounded
+    ///         MAX_REBALANCE_NOTIONAL_18 step per attested batch, until the venue refuses the
+    ///         increase for want of margin. Governance's closeAll() remains the escape for that
+    ///         one shape.
+    ///
+    ///         Neither half of a real fix is patchable here: sizing the close against the true
+    ///         position needs a position getter ILighter does not have, and telling a long from a
+    ///         short needs a signed attestation, which is an interface change across
+    ///         SolvencyRegistry, CapacityOracle and every attester. Both are named in
+    ///         final-criticals-report.md as the follow-up.
+    /// @dev DELETE THIS TEST when the attestation gains a sign or the close stops being open-loop.
+    ///      It exists to keep the gap visible and to fail loudly if someone "fixes" the direction
+    ///      without fixing the data model.
+    function test_zeroSupplyTrimCannotCloseADanglingShort() public {
+        uint256 id = _drainThenRequestPastWindow();
+
+        // Governance winds the vault down: the position goes flat and the margin stays put.
+        vm.prank(gov);
+        vault.closeAll();
+        lighter.settleBatch();
+        assertEq(lighter.positionBase(MARKET), 0, "closeAll did not flatten");
+
+        // Now a stranger stages the refund. The open-loop ASK has nothing to close, so it OPENS a
+        // short of exactly the size requestMint once went long.
+        vault.stageRefund(id);
+        lighter.settleBatch();
+        assertEq(lighter.positionBase(MARKET), -HEDGE_TICKS, "the open-loop close did not open a short");
+        assertEq(cert.totalSupply(), 0);
+
+        // The attester can only report the MAGNITUDE, so the vault reads this identically to the
+        // dangling long above and sells again.
+        uint256 magnitude18 = uint256(HEDGE_TICKS) * PX / (10 ** 4);
+        vm.prank(attester);
+        reg.attest(address(vault), 2, magnitude18, 0, 1_190_000e18);
+        assertEq(vault.solvency().deltaBps, vault.DELTA_UNBOUNDED_BPS());
+
+        vault.rebalance();
+        (, uint48 baseAmount,, uint8 isAsk,) = lighter.lastOrder();
+        assertEq(isAsk, 1, "the trim is a SELL, which is the gap");
+        assertGt(baseAmount, 0);
+
+        // And it makes the short bigger, not smaller. Asserted so nobody has to take the report's
+        // word for it. The mock's own margin check is what stops it in the end, not the vault.
+        lighter.settleBatch();
+        assertLt(lighter.positionBase(MARKET), -HEDGE_TICKS, "the short did not grow, re-check this gap");
     }
 }

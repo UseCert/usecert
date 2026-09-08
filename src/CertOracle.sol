@@ -60,9 +60,15 @@ contract CertOracle is ICertOracle {
         updatedAt = t;
     }
 
+    /// @dev CRITICAL B: `t > block.timestamp` is checked FIRST and reverts the NAMED error.
+    ///      Without it, a feed reporting an `updatedAt` in the future underflows
+    ///      `block.timestamp - t` and reverts with an anonymous arithmetic panic (0x11) instead.
+    ///      px() is allowed — required — to revert on a malfunctioning feed, so the fix here is
+    ///      not "return something": it is to revert with the error callers can actually switch
+    ///      on. A future timestamp is not "extremely fresh", it is a broken feed.
     function px() external view returns (uint256) {
         (uint256 p, uint256 t) = _readFeed();
-        if (block.timestamp - t > stalenessSeconds) revert CertOracle_StalePrice();
+        if (t > block.timestamp || block.timestamp - t > stalenessSeconds) revert CertOracle_StalePrice();
         return p;
     }
 
@@ -78,7 +84,18 @@ contract CertOracle is ICertOracle {
     function _tryFeed() internal view returns (bool ok, uint256 px18, uint256 updatedAt) {
         try feed.latestRoundData() returns (uint80, int256 answer, uint256, uint256 t, uint80) {
             if (answer <= 0) return (false, 0, 0);
-            if (block.timestamp - t > stalenessSeconds) return (false, 0, 0);
+            // CRITICAL B (C1 final review): the `t > block.timestamp` half of this condition is
+            // the fix, and it must come FIRST so it short-circuits the subtraction. Without it,
+            // `block.timestamp - t` underflows on a feed reporting a future updatedAt and panics
+            // (0x11) — and this is the SUCCESS block of a try, which that try's own catch does
+            // not cover, so the panic propagated uncaught through _tryFeed() -> pxUnguarded() ->
+            // CertVault._queueExit() and reverted forceExit(), the protocol's last-resort
+            // backstop (Law 2), with the lastGoodPx18 fallback that exists for exactly this case
+            // sitting unreachable two lines away. `feed` is immutable here and `oracle` is
+            // immutable in CertVault, so there was no swap out of it either.
+            // A future timestamp is NOT "fresher than fresh": it is a malfunctioning feed, so it
+            // is unusable and returns the failure tuple like any other _tryFeed() failure.
+            if (t > block.timestamp || block.timestamp - t > stalenessSeconds) return (false, 0, 0);
             try feed.decimals() returns (uint8 d) {
                 // Finding 2 (Task 10 review): arithmetic inside a try's success block is NOT
                 // covered by that try's own catch. decimals() >= 96 makes 10 ** (d - 18) overflow
@@ -88,7 +105,20 @@ contract CertOracle is ICertOracle {
                 // ~78 exponent where the power itself would overflow. Out of range -> the feed is
                 // simply unusable, same as any other _tryFeed() failure.
                 if (d > 36) return (false, 0, 0);
-                px18 = d <= 18 ? uint256(answer) * (10 ** (18 - d)) : uint256(answer) / (10 ** (d - 18));
+                // CRITICAL B re-audit, third exposure in this same success block: with d bounded
+                // the exponentiation is safe and the d > 18 branch is a division by a non-zero
+                // power, but `uint256(answer) * (10 ** (18 - d))` can still overflow — answer is
+                // an int256 whose positive range reaches ~5.8e76, and at d = 0 the multiplier is
+                // 1e18, so any answer above ~1.15e59 panics uncaught here exactly like the
+                // staleness underflow did. Check the product's headroom instead of trusting the
+                // feed's magnitude; an answer that cannot be normalised is an unusable feed.
+                if (d <= 18) {
+                    uint256 scale = 10 ** (18 - d);
+                    if (uint256(answer) > type(uint256).max / scale) return (false, 0, 0);
+                    px18 = uint256(answer) * scale;
+                } else {
+                    px18 = uint256(answer) / (10 ** (d - 18));
+                }
                 return (true, px18, t);
             } catch {
                 return (false, 0, 0);

@@ -38,6 +38,12 @@ contract MockLighter is ILighter {
     ///      until the refund fix, which meant a broken view could revert refundMint (and
     ///      claimRedeem) with a venue error while the buffer was fully funded.
     error PendingReadRefused();
+    /// @dev Models the venue refusing an order outright — the exact condition CertVault._tryHedge's
+    ///      fail-open catch and the CloseOrderNotPlaced event exist for. Needed to construct the
+    ///      state CRITICAL A is about: a closing order that never went in leaves the vault holding
+    ///      a position at zero outstanding supply, which nothing on-chain can otherwise produce
+    ///      without also flattening the position it is trying to strand.
+    error OrderRefused();
 
     IERC20 public immutable collateral;
     uint16 public immutable collateralAssetIndex;
@@ -64,6 +70,8 @@ contract MockLighter is ILighter {
     bool public shouldRevertDrain;
     /// @dev When set, getPendingBalance reverts PendingReadRefused().
     bool public shouldRevertPendingRead;
+    /// @dev When set, createOrder reverts OrderRefused().
+    bool public shouldRevertCreateOrder;
 
     Order[] private _queue;
     mapping(address => mapping(uint16 => uint128)) private _pending;
@@ -101,6 +109,10 @@ contract MockLighter is ILighter {
         shouldRevertPendingRead = v;
     }
 
+    function setShouldRevertCreateOrder(bool v) external {
+        shouldRevertCreateOrder = v;
+    }
+
     function deposit(address to, uint16, uint8, uint256 amount) external payable {
         collateral.transferFrom(msg.sender, address(this), amount);
         marginBalance += amount;
@@ -117,6 +129,7 @@ contract MockLighter is ILighter {
         uint8 isAsk,
         uint8 orderType
     ) external {
+        if (shouldRevertCreateOrder) revert OrderRefused();
         if (accountIndex == 0) revert AccountIsNotRegistered();
         if (marketIndex > 254) revert MarketIndexTooHigh();
         if (orderType > 1) revert BadOrderType();
