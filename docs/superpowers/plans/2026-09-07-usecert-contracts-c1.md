@@ -99,6 +99,7 @@ src/BufferBook.sol                     Funding/variance accrual, thresholds
 src/CertVault.sol                      Mint, redeem, forceExit, rebalance, solvency
 src/CertFactory.sol                    Deploys and bootstraps vault+certificate pairs
 
+test/helpers/VaultFixture.sol          Shared vault test stack (abstract, setUp virtual)
 test/mocks/MockERC20.sol               Configurable-decimals token
 test/mocks/MockLighter.sol             Priority-queue semantics test double
 test/mocks/MockAggregatorV3.sol        Settable Chainlink feed
@@ -499,8 +500,8 @@ import {Certificate} from "../src/Certificate.sol";
 
 contract CertificateTest is Test {
     Certificate cert;
-    address vault = address(0xVA17);
-    address alice = address(0xA11CE);
+    address vault = makeAddr("vault");
+    address alice = makeAddr("alice");
 
     function setUp() public {
         cert = new Certificate("UseCert TSLA", "uTSLA", vault);
@@ -543,8 +544,8 @@ contract CertificateTest is Test {
         vm.prank(vault);
         cert.mint(alice, 1e18);
         vm.prank(alice);
-        cert.transfer(address(0xB0B), 1e18);
-        assertEq(cert.balanceOf(address(0xB0B)), 1e18);
+        cert.transfer(makeAddr("bob"), 1e18);
+        assertEq(cert.balanceOf(makeAddr("bob")), 1e18);
     }
 }
 ```
@@ -694,7 +695,7 @@ import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
 contract CertOracleTest is Test {
     CertOracle oracle;
     MockAggregatorV3 feed;
-    address attester = address(0xA77E);
+    address attester = makeAddr("attester");
 
     // TSLA: price_decimals = 2, so 355.86 -> tick 35586
     uint256 constant PX = 355.86e18;
@@ -963,8 +964,8 @@ import {ISolvencyRegistry} from "../src/interfaces/ISolvencyRegistry.sol";
 
 contract SolvencyRegistryTest is Test {
     SolvencyRegistry reg;
-    address attester = address(0xA77E);
-    address asset = address(0xTS1A);
+    address attester = makeAddr("attester");
+    address asset = makeAddr("tsla");
 
     function setUp() public {
         vm.warp(1_800_000_000);
@@ -1006,7 +1007,7 @@ contract SolvencyRegistryTest is Test {
     }
 
     function test_unattestedAssetHasMaxAge() public view {
-        assertEq(reg.ageSec(address(0xDEAD)), type(uint256).max);
+        assertEq(reg.ageSec(makeAddr("unknown")), type(uint256).max);
     }
 }
 ```
@@ -1136,9 +1137,9 @@ import {SolvencyRegistry} from "../src/SolvencyRegistry.sol";
 contract CapacityOracleTest is Test {
     CapacityOracle cap;
     SolvencyRegistry reg;
-    address attester = address(0xA77E);
-    address gov = address(0x60V);
-    address asset = address(0xTS1A);
+    address attester = makeAddr("attester");
+    address gov = makeAddr("gov");
+    address asset = makeAddr("tsla");
 
     uint256 constant OI = 1_190_000e18; // TSLA open interest observed 2026-09-07
     uint256 constant ABSOLUTE_CAP = 5_000_000e18;
@@ -1149,6 +1150,7 @@ contract CapacityOracleTest is Test {
         reg = new SolvencyRegistry(attester);
         // depthBps 1000 = 10%, bounds [100, 3000], absoluteCap 5M
         cap = new CapacityOracle(address(reg), gov, 1000, 100, 3000, 300);
+        vm.prank(gov);
         cap.setAbsoluteCap(asset, ABSOLUTE_CAP);
         vm.prank(attester);
         reg.attest(asset, 1, 0, 0, OI);
@@ -1165,6 +1167,7 @@ contract CapacityOracleTest is Test {
         reg.attest(asset, 2, 0, 0, OI * 100);
         assertEq(cap.maxNotional18(asset, HUGE_BUFFER), ABSOLUTE_CAP);
 
+        vm.prank(gov);
         cap.setAbsoluteCap(asset, 100_000_000e18);
         assertEq(cap.maxNotional18(asset, HUGE_BUFFER), 11_900_000e18);
     }
@@ -1185,7 +1188,7 @@ contract CapacityOracleTest is Test {
     }
 
     function test_unattestedAssetYieldsZeroCapacity() public view {
-        assertEq(cap.maxNotional18(address(0xDEAD), HUGE_BUFFER), 0);
+        assertEq(cap.maxNotional18(makeAddr("unknown"), HUGE_BUFFER), 0);
     }
 
     function test_governanceMayTuneDepthWithinBounds() public {
@@ -1273,12 +1276,11 @@ contract CapacityOracle is ICapacityOracle {
         emit DepthBpsSet(v);
     }
 
-    /// @dev Deliberately callable by the deployer during factory bootstrap and by governance
-    ///      afterwards; the factory transfers effective control by never calling it again.
+    /// @dev Governance only, with no first-call exception. An earlier draft let anyone set a
+    ///      never-before-set cap "for bootstrap convenience"; that let a stranger front-run the
+    ///      cap for a new asset, which is the one number holding a compromised attester in check.
     function setAbsoluteCap(address asset, uint256 cap18) external {
-        if (msg.sender != governance && absoluteCap18[asset] != 0) {
-            revert CapacityOracle_OnlyGovernance();
-        }
+        if (msg.sender != governance) revert CapacityOracle_OnlyGovernance();
         absoluteCap18[asset] = cap18;
         emit AbsoluteCapSet(asset, cap18);
     }
@@ -1340,8 +1342,8 @@ import {BufferBook} from "../src/BufferBook.sol";
 
 contract BufferBookTest is Test {
     BufferBook book;
-    address vault = address(0xVA17);
-    address asset = address(0xTS1A);
+    address vault = makeAddr("vault");
+    address asset = makeAddr("tsla");
 
     // floor 100k, feeOn 60k, mintSlow 30k, insuranceDraw 0, feeCap 200 bps
     function setUp() public {
@@ -1583,9 +1585,9 @@ contract CertVaultMintTest is Test {
     MockERC20 usdg;
     MockAggregatorV3 feed;
 
-    address attester = address(0xA77E);
-    address gov = address(0x60V);
-    address alice = address(0xA11CE);
+    address attester = makeAddr("attester");
+    address gov = makeAddr("gov");
+    address alice = makeAddr("alice");
 
     uint256 constant PX = 355.86e18;
     uint16 constant MARKET = 16; // TSLA
@@ -1624,6 +1626,7 @@ contract CertVaultMintTest is Test {
         cert = Certificate(vault.certificate());
         book = BufferBook(vault.buffer());
 
+        vm.prank(gov);
         cap.setAbsoluteCap(address(vault), 5_000_000e18);
         vm.startPrank(attester);
         oracle.setMarkPrice(PX);
@@ -1791,6 +1794,8 @@ contract CertVault {
     error CertVault_AboveInstantCap();
     error CertVault_BelowInstantCap();
     error CertVault_BadReceipt();
+    error CertVault_OnlyGovernance();
+    error CertVault_OnlyAttester();
 
     event Minted(address indexed user, uint256 amountIn, uint256 certOut, uint256 px18, uint256 fee);
     event MintRequested(uint256 indexed receiptId, address indexed user, uint256 amountIn);
@@ -2011,12 +2016,18 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {CertVault} from "../src/CertVault.sol";
-// ... same imports and identical setUp() as CertVaultMintTest ...
+import {VaultFixture} from "./helpers/VaultFixture.sol";
 
-contract CertVaultRedeemTest is Test {
-    // Reuse the exact setUp from CertVaultMintTest. Copy it verbatim rather than
-    // sharing a base contract, so this file reads standalone.
-    // (Implementer: lift setUp() from test/CertVaultMint.t.sol unchanged.)
+/// STEP 0 FOR THIS TASK — do this before writing any test below:
+/// Move the whole of `CertVaultMintTest.setUp()` (Task 8) into a new
+/// `test/helpers/VaultFixture.sol` as `abstract contract VaultFixture is Test`,
+/// with every field it initialises (vault, cert, oracle, reg, cap, book, lighter,
+/// usdg, feed, attester, gov, alice, PX, MARKET, ASSET_IDX) declared `internal`
+/// and `setUp()` declared `public virtual` so Task 12 can extend it.
+/// Then make `CertVaultMintTest` inherit it and delete its own setUp — Task 8's
+/// tests must still pass unchanged. This file and Tasks 10 and 12 inherit the
+/// same fixture. Do NOT copy setUp into three files.
+contract CertVaultRedeemTest is VaultFixture {
 
     function test_redeemInstantPaysOracklePriceMinusFee() public {
         vm.prank(alice);
@@ -2237,7 +2248,7 @@ Insert after the mint section, before `// internals`.
 
     /// @notice Wind-down: close the entire position using Lighter's baseAmount == 0 primitive.
     function closeAll() external {
-        if (msg.sender != governance) revert CertVault_MintPaused();
+        if (msg.sender != governance) revert CertVault_OnlyGovernance();
         (uint256 px18,) = oracle.pxUnguarded();
         lighter.createOrder(
             lighterAccountIndex(), cfg.marketIndex, 0, oracle.toTickPrice(px18), SIDE_ASK, ORDER_TYPE_MARKET
@@ -2282,10 +2293,9 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {CertVault} from "../src/CertVault.sol";
-// ... identical imports and setUp() as CertVaultMintTest ...
+import {VaultFixture} from "./helpers/VaultFixture.sol";
 
-contract CertVaultRebalanceTest is Test {
-    // (Implementer: lift setUp() from test/CertVaultMint.t.sol unchanged.)
+contract CertVaultRebalanceTest is VaultFixture {
 
     function test_solvencyReportsBackingWithProvenanceAndAge() public {
         vm.prank(alice);
@@ -2337,7 +2347,7 @@ contract CertVaultRebalanceTest is Test {
         vm.prank(attester);
         reg.attest(address(vault), 2, 1_777e18, 3_600e18, 1_190_000e18);
 
-        vm.prank(address(0xBEEF)); // a stranger
+        vm.prank(makeAddr("stranger")); // a stranger
         vault.rebalance();
         assertEq(lighter.queuedOrderCount(), 1);
     }
@@ -2422,7 +2432,7 @@ Expected: compilation failure — `rebalance` and `solvency` do not exist.
 
     /// @notice Relay accrued funding, execution variance and realised basis into the buffer.
     function accrueFunding(int256 delta18) external {
-        if (msg.sender != ICertOracleAttester(address(oracle)).attester()) revert CertVault_MintPaused();
+        if (msg.sender != ICertOracleAttester(address(oracle)).attester()) revert CertVault_OnlyAttester();
         buffer.accrue(address(this), delta18);
     }
 ```
@@ -2491,8 +2501,8 @@ contract CertFactoryTest is Test {
     MockERC20 usdg;
     MockAggregatorV3 feed;
 
-    address gov = address(0x60V);
-    address attester = address(0xA77E);
+    address gov = makeAddr("gov");
+    address attester = makeAddr("attester");
 
     function setUp() public {
         vm.warp(1_800_000_000);
@@ -2737,14 +2747,18 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {VaultHandler} from "./VaultHandler.sol";
-// ... same construction as CertVaultMintTest setUp, plus the handler ...
+import {VaultFixture} from "../helpers/VaultFixture.sol";
 
-contract BackingInvariantTest is Test {
+contract BackingInvariantTest is VaultFixture {
     VaultHandler handler;
-    // (Implementer: build the full stack exactly as in test/CertVaultMint.t.sol setUp,
-    //  seed the buffer, bootstrap, settle, then:)
-    //    handler = new VaultHandler(vault, usdg, lighter);
-    //    targetContract(address(handler));
+
+    /// @dev VaultFixture.setUp() already builds the stack, seeds the buffer,
+    ///      bootstraps and settles. Extend it, do not rebuild it.
+    function setUp() public override {
+        super.setUp();
+        handler = new VaultHandler(vault, usdg, lighter);
+        targetContract(address(handler));
+    }
 
     /// Law 2, expressed as an invariant.
     function invariant_redemptionNeverBlockedByBuffer() public view {
@@ -2789,7 +2803,12 @@ git commit -m "test(contracts): invariant suite for Law 2 and capacity bounds"
 
 **Type consistency.** `_to18`/`_from18`, `_hedge(certAmount18, px18, side)`, `SIDE_BID`/`SIDE_ASK`, `ORDER_TYPE_MARKET`, `maxNotional18(asset, bufferCapacity18)`, `capacity18(asset)`, `latest(asset)`/`ageSec(asset)`, and `lighterAccountIndex()` are used identically across Tasks 6, 8, 9, 10 and 11. `Attestation` field names match between T5's definition and T10's consumption.
 
-**One thing the implementer must not skip.** Tasks 9, 10 and 12 say to lift `setUp()` verbatim from `test/CertVaultMint.t.sol`. Do that literally — do not refactor into a shared base contract mid-plan, because a shared harness that drifts silently makes the Law 2 tests untrustworthy.
+**Pre-flight corrections applied before execution (2026-09-07).** Four defects in the first draft of this plan were fixed by the plan author before any task was dispatched:
+
+1. **Invalid address literals.** `address(0x60V)`, `address(0xTS1A)` and `address(0xVA17)` contain non-hex characters and would not compile. All test addresses now use forge-std `makeAddr("name")`, which also labels them in traces.
+2. **`CapacityOracle.setAbsoluteCap` had a first-call loophole** (`msg.sender != governance && absoluteCap18[asset] != 0`), letting anyone front-run the cap for a new asset. Since `absoluteCap` is the one value that bounds a compromised attester, this is now governance-only with no exception, and the three call sites are pranked as `gov`.
+3. **`closeAll()` and `accrueFunding()` reverted with `CertVault_MintPaused`** for authorisation failures, which is a misleading error. Added `CertVault_OnlyGovernance` and `CertVault_OnlyAttester`.
+4. **Mandated `setUp()` duplication across three test files** — an instruction a reviewer would rightly flag as duplication. Task 9 now extracts the shared stack into `test/helpers/VaultFixture.sol` and Tasks 9, 10 and 12 inherit it. The original worry (a drifting shared harness making the Law 2 tests untrustworthy) is answered by the fixture being `abstract` with a `virtual setUp`, and by Task 8's tests having to keep passing unchanged after the extraction.
 
 ---
 
