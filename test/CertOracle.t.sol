@@ -9,16 +9,35 @@ contract CertOracleTest is Test {
     CertOracle oracle;
     MockAggregatorV3 feed;
     address attester = makeAddr("attester");
+    /// @dev No key, no role, no delay. Every pokeLastGood() below is pranked as this address, so
+    ///      the H-1 fix is proven not to have bought its rate limit with an owner (Law 6).
+    address stranger = makeAddr("stranger");
 
     // TSLA: price_decimals = 2, so 355.86 -> tick 35586
     uint256 constant PX = 355.86e18;
+    uint256 constant STALENESS = 3600;
+    uint256 constant DEVIATION_BPS = 500;
 
     function setUp() public {
         vm.warp(1_800_000_000);
         feed = new MockAggregatorV3(8, 355_86000000); // 8 decimals
-        oracle = new CertOracle(address(feed), attester, 2, 3600, 500, 100);
+        oracle = new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100);
         vm.prank(attester);
         oracle.setMarkPrice(PX);
+    }
+
+    /// @dev Moves the feed AND the attested mark together, so the basis band stays satisfied and
+    ///      the deviation breaker is the only guard in play — mirroring VaultFixture._setPrice,
+    ///      which is what AuditPoC's A-3 uses.
+    function _movePrice(uint256 px18) internal {
+        feed.set(int256(px18 / 1e10), block.timestamp); // feed has 8 decimals
+        vm.prank(attester);
+        oracle.setMarkPrice(px18);
+    }
+
+    /// @dev A NEW feed round at the price the feed is already reporting.
+    function _refreshFeedRound() internal {
+        feed.set(feed.answer(), block.timestamp);
     }
 
     function test_pxNormalisesFeedDecimalsTo18() public view {
@@ -210,6 +229,269 @@ contract CertOracleTest is Test {
         assertGt(t, 0);
         assertEq(hugeOracle.basisBps(), 0);
         assertFalse(hugeOracle.mintAllowed());
+    }
+
+    // =======================================================================================
+    // H-1 (High, C1 audit): pokeLastGood() disarmed the deviation circuit breaker.
+    //
+    // mintAllowed() pauses minting when the live price deviates from lastGoodPx18 by more than
+    // deviationBps. pokeLastGood() was permissionless and wrote lastGoodPx18 = live price, so the
+    // breaker's own reference was resettable, for gas, by the party it exists to stop —
+    // atomically, in the mint's transaction. _tryFeed screens for staleness, positivity and
+    // normalisability, never for deviation, so a post-jump price is "healthy" by that definition
+    // and the poke laundered it into the reference.
+    //
+    // These tests are the oracle-level statement of AuditPoC's test_A3. That PoC cannot pass as
+    // written — it needs mintAllowed() == true for its mintInstant() and false for its closing
+    // assertion, in one block, with nothing in between that can write the feed, markPx18 or
+    // lastGoodPx18 (no src/ code calls setMarkPrice or pokeLastGood). See the audit report.
+    // =======================================================================================
+
+    /// @notice The A-3 property itself: a single permissionless call must not clear a tripped
+    ///         breaker. Measured with deviationBps = 500 and a genuine 6% move.
+    function test_H1_pokeLastGoodCannotClearTheDeviationBreakerInOneCall() public {
+        assertTrue(oracle.mintAllowed(), "precondition: minting open");
+        assertEq(oracle.lastGoodPx18(), PX);
+
+        _movePrice(PX * 106 / 100); // 600 bps > 500 bps
+        assertFalse(oracle.mintAllowed(), "precondition: deviation breaker tripped");
+
+        vm.prank(stranger);
+        oracle.pokeLastGood();
+
+        assertEq(oracle.lastGoodPx18(), PX, "the reference teleported onto the post-jump price");
+        assertFalse(oracle.mintAllowed(), "PROPERTY: the breaker must not be clearable by its target");
+
+        // Nor by repeating the call — nothing rate-limits how many pokes fit in one transaction,
+        // which is why a per-call clamp alone would not have been a fix.
+        vm.startPrank(stranger);
+        for (uint256 i = 0; i < 5; i++) {
+            vm.expectRevert(CertOracle.CertOracle_ReferenceRateLimited.selector);
+            oracle.pokeLastGood();
+        }
+        vm.stopPrank();
+        assertEq(oracle.lastGoodPx18(), PX, "a loop of pokes walked the reference");
+        assertFalse(oracle.mintAllowed(), "PROPERTY: still shut after a poke loop");
+    }
+
+    /// @notice The other half: a move that is genuinely there is absorbed, in bounded steps, once
+    ///         it has held for a full staleness window — and the confirming observation is
+    ///         provably a DIFFERENT feed round than the arming one.
+    function test_H1_referenceAdvancesOnlyAfterTheMoveHeldForAWindow() public {
+        _movePrice(PX * 106 / 100);
+        uint256 armedAt = block.timestamp;
+
+        vm.prank(stranger);
+        oracle.pokeLastGood(); // phase one: arm
+        assertEq(oracle.pendingPx18(), PX * 106 / 100);
+        assertEq(oracle.pendingSince(), armedAt);
+        assertEq(oracle.lastGoodPx18(), PX, "arming must not advance the reference");
+
+        // Exactly stalenessSeconds later the ARMING round is still fresh (the edge is `>`), so
+        // this call could be served by the very same round it armed from. The strict comparison is
+        // what refuses it.
+        vm.warp(armedAt + STALENESS);
+        vm.prank(stranger);
+        vm.expectRevert(CertOracle.CertOracle_ReferenceRateLimited.selector);
+        oracle.pokeLastGood();
+
+        // One second later the arming round has aged out, so there is nothing to confirm against
+        // until the feed speaks again. This is what makes "the price held" mean the feed
+        // re-reported it rather than one round being read twice.
+        vm.warp(armedAt + STALENESS + 1);
+        vm.prank(stranger);
+        vm.expectRevert(CertOracle.CertOracle_StalePrice.selector);
+        oracle.pokeLastGood();
+
+        _refreshFeedRound(); // the feed independently re-reports the same level
+        vm.prank(stranger);
+        oracle.pokeLastGood();
+
+        // Advanced by at most deviationBps: 355.86 -> 373.653, not to the live 377.2116.
+        uint256 clamped = PX + PX * DEVIATION_BPS / 10_000;
+        assertEq(oracle.lastGoodPx18(), clamped, "advance was not clamped to deviationBps");
+        assertEq(oracle.lastGoodAt(), block.timestamp, "lastGoodAt is the confirming feed round");
+        // 377.2116 vs 373.653 is 95 bps, inside the band, so a real 6% repricing does reopen
+        // minting — one window and two transactions later, not atomically.
+        assertTrue(oracle.mintAllowed(), "a held repricing must eventually be absorbed");
+    }
+
+    /// @notice A move large enough not to fit in one clamped step leaves the breaker shut even
+    ///         after the window: the reference chases at most deviationBps per window.
+    function test_H1_advanceIsClampedSoALargeMoveTakesSeveralWindows() public {
+        _movePrice(PX * 150 / 100); // +50%
+        vm.prank(stranger);
+        oracle.pokeLastGood(); // arm
+
+        vm.warp(block.timestamp + STALENESS + 1);
+        _refreshFeedRound();
+        vm.prank(stranger);
+        oracle.pokeLastGood(); // confirm one step
+
+        assertEq(oracle.lastGoodPx18(), PX + PX * DEVIATION_BPS / 10_000);
+        assertFalse(oracle.mintAllowed(), "one clamped step must not clear a 50% dislocation");
+
+        // And the next step costs another full window: the confirm re-armed.
+        vm.prank(stranger);
+        vm.expectRevert(CertOracle.CertOracle_ReferenceRateLimited.selector);
+        oracle.pokeLastGood();
+    }
+
+    /// @notice A price that does not hold never confirms: moving out of band relative to the
+    ///         ARMED price re-arms from scratch, so a transient spike expires instead of being
+    ///         laundered into the reference on the strength of an old timestamp.
+    function test_H1_aMoveThatDoesNotHoldRestartsItsWindow() public {
+        _movePrice(PX * 106 / 100);
+        uint256 firstArm = block.timestamp;
+        vm.prank(stranger);
+        oracle.pokeLastGood();
+        assertEq(oracle.pendingSince(), firstArm);
+
+        // Half a window later the price has moved again, 660 bps away from the armed candidate.
+        vm.warp(firstArm + STALENESS / 2);
+        _movePrice(PX * 113 / 100);
+        vm.prank(stranger);
+        oracle.pokeLastGood();
+        assertEq(oracle.pendingPx18(), PX * 113 / 100, "candidate was not replaced");
+        assertEq(oracle.pendingSince(), block.timestamp, "the window did not restart");
+        assertEq(oracle.lastGoodPx18(), PX, "reference moved on an unheld price");
+
+        // Past the FIRST arming's window, but not the second's: still refused.
+        vm.warp(firstArm + STALENESS + 1);
+        _refreshFeedRound();
+        vm.prank(stranger);
+        vm.expectRevert(CertOracle.CertOracle_ReferenceRateLimited.selector);
+        oracle.pokeLastGood();
+        assertFalse(oracle.mintAllowed());
+    }
+
+    /// @notice A price back inside the band is still recorded immediately, with no waiting: the
+    ///         breaker is not tripped on it, so nothing is being laundered — and lastGoodPx18 /
+    ///         lastGoodAt are also pxUnguarded()'s fallback, so Law 2's snapshot has to stay
+    ///         refreshable in normal operation. It also clears any armed candidate.
+    function test_H1_inBandPokeStillRecordsImmediatelyAndClearsThePending() public {
+        _movePrice(PX * 106 / 100);
+        vm.prank(stranger);
+        oracle.pokeLastGood(); // arms
+        assertGt(oracle.pendingSince(), 0);
+
+        _movePrice(PX * 102 / 100); // 200 bps, inside the band
+        vm.prank(stranger);
+        oracle.pokeLastGood();
+
+        assertEq(oracle.lastGoodPx18(), PX * 102 / 100, "in-band poke must record at once");
+        assertEq(oracle.lastGoodAt(), block.timestamp);
+        assertEq(oracle.pendingSince(), 0, "a resolved dislocation must not stay armed");
+        assertEq(oracle.pendingPx18(), 0);
+        assertTrue(oracle.mintAllowed());
+    }
+
+    /// @notice pokeLastGood() accepted a price that _tryFeed reports as ok with px18 == 0 (a
+    ///         high-decimals feed truncating on normalisation). Writing that into lastGoodPx18
+    ///         would have switched the deviation breaker OFF entirely — mintAllowed() skips the
+    ///         check when lastGoodPx18 == 0 — and poisoned pxUnguarded()'s fallback with a zero.
+    function test_H1_pokeRejectsAPriceThatNormalisesToZero() public {
+        MockAggregatorV3 tinyFeed = new MockAggregatorV3(19, 1); // 1 / 10 == 0
+        CertOracle tinyOracle = new CertOracle(address(tinyFeed), attester, 2, STALENESS, DEVIATION_BPS, 100);
+        vm.prank(attester);
+        tinyOracle.setMarkPrice(PX);
+
+        vm.prank(stranger);
+        vm.expectRevert(CertOracle.CertOracle_StalePrice.selector);
+        tinyOracle.pokeLastGood();
+        assertFalse(tinyOracle.mintAllowed());
+    }
+
+    // =======================================================================================
+    // L-4: lastGoodAt had two meanings — block.timestamp from the constructor, the feed's
+    // updatedAt from pokeLastGood — and the constructor checked positivity but not staleness.
+    // The feed-round meaning is the one that is kept, because pxUnguarded()'s live branch returns
+    // the feed's own updatedAt and the fallback branch must be the same kind of number.
+    // =======================================================================================
+
+    function test_L4_lastGoodAtIsTheFeedRoundTimestampNotBlockTime() public {
+        MockAggregatorV3 lagging = new MockAggregatorV3(8, 355_86000000);
+        lagging.set(355_86000000, block.timestamp - 100); // fresh, but 100s behind the block
+        CertOracle o = new CertOracle(address(lagging), attester, 2, STALENESS, DEVIATION_BPS, 100);
+
+        assertEq(o.lastGoodAt(), block.timestamp - 100, "constructor recorded block time, not the round");
+        assertTrue(o.lastGoodAt() != block.timestamp, "the two clocks must be distinguishable here");
+
+        // And the fallback branch of pxUnguarded() reports the same kind of number as its live
+        // branch, which is the whole point of picking one meaning.
+        (, uint256 liveT) = o.pxUnguarded();
+        assertEq(liveT, block.timestamp - 100);
+        lagging.setShouldRevert(true);
+        (, uint256 fallbackT) = o.pxUnguarded();
+        assertEq(fallbackT, liveT, "fallback timestamp is not comparable with the live one");
+
+        // pokeLastGood keeps the same meaning.
+        lagging.setShouldRevert(false);
+        vm.warp(block.timestamp + 10);
+        lagging.set(355_86000000, block.timestamp - 5);
+        vm.prank(stranger);
+        o.pokeLastGood();
+        assertEq(o.lastGoodAt(), block.timestamp - 5);
+    }
+
+    function test_L4_constructorRejectsAnAlreadyStaleFeed() public {
+        MockAggregatorV3 dead = new MockAggregatorV3(8, 355_86000000);
+        vm.warp(block.timestamp + STALENESS + 1);
+
+        vm.expectRevert(CertOracle.CertOracle_StalePrice.selector);
+        new CertOracle(address(dead), attester, 2, STALENESS, DEVIATION_BPS, 100);
+    }
+
+    function test_L4_constructorRejectsAFutureTimestampedFeed() public {
+        MockAggregatorV3 ahead = new MockAggregatorV3(8, 355_86000000);
+        ahead.set(355_86000000, block.timestamp + 1 days);
+
+        // Named error, not the arithmetic panic an unguarded `block.timestamp - t` would give.
+        vm.expectRevert(CertOracle.CertOracle_StalePrice.selector);
+        new CertOracle(address(ahead), attester, 2, STALENESS, DEVIATION_BPS, 100);
+    }
+
+    // =======================================================================================
+    // L-5: basisBps() returned 0 both for "the mark sits on the index" and for "the basis could
+    // not be computed", so "no basis" read as "healthy" on any dashboard wired to it.
+    // =======================================================================================
+
+    function test_L5_basisBpsCheckedDistinguishesUnreadableFromAZeroBasis() public {
+        // A real zero basis: mark == index.
+        (bool known, uint256 bps) = oracle.basisBpsChecked();
+        assertTrue(known, "a computable basis must report known");
+        assertEq(bps, 0);
+        assertEq(oracle.basisBps(), 0);
+
+        // A real non-zero basis still comes back with its value.
+        vm.prank(attester);
+        oracle.setMarkPrice(PX * 1005 / 1000);
+        (known, bps) = oracle.basisBpsChecked();
+        assertTrue(known);
+        assertEq(bps, 50);
+
+        // Unreadable feed: same 0 from basisBps(), but no longer indistinguishable.
+        feed.setShouldRevert(true);
+        assertEq(oracle.basisBps(), 0, "basisBps must still never revert");
+        (known, bps) = oracle.basisBpsChecked();
+        assertFalse(known, "an unreadable feed must not read as a zero basis");
+        assertEq(bps, 0);
+
+        // Stale feed: likewise.
+        feed.setShouldRevert(false);
+        vm.warp(block.timestamp + STALENESS + 1);
+        (known,) = oracle.basisBpsChecked();
+        assertFalse(known, "a stale feed must not read as a zero basis");
+    }
+
+    function test_L5_basisIsUnknownBeforeAnyMarkIsAttested() public {
+        MockAggregatorV3 f = new MockAggregatorV3(8, 355_86000000);
+        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100);
+
+        assertEq(o.markPx18(), 0);
+        assertEq(o.basisBps(), 0);
+        (bool known,) = o.basisBpsChecked();
+        assertFalse(known, "an unattested mark must not read as a zero basis");
     }
 
     function test_mintAllowedFalseWhenFeedTruncatesToZero() public {
