@@ -81,4 +81,12 @@ contract CapacityOracleTest is Test {
         vm.expectRevert(CapacityOracle.CapacityOracle_OnlyGovernance.selector);
         cap.setDepthBps(2000);
     }
+
+    function test_extremeOpenInterestClampsInsteadOfReverting() public {
+        // Attest an extreme openInterest18 that would overflow in naive multiplication
+        vm.prank(attester);
+        reg.attest(asset, 3, 0, 0, type(uint256).max);
+        // Should return exactly ABSOLUTE_CAP without reverting, demonstrating Math.mulDiv safety
+        assertEq(cap.maxNotional18(asset, HUGE_BUFFER), ABSOLUTE_CAP);
+    }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.24;
 
+import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 import {ICapacityOracle} from "./interfaces/ICapacityOracle.sol";
 import {ISolvencyRegistry} from "./interfaces/ISolvencyRegistry.sol";
 
@@ -70,7 +71,7 @@ contract CapacityOracle is ICapacityOracle {
         uint256 oi = registry.latest(asset).openInterest18;
         if (oi == 0) return 0;
 
-        uint256 byDepth = oi * depthBps / 10_000;
+        uint256 byDepth = Math.mulDiv(oi, depthBps, 10_000);
         uint256 cap = absoluteCap18[asset];
         uint256 out = byDepth < cap ? byDepth : cap;
         return out < bufferCapacity18 ? out : bufferCapacity18;
