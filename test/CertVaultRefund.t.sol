@@ -292,6 +292,63 @@ contract CertVaultRefundTest is VaultFixture {
         assertEq(uint256(lighter.getPendingBalance(address(vault), ASSET_IDX)), POSTED);
     }
 
+    /// @notice The sharp edge of the `posted > postedMargin` cap, measured rather than assumed.
+    ///         A full-supply forceExit allocates ALL of postedMargin to itself, so a refund staged
+    ///         afterwards gets a reallocation of exactly ZERO. That cap is correct and must stay —
+    ///         it is what stops staging manufacturing venue headroom — but it means the escrow's
+    ///         recovery then depends on something other than its own margin share. This test
+    ///         proves the remaining route out is real: the venue is genuinely empty
+    ///         (marginBalance == 0, so there is nothing left to recall and the shortfall is an
+    ///         insolvency, not a routing failure), and the permissionless seedBuffer pays the user
+    ///         in full. Law 2 holds through the capped case, which is the thing worth knowing.
+    function test_cappedReallocationStillEscapesViaSeedBuffer() public {
+        // Some supply, then a large request, then a full-supply exit that claims all of
+        // postedMargin, then a drain that removes every retained share.
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        lighter.settleBatch();
+        vm.prank(alice);
+        uint256 id = vault.requestMint(MINT_IN);
+        lighter.settleBatch();
+
+        // Captured before the prank on purpose: cert.balanceOf is itself an external call and
+        // would otherwise consume the prank, sending forceExit from this test contract instead.
+        uint256 aliceCerts = cert.balanceOf(alice);
+        vm.prank(alice);
+        vault.forceExit(aliceCerts); // certIn == supplyBefore -> takes all of postedMargin
+        assertEq(vault.postedMargin(), 0, "the exit did not claim the whole allocation counter");
+        _drainHotBuffer();
+
+        vm.warp(block.timestamp + SETTLE_WINDOW + 1);
+
+        // Staging still succeeds — it always does — but reallocates nothing, because there is
+        // nothing left in postedMargin to reallocate.
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit CertVault.RefundStaged(id, 0, true);
+        vault.stageRefund(id);
+
+        // Bring home everything the venue will give up, and pay the queued redeem out of it.
+        for (uint256 i = 0; i < 4; ++i) {
+            vault.recallMargin();
+            lighter.settleBatch();
+        }
+        vault.recallMargin();
+        vault.claimRedeem(2); // the forceExit receipt: ids are shared, mintInstant issues none
+        assertEq(lighter.marginBalance(), 0, "the venue still holds recallable margin");
+
+        // The refund is short — of exactly what the drain removed, not of anything the vault
+        // failed to ask for — and it says so retryably rather than reverting rawly.
+        assertLt(vault.hotBuffer(), ESCROW);
+        vm.expectRevert(CertVault.CertVault_RefundAwaitingSettlement.selector);
+        vault.refundMint(id);
+
+        // The route out, open to anyone: top the buffer up and the user is paid in full.
+        vault.seedBuffer(10_000e6);
+        uint256 before = usdg.balanceOf(alice);
+        vault.refundMint(id);
+        assertEq(usdg.balanceOf(alice) - before, ESCROW, "the user was not made whole");
+    }
+
     /// @notice The defect's mechanism, pinned. Unstaged, the escrow's posted share appears in
     ///         neither counter recallMargin() sizes off, so `want` is 0 and NOTHING is submitted —
     ///         no number of retries can help. This is why the reallocation had to leave refundMint.
