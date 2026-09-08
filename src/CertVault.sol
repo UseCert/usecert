@@ -26,6 +26,8 @@ contract CertVault {
     error CertVault_BelowInstantCap();
     error CertVault_BadReceipt();
     error CertVault_FillPriceOutOfBand();
+    error CertVault_OnlyGovernance();
+    error CertVault_NothingToClaim();
 
     event Minted(address indexed user, uint256 amountIn, uint256 certOut, uint256 px18, uint256 fee);
     event MintRequested(uint256 indexed receiptId, address indexed user, uint256 amountIn);
@@ -173,6 +175,104 @@ contract CertVault {
         _requireCapacity(certOut * fillPx18 / 1e18);
         certificate.mint(r.user, certOut);
         emit MintSettled(receiptId, certOut, fillPx18);
+    }
+
+    // ---------------------------------------------------------------- redeem
+
+    /// @dev PRIORITY_EXPIRATION on ZkLighter. The honest worst-case redemption SLA.
+    uint64 internal constant PRIORITY_EXPIRATION = 14 days;
+
+    struct RedeemReceipt {
+        address user;
+        uint256 owed18;
+        uint64 enqueuedAt;
+        uint64 expiresAt;
+        bool paid;
+    }
+
+    mapping(uint256 => RedeemReceipt) public redeemReceipts;
+
+    event Redeemed(address indexed user, uint256 certIn, uint256 amountOut, uint256 px18);
+    event RedeemRequested(uint256 indexed receiptId, address indexed user, uint256 certIn, uint64 expiresAt);
+    event RedeemClaimed(uint256 indexed receiptId, uint256 amountOut);
+    event ForceExited(uint256 indexed receiptId, address indexed user, uint256 certIn);
+
+    /// @notice Instant redemption from the vault's own collateral balance.
+    /// @dev Deliberately reads NOTHING about buffer health, capacity, or oracle pause state.
+    ///      Uses pxUnguarded so a stale feed cannot trap a holder (Law 2). An insufficient vault
+    ///      balance simply reverts on the ERC-20 transfer — the token's business, not a gate.
+    function redeemInstant(uint256 certIn) external returns (uint256 amountOut) {
+        (uint256 px18,) = oracle.pxUnguarded();
+        uint256 gross18 = certIn * px18 / 1e18;
+        uint256 fee18 = gross18 * cfg.redeemFeeBps / 10_000;
+        amountOut = _from18(gross18 - fee18);
+
+        certificate.burn(msg.sender, certIn);
+        _hedge(certIn, px18, SIDE_ASK);
+        IERC20(cfg.collateral).safeTransfer(msg.sender, amountOut);
+
+        emit Redeemed(msg.sender, certIn, amountOut, px18);
+    }
+
+    /// @notice Queued redemption: burn now, close the hedge through Lighter's priority queue, and
+    ///         let the holder pull payment once ready via claimRedeem.
+    function requestRedeem(uint256 certIn) external returns (uint256 receiptId) {
+        return _queueExit(certIn, false);
+    }
+
+    /// @notice Permissionless exit. Works with every off-chain service dead, the buffer empty, and
+    ///         the oracle stale (Law 2's backstop).
+    function forceExit(uint256 certIn) external returns (uint256 receiptId) {
+        return _queueExit(certIn, true);
+    }
+
+    function _queueExit(uint256 certIn, bool isForce) internal returns (uint256 receiptId) {
+        (uint256 px18,) = oracle.pxUnguarded();
+        uint256 gross18 = certIn * px18 / 1e18;
+        uint256 fee18 = gross18 * cfg.redeemFeeBps / 10_000;
+        uint256 owed18 = gross18 - fee18;
+
+        certificate.burn(msg.sender, certIn);
+
+        uint64 enqueuedAt = uint64(block.timestamp);
+        uint64 expiresAt = enqueuedAt + PRIORITY_EXPIRATION;
+        receiptId = _nextReceiptId++;
+        redeemReceipts[receiptId] = RedeemReceipt({
+            user: msg.sender,
+            owed18: owed18,
+            enqueuedAt: enqueuedAt,
+            expiresAt: expiresAt,
+            paid: false
+        });
+
+        _hedge(certIn, px18, SIDE_ASK);
+
+        if (isForce) emit ForceExited(receiptId, msg.sender, certIn);
+        else emit RedeemRequested(receiptId, msg.sender, certIn, expiresAt);
+    }
+
+    /// @notice Pull-payment once the queued exit is ready. Callable by anyone on the holder's
+    ///         behalf; always pays the receipt's owner, never msg.sender. Reads nothing but the
+    ///         receipt itself and the vault's own balance — no buffer, capacity or oracle gate.
+    function claimRedeem(uint256 receiptId) external returns (uint256 amountOut) {
+        RedeemReceipt storage r = redeemReceipts[receiptId];
+        if (r.user == address(0) || r.paid) revert CertVault_NothingToClaim();
+
+        amountOut = _from18(r.owed18);
+        r.paid = true;
+        IERC20(cfg.collateral).safeTransfer(r.user, amountOut);
+        emit RedeemClaimed(receiptId, amountOut);
+    }
+
+    /// @notice Wind-down: close the entire position using Lighter's baseAmount == 0 primitive.
+    ///         The only governance-gated function in this contract (Law 6: no privileged trading
+    ///         key otherwise — this is wind-down, not routine trading).
+    function closeAll() external {
+        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        (uint256 px18,) = oracle.pxUnguarded();
+        lighter.createOrder(
+            lighterAccountIndex(), cfg.marketIndex, 0, oracle.toTickPrice(px18), SIDE_ASK, ORDER_TYPE_MARKET
+        );
     }
 
     // ---------------------------------------------------------------- internals
