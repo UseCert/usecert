@@ -95,4 +95,59 @@ contract CertFactoryTest is Test {
         vm.expectRevert(CertFactory.CertFactory_OnlyGovernance.selector);
         factory.deployVault(address(oracle), _config(), type(uint64).max, 1 days, "UseCert TSLA", "uTSLA");
     }
+
+    /// @notice L-3 (LOW, external C1 audit): every vault this factory deploys inherits its four
+    ///         addresses, so a mistyped one here is a mistyped one in every vault.
+    function test_constructorRejectsZeroDependencies() public {
+        vm.expectRevert(CertFactory.CertFactory_ZeroAddress.selector);
+        new CertFactory(address(0), address(reg), address(cap), gov);
+
+        vm.expectRevert(CertFactory.CertFactory_ZeroAddress.selector);
+        new CertFactory(address(lighter), address(0), address(cap), gov);
+
+        vm.expectRevert(CertFactory.CertFactory_ZeroAddress.selector);
+        new CertFactory(address(lighter), address(reg), address(0), gov);
+
+        vm.expectRevert(CertFactory.CertFactory_ZeroAddress.selector);
+        new CertFactory(address(lighter), address(reg), address(cap), address(0));
+    }
+
+    /// @notice L-3, and it reaches into the vault: deployVault forwards the oracle argument
+    ///         straight into CertVault's constructor, which now names a zero dependency.
+    function test_deployVaultRejectsAZeroOracle() public {
+        vm.expectRevert(CertVault.CertVault_ZeroAddress.selector);
+        vm.prank(gov);
+        factory.deployVault(address(0), _config(), type(uint64).max, 1 days, "UseCert TSLA", "uTSLA");
+    }
+
+    /// @notice L-1 (LOW, external C1 audit): `enabled` is a PUBLISHED MARKER, not a gate. Nothing
+    ///         in src/ reads it — CertVault has no reference to its factory and cannot consult it —
+    ///         so this pins the honest behaviour: a vault that was never enabled mints anyway,
+    ///         because the sequencing guarantee is enforced by the venue (createOrder reverts
+    ///         AccountIsNotRegistered) and not by this boolean.
+    /// @dev Asserted rather than left in a report, because the old NatSpec read as though enabling
+    ///         were a precondition. If a future change makes the flag load-bearing, this test is
+    ///         where that will surface — update it deliberately rather than deleting it.
+    function test_enabledFlagGatesNothing() public {
+        address v = _deploy();
+        usdg.mint(address(this), 200_000e6);
+        usdg.approve(v, type(uint256).max);
+        CertVault(v).seedBuffer(150_000e6);
+        CertVault(v).bootstrap();
+        lighter.settleBatch();
+
+        // Deliberately NOT calling factory.enable(v).
+        assertFalse(factory.enabled(v), "the vault was enabled after all");
+
+        vm.prank(gov);
+        cap.setAbsoluteCap(v, 5_000_000e18);
+        vm.prank(attester);
+        reg.attest(v, 1, 0, 0, 1_190_000e18);
+        vm.prank(attester);
+        oracle.setMarkPrice(355.86e18);
+        lighter.setMarkPrice(16, 355.86e18);
+
+        uint256 out = CertVault(v).mintInstant(3_558.6e6);
+        assertGt(out, 0, "a disabled vault could not mint, so the flag DOES gate something");
+    }
 }

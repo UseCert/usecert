@@ -339,4 +339,36 @@ contract CertVaultMarginTest is VaultFixture {
         // VaultFixture.setUp() already called bootstrap(); nothing else has posted margin since.
         assertEq(vault.postedMargin(), 1e6); // dust = 10 ** collateralDecimals, USDG has 6
     }
+
+    /// @notice L-3 (LOW, external C1 audit): all six of CertVault's addresses are immutable, so a
+    ///         mistyped one is unrepairable and used to surface later as an anonymous low-level
+    ///         failure at whichever call site touched it first — a zero `collateral` on the
+    ///         decimals() read in the constructor, a zero `lighter` only at bootstrap().
+    /// @dev Every one of the six is exercised, in a loop over the slot being zeroed, so no field
+    ///      can be added to either struct and quietly left unvalidated.
+    function test_constructorRejectsEveryZeroDependency() public {
+        for (uint256 slot = 0; slot < 6; ++slot) {
+            CertVault.Deps memory d = CertVault.Deps({
+                lighter: slot == 0 ? address(0) : address(lighter),
+                oracle: slot == 1 ? address(0) : address(oracle),
+                registry: slot == 2 ? address(0) : address(reg),
+                capacity: slot == 3 ? address(0) : address(cap),
+                governance: slot == 4 ? address(0) : gov
+            });
+            CertVault.VaultConfig memory c = CertVault.VaultConfig({
+                collateral: slot == 5 ? address(0) : address(usdg),
+                collateralAssetIndex: ASSET_IDX,
+                routeType: 0,
+                marketIndex: MARKET,
+                sizeDecimals: 4,
+                mintFeeBps: 10,
+                redeemFeeBps: 10,
+                instantCap18: 10_000e18,
+                settleBandBps: 500,
+                targetMarginBps: 9_000
+            });
+            vm.expectRevert(CertVault.CertVault_ZeroAddress.selector);
+            new CertVault(d, c, VENUE_WITHDRAW_CAP, SETTLE_WINDOW, "UseCert TSLA", "uTSLA");
+        }
+    }
 }

@@ -121,4 +121,17 @@ contract CapacityOracleTest is Test {
         // Should return exactly ABSOLUTE_CAP without reverting, demonstrating Math.mulDiv safety
         assertEq(cap.maxNotional18(asset, HUGE_BUFFER), ABSOLUTE_CAP);
     }
+
+    /// @notice L-3 (LOW, external C1 audit): no constructor in src/ validated its dependencies. A
+    ///         zero registry makes maxNotional18 revert on every call, which reverts both mint
+    ///         paths through _requireCapacity; a zero governance freezes both levers forever.
+    /// @dev LOAD-BEARING: remove the CapacityOracle_ZeroAddress check and both calls below deploy
+    ///      successfully instead of reverting.
+    function test_constructorRejectsZeroDependencies() public {
+        vm.expectRevert(CapacityOracle.CapacityOracle_ZeroAddress.selector);
+        new CapacityOracle(address(0), gov, 1000, 100, 3000, 300, MAX_ABSOLUTE_CAP);
+
+        vm.expectRevert(CapacityOracle.CapacityOracle_ZeroAddress.selector);
+        new CapacityOracle(address(reg), address(0), 1000, 100, 3000, 300, MAX_ABSOLUTE_CAP);
+    }
 }

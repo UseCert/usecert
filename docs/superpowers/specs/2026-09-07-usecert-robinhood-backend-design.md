@@ -130,7 +130,7 @@ anywhere restricts callers to EOAs**; the sole `_hasCode` check asserts that *sy
 | --- | --- | --- |
 | Deposit collateral, registering the account | **Yes** | `deposit(address _to, uint16 _assetIndex, RouteType, uint256 _amount)` — calls `registerDeposit(_to, ...)`, so depositing to a contract address registers it |
 | **Open / increase** a position | **Yes** | `createOrder(_accountIndex, _marketIndex, _baseAmount, _price, _isAsk, _orderType)` — `_isAsk` may be 0 or 1 |
-| **Close / reduce** a position | **Yes** | same `createOrder`; `_baseAmount == 0` **defaults to full position size** (a clean close-all primitive) |
+| **Close / reduce** a position | **Yes** | same `createOrder`; `_baseAmount == 0` **defaults to full position size** — the *size*, and **not the direction**: `_isAsk` remains the caller's, so a zero-amount ASK against a *short* is an order for the full size on the sell side and **doubles** it. See the M-3 note in 3.2 |
 | Withdraw collateral | **Yes** | `withdraw(_accountIndex, _assetIndex, RouteType, _baseAmount)` |
 | Cancel all orders | **Yes** | `cancelAllOrders(_accountIndex)` |
 | Register an API key | **Yes** | `changePubKey(_accountIndex, _apiKeyIndex, _pubKey)`; passing `NIL_ACCOUNT_INDEX` resolves to the caller's own master account |
@@ -155,7 +155,22 @@ The on-chain path is real but blunter than the off-chain API:
 
 - `_orderType` is `LimitOrder` or `MarketOrder` only. **No IOC, post-only, or reduce-only flag.**
   The source spec's "reduce-only flags on redeems" is therefore not available here; correctness
-  must come from vault-side sizing plus `_baseAmount == 0` for full closes.
+  must come from vault-side sizing plus `_baseAmount == 0` for full closes **on the correct side**.
+
+  > **C1 audit M-3.** `_baseAmount == 0` is not a "go flat" primitive, and reading it as one was a
+  > real defect: `CertVault.closeAll()` hardcoded `SIDE_ASK`, so the governance wind-down of last
+  > resort doubled a short instead of closing it. The vault can genuinely be short — `stageRefund`'s
+  > hedge close is open-loop, because nothing on-chain can read the vault's position (row 8 of the
+  > 3.1 table). `closeAll()` now derives its side from `CertVault.venuePositionBase`, a signed local
+  > ledger of every order the vault has submitted, and submits **nothing** where that ledger reads
+  > flat rather than guessing a direction. Priority requests execute in queue order, so a close-all
+  > enqueued now meets exactly that ledger's value even while the venue's position still lags a
+  > batch behind it. The ledger cannot see in-rollup order refusal, partial fills, liquidation or
+  > desert-mode settlement, each of which can flip its sign — so this is a strict improvement on
+  > assuming long, not a proof; the real fix is an `ILighter` position getter or a *signed*
+  > attestation. **The direction semantics above require confirmation against Lighter source**,
+  > which is not in this repo; the conservative reading is the one modelled in the test suite. See
+  > `docs/DEPLOYMENT-CHECKLIST.md` section 3a.
 - `_price` is `uint32`, bounded by `MIN_ORDER_PRICE = 1` and `MAX_ORDER_PRICE = 2**32 - 1`, so
   price encoding depends on each market's `price_decimals`.
 - `_marketIndex <= MAX_PERPS_MARKET_INDEX = 254`; `_baseAmount <= 2**48 - 1`.
@@ -169,8 +184,22 @@ The on-chain path is real but blunter than the off-chain API:
 `createOrder`, `withdraw` and friends revert with `AccountIsNotRegistered` until
 `addressToAccountIndex[vault]` is populated, which happens when the rollup executes the
 registering deposit. So each vault has a one-time bootstrap: deploy, deposit dust, wait for batch
-execution, then trade. `CertFactory` sequences this and refuses to enable a vault until its account
-index resolves.
+execution, then trade.
+
+**The chain enforces that sequence; no contract flag does.** `CertVault` self-gates on
+`bootstrapped`, and beyond that fails closed at the venue — both mint paths route through the
+revert-capable `_hedge`, so a mint attempted before the account index resolves reverts as one atomic
+transaction with nothing pulled, posted or minted.
+
+> **C1 audit L-1.** This section used to say "`CertFactory` sequences this and refuses to enable a
+> vault until its account index resolves", which read as though enabling were a precondition for
+> anything. It is not. `CertFactory.enable()` writes a flag **nothing reads**: `CertVault` holds no
+> reference to its factory and cannot consult it, and no path in `src/` does. The flag is kept as an
+> honest, permissionless, one-way **published marker** for observing bootstrap completion, and the
+> safety claim is withdrawn rather than left standing. Deleting the flag outright is a C2 cleanup;
+> making it load-bearing was rejected on the merits, since it would mean giving `CertVault` a factory
+> dependency and a new bricking surface on the mint path in exchange for a gate the chain already
+> enforces.
 
 ### 3.4 Why the Public Pool was rejected
 
@@ -248,7 +277,9 @@ Names match the front-end's architecture display, which is a hard constraint.
 //   claimRedeem(receiptId)   : pull-payment once the queued withdrawal lands.
 //   forceExit(uIn)           : permissionless. Any holder can drive the full on-chain exit path
 //                              without the operator. The Law 2 backstop.
-//   closeAll()               : guarded wind-down. createOrder with _baseAmount == 0.
+//   closeAll()               : guarded wind-down. createOrder with _baseAmount == 0, on the side
+//                              DERIVED from venuePositionBase (C1 audit M-3 - a hardcoded ASK
+//                              doubled a short). Submits nothing when that ledger reads flat.
 //   rebalance()              : permissionless with bounty. Trims delta into band; bounded notional.
 //   solvency()               : view -> {supply, notional, margin, buffer, delta,
 //                              provenAtBatch, ageSec, accrual}
@@ -270,15 +301,19 @@ Names match the front-end's architecture display, which is a hard constraint.
 // InsuranceStaking.sol — stake $CERT as junior tranche. Draw order immutable:
 //   buffer -> staked $CERT -> (never) holder backing.
 
-// SolvencyRegistry.sol — accepts and verifies per-batch backing attestations. See Section 8.
+// SolvencyRegistry.sol - accepts and verifies per-batch backing attestations. See Section 8.
+//   C1 audit M-5: the attester ROTATES, governance-gated, behind an immutable 2-day notice period
+//   (ATTESTER_ROTATION_DELAY, a constant with no setter). CertOracle's attester rotates the same
+//   way. Governance itself stays immutable, and nothing else in C1 is rotatable.
 
 // FeeVault.sol — fee split 80/10/5/5: buyback / staker pay / treasury / ops.
 
 // CERT.sol — governance and staking token. C3.
 
-// CertFactory.sol — deploys {CertVault, Certificate}, runs the Section 3.3 bootstrap, refuses to
-//   enable a vault until its Lighter account index resolves. Immutable fee bounds and draw order
-//   set at deploy. Timelocked upgrades.
+// CertFactory.sol - deploys {CertVault, Certificate} and PUBLISHES when a vault's Lighter account
+//   index has resolved. C1 audit L-1: the `enabled` flag is an observational marker and gates
+//   NOTHING - see Section 3.3 for where the sequencing guarantee actually lives. Immutable fee
+//   bounds and draw order set at deploy. Timelocked upgrades.
 ```
 
 ---
@@ -583,11 +618,17 @@ stakes     /* wallet, amount, since, rewardsAccrued */
 | `depositCapTicks` reached on the base asset | Minting pauses with a clear reason; redemption unaffected |
 | Sequencer censors priority requests | 14-day `PRIORITY_EXPIRATION`, then `activateDesertMode()` freezes the rollup |
 | Desert mode / Escape Hatch active | Positions settle at last mark. Vault proves ownership against blobs via `DesertVerifier`, withdraws, pays holders pro-rata. Procedure published in advance |
-| Market delisted or halted | Per-asset wind-down: minting off, `closeAll()`, redemption continues against margin |
+| Market delisted or halted | Per-asset wind-down: minting off, `closeAll()` (side derived from the vault's own order ledger, M-3), redemption continues against margin |
+| **Attester key lost** | **C1 audit M-5.** Was terminal for minting: attestations stop, `ageSec` passes `maxAttestationAgeSec`, capacity goes to zero permanently and `rebalance()` dies with it because `batchId` stops advancing. Redemption always survived (Law 2 reads no attestation for any gate). Now repairable rather than requiring a redeployment: governance proposes a new attester on `SolvencyRegistry` and `CertOracle`, and anyone may install it once the immutable 2-day notice period has elapsed |
+| **Attester key compromised** | Immediate response is `setAbsoluteCap(vault, 0)`, which shuts new minting in one transaction; rotation then serves its notice period separately. What the key can do is already ceiling-bounded: inflated open interest cannot widen minting past `min(absoluteCap18, 100 x freeCollateral18)`, `absoluteCap18` is bounded by the immutable `maxAbsoluteCap`, and the accrual ledger sits under a `min` and can only ever tighten capacity. Redemption untouched throughout |
+| **Oracle prints an absurd price** | **C1 audit Finding 1.** `certIn * px` in `_queueExit` overflowed and panicked at a feed price around 1e59, reverting `forceExit` — the Law 2 backstop — for a holder whose certificates were perfectly good. Every quantity-times-price product in `CertVault` is now a total function (512-bit `mulDiv` plus a published price clamp sitting ten decades above the venue's own `uint32` tick domain), so no price any feed can report can revert a redemption |
 | Buffer exhausted | **C1 as shipped:** new minting stops (capacity goes to zero); every redemption path stays open (Law 2); the holding fee is published but not charged and `insurance_draw` is a published number with no consumer until C3. **C2/C3:** holding fee active and capped, then `insurance_draw` burns staked `$CERT`. Holder backing untouched either way (Law 4) |
 
 Additional: fee bounds and draw order immutable at deploy; timelocked upgrades; fresh deployer plus
-multisig per studio OPSEC; invariant tests asserting `backing >= supply x px` across
+multisig per studio OPSEC; **the two attesters rotate only through an immutable 2-day notice period,
+and governance is immutable (M-5)** — so `SolvencyRegistry` and `CertOracle` must be deployed
+*directly from the governance multisig*, since each binds its rotation authority to `msg.sender`
+(`docs/DEPLOYMENT-CHECKLIST.md` section 4); invariant tests asserting `backing >= supply x px` across
 mint/redeem/rebalance/funding fuzz, and that redemption never reverts on buffer state.
 
 ---
@@ -597,7 +638,10 @@ mint/redeem/rebalance/funding fuzz, and that redemption never reverts on buffer 
 Foundry unit and invariant tests, plus integration against **Robinhood Chain testnet Lighter** —
 not mocks — before mainnet.
 
-1. Bootstrap: deploy, register via deposit, account index resolves, vault enables.
+1. Bootstrap: deploy, register via deposit, account index resolves. **C1 audit L-1: `enable()` is an
+   observational marker, so "vault enables" is not an acceptance gate. The acceptance is that a mint
+   attempted before the account index resolves reverts atomically, and that one after it succeeds
+   whether or not `enable()` was ever called.**
 2. Instant mint: certificate minted and `createOrder` enqueued in one tx; fill lands next batch;
    attestation holds.
 3. Request mint: settles at actual fill price; vault absorbs no execution variance.
@@ -617,7 +661,17 @@ not mocks — before mainnet.
 12. Deposit tick/cap edges: non-multiple of `tickSize` rejected cleanly; cap breach pauses mint only.
 13. Solvency attestation: valid proof accepted, forged proof rejected, stale surfaces correct `ageSec`.
 14. Delta fuzz across gap moves stays in band post-rebalance.
-15. `closeAll()` with `_baseAmount == 0` fully closes regardless of size.
+15. `closeAll()` with `_baseAmount == 0` fully closes regardless of size, **and on the correct side
+    (C1 audit M-3): a short closes with a BID, a long with an ASK, and nothing is submitted when the
+    vault's own ledger reads flat. Acceptance includes the negative case — a full-size order on the
+    wrong side DOUBLES the position — because that is what the venue mock has to model for any of
+    this to be testable.**
+16. **Attester rotation (M-5): a proposal cannot be installed before its notice period elapses; a
+    stranger may install it once it has; the old key is dead and the new one restores capacity and
+    an advancing `batchId`; `address(0)` is never installable; and `forceExit` works at every point
+    in the sequence.**
+17. **Law 2 under an absurd price (Finding 1): `forceExit` succeeds at the largest price the oracle
+    can return, and the holder is later paid the true value of what they burned.**
 
 ---
 

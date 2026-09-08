@@ -21,6 +21,10 @@ contract CapacityOracle is ICapacityOracle {
     ///      governance must not be able to set it to any value it likes. maxAbsoluteCap is the
     ///      deploy-time ceiling on that number and cannot be changed afterwards.
     error CapacityOracle_CapAboveCeiling();
+    /// @dev L-3 (LOW, external C1 audit): a zero registry makes maxNotional18 revert on every call,
+    ///      which reverts both mint paths through _requireCapacity; a zero governance makes the
+    ///      depth and cap levers permanently unreachable, freezing them at their deploy values.
+    error CapacityOracle_ZeroAddress();
 
     event DepthBpsSet(uint256 depthBps);
     event AbsoluteCapSet(address indexed asset, uint256 cap18);
@@ -49,6 +53,7 @@ contract CapacityOracle is ICapacityOracle {
         uint256 _maxAttestationAgeSec,
         uint256 _maxAbsoluteCap
     ) {
+        if (_registry == address(0) || _governance == address(0)) revert CapacityOracle_ZeroAddress();
         if (_depthBps < _minDepthBps || _depthBps > _maxDepthBps) {
             revert CapacityOracle_DepthOutOfBounds();
         }

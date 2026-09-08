@@ -31,6 +31,12 @@ contract CertVault {
     error CertVault_OnlyGovernance();
     error CertVault_NothingToClaim();
     error CertVault_TargetMarginOutOfBounds();
+    /// @dev L-3 (LOW, external C1 audit): every one of these six addresses is immutable, so a
+    ///      mistyped one is unrepairable and shows up later as an anonymous low-level failure at
+    ///      whichever call site happens to touch it first — a zero `collateral` would have failed
+    ///      on the decimals() read below, and a zero `lighter` only at bootstrap(). Named at
+    ///      construction instead. Checked BEFORE targetMarginBps so the more basic error wins.
+    error CertVault_ZeroAddress();
     error CertVault_UseQueuedRedeem();
     /// @dev Finding 1 (Task 10 review): a zero amount at any mint/redeem entry point is worthless
     ///      to the caller but, left unguarded, reaches _hedge/_tryHedge as baseAmount == 0 —
@@ -377,6 +383,12 @@ contract CertVault {
         string memory name_,
         string memory symbol_
     ) {
+        // L-3: named at construction, before anything else runs.
+        if (
+            d.lighter == address(0) || d.oracle == address(0) || d.registry == address(0)
+                || d.capacity == address(0) || d.governance == address(0) || c.collateral == address(0)
+        ) revert CertVault_ZeroAddress();
+
         lighter = ILighter(d.lighter);
         oracle = ICertOracle(d.oracle);
         registry = ISolvencyRegistry(d.registry);

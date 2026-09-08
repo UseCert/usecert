@@ -256,4 +256,11 @@ contract BufferBookVaultTest is VaultFixture {
         vm.expectRevert(BufferBook.BufferBook_ThresholdsOutOfOrder.selector);
         vault.setBufferThresholds(1e18, 2e18, 0, 0);
     }
+
+    /// @notice L-3: a zero vault makes configure() and accrue() permanently unreachable, so the
+    ///         ledger could never be written at all.
+    function test_constructorRejectsAZeroVault() public {
+        vm.expectRevert(BufferBook.BufferBook_ZeroAddress.selector);
+        new BufferBook(address(0), 200);
+    }
 }

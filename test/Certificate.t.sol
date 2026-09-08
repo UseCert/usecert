@@ -53,4 +53,11 @@ contract CertificateTest is Test {
         cert.transfer(makeAddr("bob"), 1e18);
         assertEq(cert.balanceOf(makeAddr("bob")), 1e18);
     }
+
+    /// @notice L-3: a zero vault makes mint and burn permanently unreachable, so the certificate
+    ///         could never be issued or redeemed.
+    function test_constructorRejectsAZeroVault() public {
+        vm.expectRevert(Certificate.Certificate_ZeroAddress.selector);
+        new Certificate("UseCert TSLA", "uTSLA", address(0));
+    }
 }

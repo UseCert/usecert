@@ -42,6 +42,9 @@ contract BufferBook {
     ///      separate readers. Equalities are allowed: collapsing two rungs onto one number is a
     ///      legitimate configuration (the C1 default sets insuranceDraw18 = 0).
     error BufferBook_ThresholdsOutOfOrder();
+    /// @dev L-3 (LOW, external C1 audit): a zero vault makes configure() and accrue() permanently
+    ///      unreachable, so the ledger could never be written at all.
+    error BufferBook_ZeroAddress();
 
     event ThresholdCrossed(address indexed asset, uint8 level);
     event Accrued(address indexed asset, int256 delta18, int256 balance18);
@@ -69,6 +72,7 @@ contract BufferBook {
     mapping(address => int256) private _balance;
 
     constructor(address _vault, uint256 _feeCapBps) {
+        if (_vault == address(0)) revert BufferBook_ZeroAddress();
         vault = _vault;
         feeCapBps = _feeCapBps;
     }
