@@ -3,3 +3,6 @@ dist/
 .env
 .env.*
 *.log
+out/
+cache/
+broadcast/
