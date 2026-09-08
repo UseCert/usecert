@@ -284,6 +284,11 @@ contract CertVault {
 
         certificate = new Certificate(name_, symbol_, address(this));
         buffer = new BufferBook(address(this), 200);
+        // M-2: DEFAULTS, not the only possible values — retunable per asset through
+        // setBufferThresholds() above. They stay literals here because a fresh vault has no
+        // attestation to size them off yet, and because passing them through the constructor would
+        // widen CertVault's deployment signature (and CertFactory's, and every fixture's) for four
+        // numbers that gate nothing.
         buffer.configure(address(this), 100_000e18, 60_000e18, 30_000e18, 0);
     }
 
@@ -309,6 +314,101 @@ contract CertVault {
     /// @notice The vault's own collateral balance — the float that serves instant redemptions.
     function hotBuffer() public view returns (uint256) {
         return IERC20(cfg.collateral).balanceOf(address(this));
+    }
+
+    /// @notice The 1% adverse move on the whole book that one unit of the vault's own capital is
+    ///         held against, expressed as the multiple that turns capital into supportable
+    ///         notional. Published, and a constant rather than a settable parameter.
+    /// @dev M-1: the same multiplier BufferBook.capacity18 has always documented and applied
+    ///      ("capacity = balance * 100"), lifted here unchanged because the fix changes WHAT is
+    ///      multiplied, not the risk statement. Changing both at once would have made every
+    ///      capacity figure in the suite move for two reasons at once.
+    uint256 public constant BUFFER_COVERAGE_MULTIPLE = 100;
+
+    /// @notice The vault's own loss-absorbing float: collateral it actually holds that is not
+    ///         already owed to a queued redemption receipt, in 18 decimals.
+    /// @dev M-1: ground truth, and that is the whole point of it. hotBuffer() is an ERC20
+    ///      balanceOf and totalOwedOutstanding is this contract's own obligation counter, so
+    ///      nothing an attester writes can move this number — unlike BufferBook's ledger, which
+    ///      accrueFunding() can set to anything (measured: a published buffer of 500,100,000.01
+    ///      against 91,028.00 actually held). It also cannot DRIFT from reality the way the ledger
+    ///      does, because it is not a counter that has to be kept in step with the balance: it is
+    ///      derived from the balance on every read, so mint fees arriving and instant redemptions
+    ///      draining are reflected the instant they happen, with nothing to reconcile.
+    ///
+    ///      Netted against what is owed because float earmarked for a receipt nobody has claimed
+    ///      yet is not loss-absorbing capital. Floored at zero rather than signed: "owes more than
+    ///      it holds" is not negative capacity, it is no capacity.
+    ///
+    ///      RESIDUAL, stated rather than hidden: escrow held for mint receipts that have neither
+    ///      settled nor been refunded is NOT netted out (there is no counter for it and adding one
+    ///      is more surface than this finding warrants), so during a settle window this reads high
+    ///      by up to that escrow. It is bounded by settleWindow, and it is the harmless direction:
+    ///      the same escrow is at the venue backing that receipt's own hedge, so it is not capital
+    ///      standing behind nothing.
+    function freeCollateral18() public view returns (uint256) {
+        uint256 have = hotBuffer();
+        uint256 owed = totalOwedOutstanding;
+        return have > owed ? _to18(have - owed) : 0;
+    }
+
+    /// @notice The third leg of CapacityOracle's min() — what the vault's own capital can absorb.
+    /// @dev M-1 (MEDIUM, external C1 audit). This leg used to be BufferBook.capacity18() handed
+    ///      over raw, which put an unbacked, attester-written number into admission control in the
+    ///      direction that WIDENS it: two of the three legs of
+    ///      min(depthBps * OI, absoluteCap, bufferCapacity) were attester-written and only the
+    ///      immutable absoluteCap was a real bound. The audit's direction 2 was taken — the
+    ///      accrual ledger is published as cumulative P&L and is no longer the source of this
+    ///      bound — and the replacement is deliberately not "nothing":
+    ///
+    ///        min( freeCollateral18() * BUFFER_COVERAGE_MULTIPLE , BufferBook.capacity18() )
+    ///
+    ///      The first term is what actually bounds how much exposure the vault's own capital can
+    ///      support: collateral it really holds, at the same 1%-adverse-move coverage the ledger
+    ///      leg always claimed to express. The second term is KEPT, and keeping it is not a
+    ///      relapse — under a `min` an attester-written figure can only ever make the vault MORE
+    ///      conservative. It can no longer admit a mint that real collateral does not support,
+    ///      which is the harm; it can still shut new minting, which is a lever the attester
+    ///      already holds anyway (a stale attestation yields zero capacity by CapacityOracle's own
+    ///      early return) and which is the honest half of the old behaviour: an exhausted ledger
+    ///      stops new minting. Redemption is untouched by both terms — no redemption path calls
+    ///      this function or reads either input for a gate (Law 2).
+    ///
+    ///      The first term saturates instead of panicking, because it is the term this contract
+    ///      controls and a bound that reverts is not a bound. The second is left able to panic on
+    ///      the overflow an attester can force into it: that behaviour is pinned by
+    ///      test_ATK_attesterCanBrickMintingViaBufferOverflow, which uses it to prove redemption
+    ///      survives a bricked buffer, and it fails in the safe direction (minting shut, exits
+    ///      open).
+    function bufferCapacity18() public view returns (uint256) {
+        uint256 own = freeCollateral18();
+        uint256 ceiling = type(uint256).max / BUFFER_COVERAGE_MULTIPLE;
+        own = own > ceiling ? type(uint256).max : own * BUFFER_COVERAGE_MULTIPLE;
+        uint256 claimed = buffer.capacity18(address(this));
+        return own < claimed ? own : claimed;
+    }
+
+    /// @notice Retune the published buffer threshold ladder for this vault's asset.
+    /// @dev M-2 (MEDIUM, external C1 audit): the four thresholds were hardcoded literals in the
+    ///      constructor below (100k / 60k / 30k / 0) for every asset regardless of size, with no
+    ///      way to reconfigure — meaningless against a $1.19M book and wrong for one ten times
+    ///      larger. They are configuration now, per asset (one vault is one asset), bounded by
+    ///      BufferBook's own ordering check.
+    ///
+    ///      Law 6 is not weakened by this and it is worth being exact about why, rather than
+    ///      resting on "governance already exists". These four numbers gate NOTHING: they feed
+    ///      holdingFeeBps() and mintSlowed(), which C1 charges and applies nowhere, and the
+    ///      threshold level in an event. The one mechanical consequence buffer health still has —
+    ///      an exhausted ledger tightening bufferCapacity18() above — is anchored at zero, which
+    ///      is not one of these four numbers. So this cannot pause minting, cannot touch any
+    ///      redemption path (none of them reads BufferBook at all, Law 2), and cannot move
+    ///      collateral. It is the same shape as CapacityOracle.setDepthBps: a published parameter
+    ///      inside published bounds.
+    function setBufferThresholds(uint256 floor18, uint256 feeOn18, uint256 mintSlow18, uint256 insuranceDraw18)
+        external
+    {
+        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        buffer.configure(address(this), floor18, feeOn18, mintSlow18, insuranceDraw18);
     }
 
     /// @notice Pre-fund the buffer. Permissionless: it can only ever add value to the vault.
@@ -1135,6 +1235,11 @@ contract CertVault {
     ///      obligation demands.
     uint256 public constant DELTA_UNBOUNDED_BPS = type(uint256).max;
 
+    /// @dev M-1: `buffer18` and `accrual18` are two different quantities and used to be one. See
+    ///      _solvency() for which is which and why the split had to happen. `accrual18` is
+    ///      appended at the END of the struct deliberately: solvency() returns a struct, so every
+    ///      reader in and out of the suite accesses these by name, and appending cannot silently
+    ///      re-point an existing field the way inserting would.
     struct Solvency {
         uint256 supply;
         uint256 notional18;
@@ -1143,6 +1248,7 @@ contract CertVault {
         uint256 deltaBps;
         uint64 provenAtBatch;
         uint256 ageSec;
+        int256 accrual18;
     }
 
     /// @notice Public backing figure. Always carries provenAtBatch and ageSec alongside the
@@ -1165,7 +1271,33 @@ contract CertVault {
         s.supply = certificate.totalSupply();
         s.notional18 = a.notional18;
         s.margin18 = a.margin18;
-        s.buffer18 = buffer.balance18(address(this));
+        // M-1 (MEDIUM, external C1 audit). THE PUBLISHED BUFFER IS NOW BACKED. This field used to
+        // be BufferBook.balance18() — an accrual ledger — published under the name "buffer" beside
+        // the attested backing figures, as though it were collateral the vault held. It was not,
+        // in two compounding ways, and both were measured:
+        //
+        //   (a) it drifted from reality under ordinary operation. Mint fees raise the real float
+        //       without accruing to the ledger and instant redemptions drain it without accruing
+        //       either, and nothing reconciled them: after one mint + instant-redeem cycle the
+        //       published buffer read 100,000.00 against 91,028.00 actually held.
+        //   (b) accrueFunding() lets the attester write the ledger, so the published figure could
+        //       be declared. One call produced a published buffer of 500,100,000.01 against
+        //       91,028.00 held.
+        //
+        // So the two numbers are now published as the two different things they are. `buffer18` is
+        // the vault's own collateral balance — an ERC20 balanceOf, ground truth, and the figure
+        // Law 3's "the live buffer on-chain" was always claiming to be — and `accrual18` below is
+        // the ledger, published as what it actually is: cumulative funding, execution variance and
+        // realised basis, relayed by the attester and NOT independently verified on-chain.
+        //
+        // Deliberately the GROSS float and not freeCollateral18()'s net-of-obligations figure:
+        // this field answers "what does the vault hold", the counters answer "what does it owe",
+        // and both are published separately (totalOwedOutstanding, marginPendingRecall,
+        // marginExcess, postedMargin) rather than pre-netted into one number a reader cannot take
+        // apart. SafeCast rather than a bare cast: a bare cast on an absurd balance would publish
+        // a NEGATIVE buffer, which is worse than reverting a view that no redemption path calls.
+        s.buffer18 = SafeCast.toInt256(_to18(hotBuffer()));
+        s.accrual18 = buffer.balance18(address(this));
         s.provenAtBatch = a.batchId;
         s.ageSec = registry.ageSec(address(this));
 
@@ -1340,8 +1472,11 @@ contract CertVault {
     ///      before anything else, so the obligation term drops immediately and the freed headroom
     ///      is visible to the next mint. Reading capacity is deliberately confined to the mint
     ///      paths — no redemption path calls this (Law 2).
+    /// @dev M-1: the third leg passed to CapacityOracle is bufferCapacity18() — derived from
+    ///      collateral the vault actually holds — and no longer BufferBook.capacity18() raw. See
+    ///      bufferCapacity18() for the whole argument. Nothing else in this function changed.
     function _requireCapacity(uint256 addNotional18, uint256 px18) internal view {
-        uint256 max = capacity.maxNotional18(address(this), buffer.capacity18(address(this)));
+        uint256 max = capacity.maxNotional18(address(this), bufferCapacity18());
         uint256 own18 = (certificate.totalSupply() + pendingMintCerts) * px18 / 1e18;
         uint256 attested18 = registry.latest(address(this)).notional18;
         uint256 current = own18 > attested18 ? own18 : attested18;

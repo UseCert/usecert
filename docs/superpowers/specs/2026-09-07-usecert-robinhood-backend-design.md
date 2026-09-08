@@ -74,6 +74,26 @@ Laws 1–5 restate the source spec's PART 0 with the amendments the venue forces
 3. **Funding is buffered, then fee'd, never hidden.** Positive funding fattens the buffer; negative
    funding draws it down; past a published threshold it passes through as a published, capped
    holding fee. All parameters and the live buffer on-chain.
+   **Amended (C1 audit, M-1 and M-2). Two corrections, both because the code did not do this:**
+   - **A cliff ships in C1, not a ramp.** `BufferBook.holdingFeeBps()` and `mintSlowed()` compute
+     the graduated response above and **nothing charges or applies either one**. `instantCap18` is
+     immutable config with no setter, so it does not taper. What actually happens as the accrual
+     ledger degrades is *nothing at all* until it crosses zero, at which point mint capacity goes
+     to zero and **new minting halts outright**. The four thresholds
+     (`floor`/`fee_on`/`mint_slow`/`insurance_draw`) are published *signals* in C1 — readable
+     views and a `ThresholdCrossed` event — and are now configurable per asset
+     (`CertVault.setBufferThresholds`, governance, ordering enforced) rather than hardcoded at
+     100k/60k/30k/0 for every asset regardless of book size. Wiring the fee and the cap taper is a
+     **C2** item. Redemption reads none of this, at any level, ever (Law 2).
+   - **"The live buffer on-chain" means collateral, and now is.** Two different quantities were
+     published as one. `solvency().buffer18` is the collateral the vault actually holds — an ERC20
+     balance, ground truth — and `solvency().accrual18` is the `BufferBook` ledger, published
+     beside it as what it is: **cumulative P&L (funding, execution variance, realised basis),
+     relayed by the attester and not independently verified on-chain**. The old single field was
+     the ledger under the name "buffer": it drifted from the real float under ordinary operation
+     (measured 100,000.01 published against 91,028.00 held after one mint + instant-redeem cycle)
+     and `accrueFunding()` let the attester declare it outright (measured 500,100,000.01 published
+     against 91,028.00 held).
 4. **Holders are senior.** Staked `$CERT` absorbs buffer exhaustion before holder backing is
    touched. Draw order is immutable.
 5. **Mirror the underlying market honestly.** Corporate actions and pricing follow the venue's
@@ -216,7 +236,9 @@ Names match the front-end's architecture display, which is a hard constraint.
 //   mintInstant(amtIn)       : size <= instantCap. px = CertOracle.px(asset), guards applied.
 //                              out = (amtIn - fee) / px. Mints Certificate, credits hot buffer,
 //                              and submits its own ZkLighter.createOrder bid in the same tx.
-//                              Reverts if buffer or oracle unhealthy — minting may be gated (Law 3).
+//                              Reverts if the oracle is unhealthy, at capacity, or the accrual
+//                              ledger is exhausted — minting may be gated (Law 3). C1 audit
+//                              M-2: that gate is a cliff at zero, not the ramp Law 3 described.
 //   requestMint(amtIn)       : size > instantCap. Escrows collateral, issues ERC-721 MintReceipt.
 //   settleMint(receiptId)    : after the fill is proven, mints at the ACTUAL fill price.
 //   redeemInstant(uIn)       : size <= instantCap. Burns, pays from hot buffer at px - fee.
@@ -229,15 +251,21 @@ Names match the front-end's architecture display, which is a hard constraint.
 //   closeAll()               : guarded wind-down. createOrder with _baseAmount == 0.
 //   rebalance()              : permissionless with bounty. Trims delta into band; bounded notional.
 //   solvency()               : view -> {supply, notional, margin, buffer, delta,
-//                              provenAtBatch, ageSec}
+//                              provenAtBatch, ageSec, accrual}
+//                              C1 audit M-1: `buffer` is collateral actually held (ERC20
+//                              balance); `accrual` is BufferBook's attester-relayed P&L ledger.
+//                              They were one field, and it was the ledger.
 
 // CertOracle.sol — Chainlink per-asset feed primary; Lighter mark price as cross-check.
 //   Guards: staleness, deviation vs last-good, feed-halt flag, Chainlink-vs-mark basis band.
 //   Also encodes px into the uint32 tick domain per market price_decimals (Section 3.2).
 //   Breach pauses MINTING only. Redemption follows the published last-good-px procedure.
 
-// BufferBook.sol — per-asset funding + execution-variance + basis accrual. Thresholds
-//   {fee_on, mint_slow, insurance_draw}. Holding fee activates past fee_on, published and capped.
+// BufferBook.sol — per-asset funding + execution-variance + basis accrual: a cumulative P&L
+//   ledger, NOT a collateral balance. Thresholds {floor, fee_on, mint_slow, insurance_draw},
+//   configurable per asset via CertVault.setBufferThresholds and ordering-enforced.
+//   C1 audit M-2: the holding fee is COMPUTED AND PUBLISHED BUT NOT CHARGED in C1, and
+//   mint_slow tapers nothing. See Law 3.
 
 // InsuranceStaking.sol — stake $CERT as junior tranche. Draw order immutable:
 //   buffer -> staked $CERT -> (never) holder backing.
@@ -270,7 +298,14 @@ Two paths, split on size, because the risks differ.
 
 The vault still carries mint-to-fill risk, because the fill is a batch later than the mint. But
 nothing can *fail to submit* the hedge — that was the keeper risk in revision 1 and it is gone.
-`instantCap` is sized against the buffer and drops as buffer health degrades (`mint_slow`).
+
+**Amended (C1 audit, M-2).** This paragraph used to end "`instantCap` is sized against the buffer
+and drops as buffer health degrades (`mint_slow`)." **It does not.** `instantCap18` is immutable
+deploy config with no setter; `BufferBook.mintSlowed()` is read by nothing outside its own unit
+tests. In C1 the instant-cap threshold is a fixed size split and buffer health has exactly one
+mechanical consequence anywhere in the mint path: capacity goes to zero once the accrual ledger is
+exhausted, and new minting stops. A cliff, not the ramp this line promised. The taper is a C2 item
+and Law 3 above records the same correction.
 
 **Request/settle (`size > instantCap`)** — no execution risk:
 
@@ -549,7 +584,7 @@ stakes     /* wallet, amount, since, rewardsAccrued */
 | Sequencer censors priority requests | 14-day `PRIORITY_EXPIRATION`, then `activateDesertMode()` freezes the rollup |
 | Desert mode / Escape Hatch active | Positions settle at last mark. Vault proves ownership against blobs via `DesertVerifier`, withdraws, pays holders pro-rata. Procedure published in advance |
 | Market delisted or halted | Per-asset wind-down: minting off, `closeAll()`, redemption continues against margin |
-| Buffer exhausted | Holding fee active and capped, then `insurance_draw` burns staked `$CERT`. Holder backing untouched (Law 4) |
+| Buffer exhausted | **C1 as shipped:** new minting stops (capacity goes to zero); every redemption path stays open (Law 2); the holding fee is published but not charged and `insurance_draw` is a published number with no consumer until C3. **C2/C3:** holding fee active and capped, then `insurance_draw` burns staked `$CERT`. Holder backing untouched either way (Law 4) |
 
 Additional: fee bounds and draw order immutable at deploy; timelocked upgrades; fresh deployer plus
 multisig per studio OPSEC; invariant tests asserting `backing >= supply x px` across
@@ -570,7 +605,11 @@ not mocks — before mainnet.
 5. `forceExit` with every off-chain service dead: holder exits unaided.
 6. Priority expiration fixture: request unprocessed past 14 days, Desert mode activates, holders
    made whole via `DesertVerifier` path.
-7. Funding: positive fattens buffer; negative crosses `fee_on`, holding fee activates, rate <= cap.
+7. Funding: positive fattens the ledger; negative crosses `fee_on` and the published holding-fee
+   rate activates, `rate <= cap`. **C1 audit M-2: acceptance is that the RATE and the threshold
+   signals move — no fee is charged in C1, and the mint that follows a threshold crossing is
+   asserted to be identical to the one before it
+   (`test_crossingTheThresholdsChangesTheSignalsAndNotTheMint`).**
 8. Insurance draw consumes staked `$CERT` before holder backing.
 9. Oracle stale: minting paused, redemption follows last-good path.
 10. Basis breach: minting paused, redemption unaffected.
@@ -625,9 +664,28 @@ Per asset, the vault's own position notional is capped at:
 maxNotional(asset) = min(
     depthBps    * openInterest(asset),   // scales automatically with the market
     absoluteCap(asset),                  // governance ceiling, immutable bounds
-    bufferCapacity(asset)                // what the insurance buffer can actually absorb
+    bufferCapacity(asset)                // what the vault's OWN CAPITAL can actually absorb
 )
 ```
+
+**Amended (C1 audit, M-1) — what the third leg is.** It was `BufferBook.capacity18()`, the accrual
+ledger times 100, which put an unbacked and attester-writable number into admission control *in
+the direction that widens it*: two of the three legs were then attester-written and only the
+immutable `absoluteCap` was a real bound. It is now
+
+```
+bufferCapacity(asset) = min(
+    freeCollateral18() * 100,   // collateral the vault HOLDS, less what it owes queued receipts
+    BufferBook.capacity18()     // the accrual ledger's own claim — one-way, tightening only
+)
+```
+
+The first term is ground truth (an ERC20 balance and the vault's own obligation counter), it cannot
+drift because it is derived rather than accrued, and no attester can move it. The second is kept
+deliberately, and only under the `min`: an attester can still make the vault *more* conservative —
+and an exhausted ledger still stops new minting, which is the honest half of the old behaviour —
+but can no longer admit a mint that real collateral does not support. `100` is the unchanged
+coverage multiple (a 1% adverse move on the whole book).
 
 - `openInterest` comes from the same per-batch attestation that feeds `SolvencyRegistry`, so it is
   proven, not self-reported, and cannot be gamed by the operator.
@@ -635,8 +693,8 @@ maxNotional(asset) = min(
   adjustable **within immutable min/max bounds set at deploy**. Governance can never remove the cap.
 - `mintInstant` and `requestMint` both revert once `maxNotional` is reached, with a distinct error
   so the UI can say *"at capacity"* rather than *"failed"*. Redemption is never capped (Law 2).
-- `instantCap` (the instant-settlement size threshold) is separately derived from buffer health, per
-  Section 6.
+- `instantCap` (the instant-settlement size threshold) is **immutable deploy config in C1** and is
+  not derived from buffer health — see the amendment in Section 6.
 
 ### 15.1.2 Why this is the right shape
 
