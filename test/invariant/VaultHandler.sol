@@ -3,9 +3,12 @@ pragma solidity 0.8.24;
 
 import {CommonBase} from "forge-std/Base.sol";
 import {StdUtils} from "forge-std/StdUtils.sol";
+import {console2} from "forge-std/console2.sol";
 import {CertVault} from "../../src/CertVault.sol";
 import {Certificate} from "../../src/Certificate.sol";
 import {ICertOracle} from "../../src/interfaces/ICertOracle.sol";
+import {SolvencyRegistry} from "../../src/SolvencyRegistry.sol";
+import {CapacityOracle} from "../../src/CapacityOracle.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockLighter} from "../mocks/MockLighter.sol";
 
@@ -18,12 +21,25 @@ import {MockLighter} from "../mocks/MockLighter.sol";
 ///      task-12-report.md for the load-bearing proof that lawTwoViolations can actually go
 ///      non-zero (a temporary gate was added to _queueExit, the invariant failed with a
 ///      counterexample, then the gate was removed).
+///
+///      Task 12 review fix (see task-12-report.md's appended "Fix report"): the handler originally
+///      had no way to move registry.latest(vault) or cap.depthBps()/absoluteCap18() away from the
+///      fixture's frozen setUp() values — attest() and setDepthBps() are attester-/governance-only,
+///      and the handler impersonated neither. That made _requireCapacity's comparison, rebalance()'s
+///      delta-band check, and invariant_capacityNeverExceedsAbsoluteCap's dependencies all static
+///      dead weight. attest/setDepthBps/accrueFunding below give the handler the system's real
+///      privileged actors (pranked, not cheated — they are genuine participants Law 2 must survive)
+///      so those branches move under fuzzing.
 contract VaultHandler is CommonBase, StdUtils {
     CertVault public immutable vault;
     Certificate public immutable cert;
     MockERC20 public immutable usdg;
     MockLighter public immutable lighter;
     ICertOracle public immutable oracle;
+    SolvencyRegistry public immutable reg;
+    CapacityOracle public immutable cap;
+    address public immutable attester;
+    address public immutable gov;
 
     /// @notice The smallest certAmount18 for which CertVault._baseAmount(...) is non-zero at this
     ///         vault's sizeDecimals — i.e. the smallest redemption the venue can even represent as
@@ -70,6 +86,11 @@ contract VaultHandler is CommonBase, StdUtils {
     uint256[] public pendingMintReceipts;
     uint256[] public pendingRedeemReceipts;
 
+    /// @dev SolvencyRegistry.attest requires a strictly increasing batchId. The fixture's setUp()
+    ///      already attests batchId 1 before this handler exists, so this seeds from whatever is
+    ///      live at construction rather than assuming 1.
+    uint64 public nextBatchId;
+
     // ------------------------------------------------------------------- call counters, for the report
     uint256 public callsMintInstant;
     uint256 public callsRequestMint;
@@ -81,14 +102,46 @@ contract VaultHandler is CommonBase, StdUtils {
     uint256 public callsRecallMargin;
     uint256 public callsRebalance;
     uint256 public callsSettleBatch;
+    uint256 public callsAttest;
+    uint256 public callsSetDepthBps;
+    uint256 public callsAccrueFunding;
 
-    constructor(CertVault _vault, MockERC20 _usdg, MockLighter _lighter) {
+    // ------------------------------------------------------- reachability counters, for the report
+    /// @dev These are NOT invariants — nothing asserts on them. They exist purely so a verification
+    ///      run can prove specific revert branches are actually exercised under fuzzing (Task 12
+    ///      review, Finding 1). Like the call counters above, handler storage resets every
+    ///      invariant run, so for campaign-wide totals read the console2.log lines emitted
+    ///      alongside each increment (console output is captured live, independent of the
+    ///      per-run state snapshot/revert) rather than these fields' final values, which only
+    ///      reflect the last run. See task-12-report.md's appended "Fix report" for the counts.
+    uint256 public mintAtCapacityCount;
+    uint256 public mintAboveInstantCapCount;
+    uint256 public requestMintAtCapacityCount;
+    uint256 public requestMintBelowInstantCapCount;
+    uint256 public settleMintAtCapacityCount;
+    uint256 public rebalanceInBandCount;
+    uint256 public settleBatchInsufficientMarginCount;
+
+    constructor(
+        CertVault _vault,
+        MockERC20 _usdg,
+        MockLighter _lighter,
+        SolvencyRegistry _reg,
+        CapacityOracle _cap,
+        address _attester,
+        address _gov
+    ) {
         vault = _vault;
         cert = Certificate(_vault.certificate());
         usdg = _usdg;
         lighter = _lighter;
         oracle = _vault.oracle();
+        reg = _reg;
+        cap = _cap;
+        attester = _attester;
+        gov = _gov;
         totalDepositedToVenue = _vault.postedMargin(); // bootstrap's dust, deposited before we existed
+        nextBatchId = reg.latest(address(_vault)).batchId;
 
         (,,,, uint8 sizeDecimals,,,,,) = _vault.cfg();
         dustFloorCert = 10 ** (18 - sizeDecimals);
@@ -105,9 +158,16 @@ contract VaultHandler is CommonBase, StdUtils {
         uint256 postedBefore = vault.postedMargin();
         try vault.mintInstant(amount) returns (uint256 certOut) {
             totalMinted += certOut;
-        } catch {
-            // CertVault_AtCapacity / CertVault_AboveInstantCap / a paused oracle are legitimate
-            // mint-side gates. Law 2 says nothing about minting.
+        } catch (bytes memory reason) {
+            if (_isSelector(reason, CertVault.CertVault_AtCapacity.selector)) {
+                mintAtCapacityCount++;
+                console2.log("MINT_AT_CAPACITY", mintAtCapacityCount);
+            } else if (_isSelector(reason, CertVault.CertVault_AboveInstantCap.selector)) {
+                mintAboveInstantCapCount++;
+                console2.log("MINT_ABOVE_INSTANT_CAP", mintAboveInstantCapCount);
+            }
+            // else: a paused oracle or another legitimate mint-side gate. Law 2 says nothing
+            // about minting.
         }
         _trackDeposit(postedBefore);
     }
@@ -121,8 +181,14 @@ contract VaultHandler is CommonBase, StdUtils {
         uint256 postedBefore = vault.postedMargin();
         try vault.requestMint(amount) returns (uint256 receiptId) {
             pendingMintReceipts.push(receiptId);
-        } catch {
-            // CertVault_AtCapacity, most likely — capacity is shared with mintInstant/settleMint.
+        } catch (bytes memory reason) {
+            if (_isSelector(reason, CertVault.CertVault_AtCapacity.selector)) {
+                requestMintAtCapacityCount++;
+                console2.log("REQUEST_MINT_AT_CAPACITY", requestMintAtCapacityCount);
+            } else if (_isSelector(reason, CertVault.CertVault_BelowInstantCap.selector)) {
+                requestMintBelowInstantCapCount++;
+                console2.log("REQUEST_MINT_BELOW_INSTANT_CAP", requestMintBelowInstantCapCount);
+            }
         }
         _trackDeposit(postedBefore);
     }
@@ -143,8 +209,12 @@ contract VaultHandler is CommonBase, StdUtils {
         uint256 balBefore = cert.balanceOf(address(this));
         try vault.settleMint(receiptId, fillPx18) {
             totalMinted += cert.balanceOf(address(this)) - balBefore;
-        } catch {
-            // Stale/settled receipt or capacity — not a Law 2 concern (settleMint never redeems).
+        } catch (bytes memory reason) {
+            if (_isSelector(reason, CertVault.CertVault_AtCapacity.selector)) {
+                settleMintAtCapacityCount++;
+                console2.log("SETTLE_MINT_AT_CAPACITY", settleMintAtCapacityCount);
+            }
+            // else: stale/settled receipt — not a Law 2 concern (settleMint never redeems).
         }
     }
 
@@ -238,22 +308,85 @@ contract VaultHandler is CommonBase, StdUtils {
         try vault.recallMargin() {} catch {}
     }
 
+    /// @dev Reachable via CertVault_InBand: once attest() below can move registry.latest(vault)'s
+    ///      notional18 (previously frozen at the fixture's setUp value of 0), rebalance()'s
+    ///      deltaBps can land inside [10_000 - DELTA_BAND_BPS, 10_000 + DELTA_BAND_BPS], and does
+    ///      unconditionally whenever no mint has yet created supply (required == 0 forces
+    ///      deltaBps == 10_000 exactly, dead centre of the band).
     function rebalance() external {
         callsRebalance++;
-        try vault.rebalance() {} catch {
-            // CertVault_InBand, or an unplaceable order at an extreme price — legitimate outcomes.
-            // rebalance() is not a redemption path, so Law 2 does not apply to it.
+        try vault.rebalance() {} catch (bytes memory reason) {
+            if (_isSelector(reason, CertVault.CertVault_InBand.selector)) {
+                rebalanceInBandCount++;
+                console2.log("REBALANCE_IN_BAND", rebalanceInBandCount);
+            }
+            // else: an unplaceable order at an extreme price. rebalance() is not a redemption
+            // path, so Law 2 does not apply to it either way.
         }
     }
 
     function settleBatch() external {
         callsSettleBatch++;
         uint256 postedBefore = vault.postedMargin();
-        try lighter.settleBatch() {} catch {
+        try lighter.settleBatch() {} catch (bytes memory reason) {
+            if (_isSelector(reason, MockLighter.InsufficientMargin.selector)) {
+                settleBatchInsufficientMarginCount++;
+                console2.log("SETTLE_BATCH_INSUFFICIENT_MARGIN", settleBatchInsufficientMarginCount);
+            }
             // InsufficientMargin(): a position increase outran posted margin in this random
             // sequence. Not a redemption action, so this is an accepted outcome, not a violation.
         }
         _trackDeposit(postedBefore);
+    }
+
+    // ---------------------------------------------------------------------- attester & governance
+
+    /// @notice Models the off-chain attester posting a fresh per-batch backing figure — the real
+    ///         actor whose absence made _requireCapacity's comparison, rebalance()'s delta-band
+    ///         check and invariant_capacityNeverExceedsAbsoluteCap's dependencies all static (Task
+    ///         12 review, Finding 1). oi is bounded wide enough to bracket the fixture's
+    ///         1_190_000e18 well below and well above so depthBps * oi (see setDepthBps) crosses
+    ///         absoluteCap18 (5_000_000e18) in both directions across the campaign; notional is
+    ///         bounded so _requireCapacity's `current + add > max` genuinely fires sometimes and
+    ///         genuinely passes other times.
+    /// @dev Not wrapped in try/catch: batchId is derived internally and strictly increasing by
+    ///      construction, so a correct call can never revert SolvencyRegistry_StaleBatch. If it
+    ///      ever did, that would itself be worth seeing as an uncaught handler-level revert rather
+    ///      than silently absorbed.
+    function attest(uint256 oiSeed, uint256 notionalSeed, uint256 marginSeed) external {
+        callsAttest++;
+        uint256 oi = bound(oiSeed, 0, 50_000_000e18);
+        uint256 notional = bound(notionalSeed, 0, 300_000e18);
+        uint256 margin = bound(marginSeed, 0, 300_000e18);
+        uint64 batchId = ++nextBatchId;
+
+        vm.prank(attester);
+        reg.attest(address(vault), batchId, notional, margin, oi);
+    }
+
+    /// @notice Models governance retuning depth within the immutable [minDepthBps, maxDepthBps]
+    ///         band it was deployed with (CapacityOracle can tune within bounds, never remove
+    ///         them). Reads the real bounds off the contract rather than hardcoding them.
+    function setDepthBps(uint256 seed) external {
+        callsSetDepthBps++;
+        uint256 v = bound(seed, cap.minDepthBps(), cap.maxDepthBps());
+        vm.prank(gov);
+        cap.setDepthBps(v);
+    }
+
+    /// @notice Models the attester relaying funding/execution variance/basis into the buffer,
+    ///         including strongly negative deltas. This is the action invariant_
+    ///         redemptionNeverBlockedByBuffer's own name promises to test: without it the buffer
+    ///         balance never moves off the fixture's seeded +100_000e18 and the invariant cannot
+    ///         exercise a negative-buffer redemption at all. The bound's negative side is wide
+    ///         enough (-200_000e18 per call, vs. a seeded +100_000e18 balance) to drive the ledger
+    ///         negative within a handful of calls in a 32-deep run, and to recover it too.
+    function accrueFunding(int256 seed) external {
+        callsAccrueFunding++;
+        int256 delta = bound(seed, -200_000e18, 100_000e18);
+
+        vm.prank(attester);
+        vault.accrueFunding(delta);
     }
 
     // ------------------------------------------------------------------------------------ internals
