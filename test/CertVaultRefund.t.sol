@@ -193,7 +193,13 @@ contract CertVaultRefundTest is VaultFixture {
         uint256 id = _drainThenRequestPastWindow();
 
         (,,,,,, uint256 indicative) = vault.mintReceipts(id);
-        assertEq(indicative, uint256(ESCROW) * 1e12 * 1e18 / PX, "the hedged amount was not recorded");
+        // C-1: indicativeCerts is now FLOORED to the venue's own size granularity before it is
+        // recorded or hedged, because settleMint mints exactly this number — so it has to be a
+        // number the venue can hold. The unquantised escrow/PX figure this used to assert
+        // (140.364188163884673748) is 88_163_884_673_748 wei above what the 1_403_641-tick order
+        // actually represents, and minting that difference is supply the hedge does not cover.
+        assertEq(indicative, uint256(HEDGE_TICKS) * 1e14, "the hedged amount was not recorded");
+        assertLe(indicative, uint256(ESCROW) * 1e12 * 1e18 / PX, "the record exceeds the escrow it was sized from");
         assertEq(int256(indicative * 1e4 / 1e18), HEDGE_TICKS); // sizeDecimals = 4
         assertEq(lighter.positionBase(MARKET), HEDGE_TICKS);
 

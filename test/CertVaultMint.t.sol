@@ -65,18 +65,167 @@ contract CertVaultMintTest is VaultFixture {
         vault.mintInstant(50_000e6); // > instantCap 10k notional
     }
 
+    /// @notice requestMint escrows and mints nothing; settleMint mints exactly the certificates
+    ///         the hedge was sized for, and the fill price argument does not move that amount.
+    /// @dev C-1 (external C1 audit) rewrote what this test asserts, and the old assertion is worth
+    ///      recording because it was the defect written down as a requirement. It read
+    ///      `assertLt(cert.balanceOf(alice), 139e18)` — i.e. it required the minted amount to be
+    ///      `escrow / fillPx18`, 138.98 certificates at a fill 1% worse than the oracle, against a
+    ///      hedge that had already gone in for 140.364100. fillPx18 is a caller-supplied argument
+    ///      on a permissionless function, so that requirement is exactly the caller price
+    ///      discretion C-1 is about: the same receipt minted anywhere in a settleBandBps-wide range
+    ///      depending on who called first. settleMint now mints r.indicativeCerts and reconciles
+    ///      the escrow remainder into BufferBook, so the assertion below is an equality and the
+    ///      fill price is proven not to matter.
     function test_requestMintEscrowsAndSettlesAtActualFill() public {
         vm.prank(alice);
         uint256 id = vault.requestMint(50_000e6);
         assertEq(cert.balanceOf(alice), 0);
 
+        (, uint256 escrow,,,,, uint256 indicative) = vault.mintReceipts(id);
+        assertEq(escrow, 49_950e6);
+        // escrow / PX floored to the venue's own size granularity (sizeDecimals = 4)
+        assertEq(indicative, 140_364_100_000_000_000_000);
+
         lighter.settleBatch();
-        // filled 1% worse than oracle
+        // filled 1% worse than oracle — in band, and irrelevant to the amount minted
         vault.settleMint(id, PX * 101 / 100);
 
-        // 49_950 / 359.4186 = 138.98... certificates
-        assertGt(cert.balanceOf(alice), 0);
-        assertLt(cert.balanceOf(alice), 139e18);
+        assertEq(cert.balanceOf(alice), indicative, "the fill price still moved the mint");
+    }
+
+    /// @notice The other side of the same fix: a fill 1% BETTER than the request price mints the
+    ///         identical amount. Two settles that differ only in the caller's argument must not
+    ///         produce two different supplies — that difference was worth $2,628.95 on a $50,000
+    ///         mint at settleBandBps = 500.
+    function test_settleMintAmountIsIndependentOfTheFillPriceArgument() public {
+        vm.prank(alice);
+        uint256 idLow = vault.requestMint(50_000e6);
+        vm.prank(alice);
+        uint256 idHigh = vault.requestMint(50_000e6);
+        lighter.settleBatch();
+
+        (,,,,,, uint256 indicative) = vault.mintReceipts(idLow);
+
+        uint256 before = cert.balanceOf(alice);
+        vault.settleMint(idLow, PX * 95 / 100); // the band floor
+        uint256 mintedAtFloor = cert.balanceOf(alice) - before;
+
+        before = cert.balanceOf(alice);
+        vault.settleMint(idHigh, PX * 105 / 100); // the band ceiling
+        uint256 mintedAtCeiling = cert.balanceOf(alice) - before;
+
+        assertEq(mintedAtFloor, indicative);
+        assertEq(mintedAtCeiling, indicative);
+        assertEq(mintedAtFloor, mintedAtCeiling);
+    }
+
+    /// @notice C-1's escrow reconciliation. The remainder between the escrow and what
+    ///         indicativeCerts cost at the request price is credited to BufferBook, never silently
+    ///         retained. It is size-decimals dust — one venue tick of notional at most.
+    function test_settleMintCreditsTheEscrowRemainderToTheBuffer() public {
+        int256 bookBefore = book.balance18(address(vault));
+
+        vm.prank(alice);
+        uint256 id = vault.requestMint(50_000e6);
+        lighter.settleBatch();
+        (, uint256 escrow,,,,, uint256 indicative) = vault.mintReceipts(id);
+
+        vault.settleMint(id, PX);
+
+        uint256 escrow18 = uint256(escrow) * 1e12;
+        uint256 hedgeCost18 = indicative * PX / 1e18;
+        assertGt(escrow18, hedgeCost18, "there should be a remainder to reconcile");
+        assertEq(book.balance18(address(vault)) - bookBefore, int256(escrow18 - hedgeCost18));
+        // Dust, not a windfall: below one tick of notional at PX with sizeDecimals = 4.
+        assertLt(escrow18 - hedgeCost18, 1e14 * PX / 1e18);
+    }
+
+    /// @notice C-2, the cumulative half. The cap bounded one call and nothing bounded the sum,
+    ///         because `current` came from an attestation that does not move between batches.
+    ///         20 sequential mintInstant calls in one block minted $199,800 against a $119,000
+    ///         cap — 1.68x. This is the directed proof the sum is now bounded.
+    /// @dev test_A1_capacityCapIsPerCallNotCumulative in test/AuditPoC.t.sol is the auditor's
+    ///      version of this and CANNOT be made green as written: it calls mintInstant 20 times
+    ///      unguarded, so a cap that actually binds reverts the 12th call before the test reaches
+    ///      its own assertion. The property it asserts does hold, and this test is what asserts it.
+    function test_capacityIsCumulativeAcrossMintsInOneBlock() public {
+        uint256 max = cap.maxNotional18(address(vault), book.capacity18(address(vault)));
+        assertEq(max, 119_000e18);
+
+        usdg.mint(alice, 1_000_000e6);
+        uint256 admitted;
+        vm.startPrank(alice);
+        for (uint256 i = 0; i < 20; i++) {
+            try vault.mintInstant(10_000e6) {
+                admitted++;
+            } catch (bytes memory reason) {
+                assertEq(bytes4(reason), CertVault.CertVault_AtCapacity.selector, "refused for the wrong reason");
+                break;
+            }
+        }
+        vm.stopPrank();
+
+        // The attestation never moved — the same untouched headroom the old check re-read.
+        assertEq(cap.maxNotional18(address(vault), book.capacity18(address(vault))), max, "cap moved");
+        assertEq(reg.latest(address(vault)).notional18, 0, "the attested notional moved after all");
+
+        assertEq(admitted, 11, "the cap admitted the wrong number of mints");
+        assertLe(cert.totalSupply() * PX / 1e18, max, "minted notional must respect maxNotional");
+        // And it is a real bound, not an accidental one: a 12th mint of the same size is refused.
+        vm.expectRevert(CertVault.CertVault_AtCapacity.selector);
+        vm.prank(alice);
+        vault.mintInstant(10_000e6);
+    }
+
+    /// @notice The queued path has to be bounded by the same counter, and for the same reason:
+    ///         certificate.totalSupply() does not move at requestMint either, so without
+    ///         pendingMintCerts a run of requestMint calls reproduces C-2 exactly.
+    function test_capacityIsCumulativeAcrossQueuedMintRequests() public {
+        usdg.mint(alice, 1_000_000e6);
+        uint256 admitted;
+        vm.startPrank(alice);
+        for (uint256 i = 0; i < 10; i++) {
+            try vault.requestMint(25_000e6) {
+                admitted++;
+            } catch (bytes memory reason) {
+                assertEq(bytes4(reason), CertVault.CertVault_AtCapacity.selector, "refused for the wrong reason");
+                break;
+            }
+        }
+        vm.stopPrank();
+
+        assertEq(cert.totalSupply(), 0, "requestMint must not mint");
+        assertEq(admitted, 4, "the cap admitted the wrong number of requests");
+        assertLe(vault.pendingMintCerts() * PX / 1e18, 119_000e18);
+    }
+
+    /// @notice A refund gives the reservation back, so capacity is not permanently consumed by a
+    ///         request that never settled. stageRefund is permissionless, so anyone can free it.
+    function test_stageRefundReleasesTheCapacityReservation() public {
+        vm.prank(alice);
+        uint256 id = vault.requestMint(50_000e6);
+        (,,,,,, uint256 indicative) = vault.mintReceipts(id);
+        assertEq(vault.pendingMintCerts(), indicative);
+
+        vm.warp(block.timestamp + SETTLE_WINDOW + 1);
+        vm.prank(makeAddr("stagingStranger"));
+        vault.stageRefund(id);
+
+        assertEq(vault.pendingMintCerts(), 0, "the reservation outlived the promise");
+    }
+
+    /// @notice And a settle hands it over to supply rather than double-counting it.
+    function test_settleMintHandsTheReservationOverToSupply() public {
+        vm.prank(alice);
+        uint256 id = vault.requestMint(50_000e6);
+        (,,,,,, uint256 indicative) = vault.mintReceipts(id);
+
+        lighter.settleBatch();
+        vault.settleMint(id, PX);
+
+        assertEq(vault.pendingMintCerts(), 0);
+        assertEq(cert.totalSupply(), indicative);
     }
 
     function test_requestMintBelowInstantCapReverts() public {

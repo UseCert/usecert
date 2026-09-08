@@ -175,6 +175,37 @@ contract CertVault {
     ///      refused inside the rollup with no on-chain signal (see recallMargin()).
     uint256 public marginPendingRecall;
 
+    /// @notice Certificates promised to mint receipts that have neither settled nor been staged
+    ///         for refund — exposure the vault has already hedged and escrowed for, but which does
+    ///         not yet show up in certificate.totalSupply().
+    /// @dev C-2 (CRITICAL, external C1 audit). _requireCapacity measured "current" as the last
+    ///      ATTESTED notional, which does not move between batches (up to maxAttestationAgeSec,
+    ///      300s in the fixture), so every mint inside that window measured against the same
+    ///      untouched headroom: maxNotional bounded ONE call and nothing bounded the sum. Measured:
+    ///      20 sequential mintInstant calls in a single block minted $199,800 against a $119,000
+    ///      cap — 1.68x, limited only by the caller's wallet.
+    ///
+    ///      This is the same defect, and the same argument, as C2 on rebalance() — whose own
+    ///      NatSpec already says "the per-call notional bound alone was decorative, because the
+    ///      attestation rebalance() reads does not move between calls". That one was fixed with
+    ///      lastRebalancedBatch; the argument was simply never applied to the mint path.
+    ///
+    ///      Admission control now measures the vault's OWN obligation, which moves with every
+    ///      mint and every burn: certificate.totalSupply() covers the instant path and every
+    ///      settled receipt, and this counter covers the gap the queued path opens between
+    ///      requestMint (escrow taken, hedge submitted, no certificates yet) and settleMint.
+    ///      Without it a run of requestMint calls would reproduce C-2 exactly, since totalSupply
+    ///      does not move at requestMint either. Increased in requestMint; released in settleMint
+    ///      (where supply takes over the same quantity, so total exposure is continuous) or in
+    ///      stageRefund (where the promise is abandoned) — never both, since settleMint requires
+    ///      !settled and stageRefund requires !settled && !refundStaged.
+    ///
+    ///      A receipt whose window expired and which nobody has staged keeps its reservation. That
+    ///      is the conservative direction (it can only refuse new mints, never admit them) and
+    ///      stageRefund is permissionless, so anyone can free it. It is not a Law 2 concern:
+    ///      capacity gates minting only, and no redemption path reads this counter.
+    uint256 public pendingMintCerts;
+
     /// @notice Total collateral owed to queued redemption receipts that have not yet been paid.
     /// @dev C1 (final review wave): the number recallMargin() sizes its REQUEST off. It is
     ///      deliberately not the same quantity as marginPendingRecall: that one is the pro-rata
@@ -273,7 +304,7 @@ contract CertVault {
 
         uint256 notional18 = certOut * px18 / 1e18;
         if (notional18 > cfg.instantCap18) revert CertVault_AboveInstantCap();
-        _requireCapacity(notional18);
+        _requireCapacity(notional18, px18);
 
         IERC20(cfg.collateral).safeTransferFrom(msg.sender, address(this), amountIn);
         certificate.mint(msg.sender, certOut);
@@ -291,10 +322,15 @@ contract CertVault {
         uint256 px18 = oracle.px();
         uint256 fee = amountIn * cfg.mintFeeBps / 10_000;
         uint256 net18 = _to18(amountIn - fee);
-        uint256 indicative = net18 * 1e18 / px18;
+        // C-1: floored to the venue's own representable size BEFORE it is recorded or hedged, so
+        // r.indicativeCerts is exactly the exposure the order below asks for rather than a figure
+        // the venue cannot hold. settleMint mints this number and nothing else, so a certificate
+        // that the hedge cannot cover is not merely discouraged, it is unrepresentable. The
+        // remainder is escrow with no certificate against it and is reconciled in settleMint.
+        uint256 indicative = _quantiseToVenue(net18 * 1e18 / px18);
         uint256 notional18 = indicative * px18 / 1e18;
         if (notional18 <= cfg.instantCap18) revert CertVault_BelowInstantCap();
-        _requireCapacity(notional18);
+        _requireCapacity(notional18, px18);
 
         IERC20(cfg.collateral).safeTransferFrom(msg.sender, address(this), amountIn);
         receiptId = _nextReceiptId++;
@@ -316,19 +352,71 @@ contract CertVault {
             indicativeCerts: indicative
         });
 
+        // C-2: reserve this receipt's exposure against the cap for as long as the promise stands.
+        // totalSupply does not move at requestMint, so without this a run of requestMint calls in
+        // one attestation window would re-observe the same headroom exactly as the instant path
+        // did. Released in settleMint or stageRefund; see pendingMintCerts.
+        pendingMintCerts += indicative;
+
         _postMargin(amountIn - fee);
         _hedge(indicative, px18, SIDE_BID);
         emit MintRequested(receiptId, msg.sender, amountIn);
     }
 
-    /// @notice Mint at the price actually filled, so the vault carries no execution risk on
-    ///         large mints. Permissionless — the fill price is checkable against the attestation.
+    /// @notice Mint exactly the certificates requestMint hedged, and reconcile whatever escrow is
+    ///         left over. Permissionless, and the amount minted is fixed before this call exists.
+    /// @dev C-1 (CRITICAL, external C1 audit). This function used to mint `escrow / fillPx18` from
+    ///      a fill price the CALLER supplied, bounded only by a settleBandBps band against
+    ///      requestPx18. It is permissionless, so whoever called first chose the price, and the
+    ///      hedge had already been sized at requestPx18 — the two numbers had no reason to agree.
+    ///      Its old NatSpec claimed "the fill price is checkable against the attestation"; nothing
+    ///      checked it, and nothing could: this function takes no attestation, batch id or proof,
+    ///      and SolvencyRegistry has no per-receipt fill to check against. Measured on a $50,000
+    ///      request-path mint at settleBandBps = 500: the hedge went in for 140.364188 uTSLA and
+    ///      the band floor minted 147.751777, leaving 7.387589 uTSLA ($2,628.95) unbacked. The
+    ///      same discretion griefs in the other direction — a stranger settling at the band
+    ///      ceiling minted 133.680179 for the receipt's owner, destroying $2,378.57 of their
+    ///      value, with the receipt consumed.
+    ///
+    ///      The fix removes the discretion rather than bounding it: certOut is r.indicativeCerts,
+    ///      the venue-representable amount requestMint actually submitted an order for. Law 1 then
+    ///      holds by construction on this path — supply grows by exactly the base the hedge asked
+    ///      for, at the venue's own granularity — and it holds no matter who calls, when, or with
+    ///      what argument.
+    ///
+    ///      ESCROW RECONCILIATION. r.escrow bought r.indicativeCerts at r.requestPx18; the
+    ///      remainder is floor-division and size-decimals dust (at most one venue tick of
+    ///      notional — $0.036 at PX = 355.86 and sizeDecimals = 4). It is credited to BufferBook
+    ///      rather than retained silently or paid back. Retained silently it would be value with
+    ///      no owner and no published record; paid back it would need a transfer out of a hot
+    ///      buffer that does not hold it (requestMint already posted targetMarginBps of the escrow
+    ///      to the venue), which would give this permissionless function a funding-dependent
+    ///      revert and a new "not yet" state for a sub-cent remainder. Execution variance and
+    ///      realised basis are precisely what BufferBook is for.
+    ///
+    ///      Deliberately reconciled against r.requestPx18 and NOT against fillPx18. The residual
+    ///      is then deterministic, non-negative by construction (indicativeCerts is floored from
+    ///      escrow/requestPx18, so its cost cannot exceed the escrow) and outside any caller's
+    ///      control. Reconciling against a caller-supplied fill would hand a stranger a
+    ///      settleBandBps-wide lever over the published buffer, and would double-count with
+    ///      accrueFunding(), which is the attester's own channel for relaying real execution
+    ///      variance off the venue.
+    ///
+    ///      fillPx18 is KEPT, still banded against requestPx18, as a sanity bound and as the
+    ///      reported fill in MintSettled. It no longer sizes anything. RESIDUAL FINDING: with no
+    ///      attested per-receipt fill anywhere in C1, an honest on-chain check of the argument is
+    ///      impossible, so it is informational — see the report.
+    ///
     /// @dev C3: the band is measured against the receipt's OWN requestPx18, not against
     ///      oracle.pxUnguarded() at settle time. Banding against the settle-time price made the
     ///      band vacuous over time: the reference itself drifts with the market, so a fill
     ///      arbitrarily far from what the user requested at is "in band" as long as it tracks
     ///      wherever the price has since gone. Paired with settleWindow below, so a receipt
     ///      cannot sit indefinitely waiting for a favourable moment.
+    /// @dev C-2: no _requireCapacity call here, on purpose. These certificates were admitted, and
+    ///      their notional reserved in pendingMintCerts, at requestMint. Re-admitting the same
+    ///      exposure would double-count it against the cap; gating on it would make a receipt
+    ///      unsettleable because capacity moved after the escrow was already at the venue.
     function settleMint(uint256 receiptId, uint256 fillPx18) external {
         MintReceipt storage r = mintReceipts[receiptId];
         if (r.user == address(0) || r.settled) revert CertVault_BadReceipt();
@@ -341,9 +429,17 @@ contract CertVault {
 
         r.settled = true;
 
-        uint256 certOut = _to18(r.escrow) * 1e18 / fillPx18;
-        _requireCapacity(certOut * fillPx18 / 1e18);
+        uint256 certOut = r.indicativeCerts;
+        // C-2: the promise this receipt reserved is now outstanding supply, so hand the reservation
+        // over rather than counting it twice. Floored for the same reason the stageRefund clamp is
+        // (see there): a counter underflow must never be the thing that reverts a mint path.
+        _releasePendingMint(certOut);
         certificate.mint(r.user, certOut);
+
+        uint256 escrow18 = _to18(r.escrow);
+        uint256 hedgeCost18 = certOut * refPx / 1e18;
+        if (escrow18 > hedgeCost18) buffer.accrue(address(this), SafeCast.toInt256(escrow18 - hedgeCost18));
+
         emit MintSettled(receiptId, certOut, fillPx18);
     }
 
@@ -375,6 +471,12 @@ contract CertVault {
         if (r.refundStaged) revert CertVault_BadReceipt();
 
         r.refundStaged = true;
+
+        // C-2: the certificates this receipt promised will never be minted — the window has
+        // expired, so settleMint can no longer succeed — so give the capacity reservation back.
+        // Floored, never checked-subtracted: nothing in this function may revert (see the NatSpec
+        // above), least of all an accounting counter.
+        _releasePendingMint(r.indicativeCerts);
 
         // Symmetric with _queueExit: move this receipt's posted share from the allocation counter
         // into the recall counter so recallMargin() will actually ask the venue for it. requestMint
@@ -904,10 +1006,55 @@ contract CertVault {
         emit MarginRecalled(applied, marginPendingRecall);
     }
 
-    function _requireCapacity(uint256 addNotional18) internal view {
+    /// @notice Admission control for the two mint paths. Refuses a mint whose notional would put
+    ///         the vault's exposure past what CapacityOracle allows.
+    /// @dev C-2: `current` is the MAXIMUM of two figures, and it has to be both.
+    ///
+    ///      The vault's own obligation — outstanding certificates plus certificates promised to
+    ///      unsettled receipts, valued at the price the calling mint is pricing itself off — is
+    ///      the half that MOVES. It grows on every mint (instant or requested) and shrinks on
+    ///      every burn, so the per-call bound is finally a bound on the sum. Sizing off the
+    ///      attested notional alone was the defect: it does not move between batches, so the cap
+    ///      was re-observed intact by every mint in the window (measured 1.68x over cap; see
+    ///      pendingMintCerts).
+    ///
+    ///      The attested notional is KEPT as a floor, not discarded. It is the wrong number for
+    ///      admission control on its own but it is the right number for solvency reporting, and it
+    ///      is the only thing that sees a position the vault's own books have lost track of — a
+    ///      hedge left dangling by stageRefund's open-loop close, say, where supply is zero and
+    ///      the obligation measure would happily admit fresh mints on top of live directional
+    ///      risk. Taking the larger of the two is strictly the safer reading of both.
+    ///
+    ///      Redemptions compose without touching this function: redeemInstant and _queueExit burn
+    ///      before anything else, so the obligation term drops immediately and the freed headroom
+    ///      is visible to the next mint. Reading capacity is deliberately confined to the mint
+    ///      paths — no redemption path calls this (Law 2).
+    function _requireCapacity(uint256 addNotional18, uint256 px18) internal view {
         uint256 max = capacity.maxNotional18(address(this), buffer.capacity18(address(this)));
-        uint256 current = registry.latest(address(this)).notional18;
+        uint256 own18 = (certificate.totalSupply() + pendingMintCerts) * px18 / 1e18;
+        uint256 attested18 = registry.latest(address(this)).notional18;
+        uint256 current = own18 > attested18 ? own18 : attested18;
         if (current + addNotional18 > max) revert CertVault_AtCapacity();
+    }
+
+    /// @dev Hand a mint receipt's capacity reservation back, floored rather than checked-subtracted.
+    ///      Each receipt adds its indicativeCerts exactly once and releases it exactly once, so an
+    ///      underflow here would be a bug in this contract — but the two callers are settleMint and
+    ///      stageRefund, and stageRefund must never revert (refundMint is gated behind it, so a
+    ///      revert there would strand escrow: the Critical the two-phase refund exists to prevent).
+    ///      Same clamp, and the same reasoning, as stageRefund's `posted > postedMargin`.
+    function _releasePendingMint(uint256 certs) internal {
+        uint256 release = certs > pendingMintCerts ? pendingMintCerts : certs;
+        pendingMintCerts -= release;
+    }
+
+    /// @dev Floor a certificate amount to the venue's own representable size. `_baseAmount` is
+    ///      what the venue actually receives, so anything below its granularity is a certificate
+    ///      the hedge cannot express — see requestMint, which quantises before recording and
+    ///      hedging so settleMint can mint exactly what went to the venue (C-1).
+    function _quantiseToVenue(uint256 certAmount18) internal view returns (uint256) {
+        uint256 step = 1e18 / (10 ** cfg.sizeDecimals);
+        return step == 0 ? certAmount18 : (certAmount18 / step) * step;
     }
 
     /// @dev Shared size-decimals conversion used by _hedge, _tryHedge and rebalance()'s own
