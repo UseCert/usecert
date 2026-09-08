@@ -342,6 +342,94 @@ contract CertVault {
         );
     }
 
+    // ---------------------------------------------------------------- solvency & rebalance
+
+    error CertVault_InBand();
+    error CertVault_OnlyAttester();
+
+    /// @dev Delta tolerance in bps, and the maximum notional a single rebalance() call may move.
+    ///      Bounding the latter is what keeps rebalance() permissionless without letting any
+    ///      single caller push the vault's position around (Law 6).
+    uint256 public constant DELTA_BAND_BPS = 100;
+    uint256 public constant MAX_REBALANCE_NOTIONAL_18 = 10_000e18;
+
+    struct Solvency {
+        uint256 supply;
+        uint256 notional18;
+        uint256 margin18;
+        int256 buffer18;
+        uint256 deltaBps;
+        uint64 provenAtBatch;
+        uint256 ageSec;
+    }
+
+    /// @notice Public backing figure. Always carries provenAtBatch and ageSec alongside the
+    ///         numbers — there is no code path that returns backing without also saying how old
+    ///         and whose attestation it rests on (published-honesty requirement, not a nicety).
+    ///         Reads SolvencyRegistry's per-batch attestation, never postedMargin, which is a
+    ///         withdrawal-sizing counter only and ignores funding, PnL and liquidation.
+    function solvency() external view returns (Solvency memory s) {
+        (s,,) = _solvency();
+    }
+
+    /// @dev Shared core for solvency() and rebalance() so both price off the same oracle read and
+    ///      `required` (the dollar value the outstanding supply demands at delta 1.0) is computed
+    ///      exactly once, rather than solvency() and rebalance() each re-deriving it separately
+    ///      and risking the two drifting apart.
+    function _solvency() internal view returns (Solvency memory s, uint256 required, uint256 px18) {
+        ISolvencyRegistry.Attestation memory a = registry.latest(address(this));
+        (px18,) = oracle.pxUnguarded();
+
+        s.supply = certificate.totalSupply();
+        s.notional18 = a.notional18;
+        s.margin18 = a.margin18;
+        s.buffer18 = buffer.balance18(address(this));
+        s.provenAtBatch = a.batchId;
+        s.ageSec = registry.ageSec(address(this));
+
+        required = s.supply * px18 / 1e18;
+        // required == 0 (no supply, or px18 == 0) means there is nothing to hedge: report fully
+        // at-target (10_000 bps == 100%) rather than dividing by zero.
+        s.deltaBps = required == 0 ? 10_000 : a.notional18 * 10_000 / required;
+    }
+
+    /// @notice Permissionless delta trim: pulls the vault's Lighter position back toward the
+    ///         notional its outstanding supply requires at delta 1.0. Bounded per call by
+    ///         MAX_REBALANCE_NOTIONAL_18 so no single caller can move more than that much size;
+    ///         reverts CertVault_InBand() when already within DELTA_BAND_BPS, since there is
+    ///         nothing to trim.
+    /// @dev Uses the revert-capable _hedge, not the exit path's fail-open _tryHedge: rebalancing
+    ///      is not a redemption path, so Law 2 does not require it to succeed. If the order
+    ///      cannot be placed (e.g. an extreme price overflowing the tick domain), this call
+    ///      reverts and the caller simply does not collect anything for this attempt — Law 6
+    ///      permissionlessness means anyone may retry, it does not mean every attempt must
+    ///      succeed. No on-chain bounty is paid here: C1 has no fee/reward token to draw one
+    ///      from (FeeVault/CERT are C3 concerns) — "permissionless" is itself what makes an
+    ///      off-chain keeper incentive possible on top of this function, not inside it.
+    function rebalance() external {
+        (Solvency memory s, uint256 required, uint256 px18) = _solvency();
+
+        uint256 lo = 10_000 - DELTA_BAND_BPS;
+        uint256 hi = 10_000 + DELTA_BAND_BPS;
+        if (s.deltaBps >= lo && s.deltaBps <= hi) revert CertVault_InBand();
+
+        bool underHedged = s.notional18 < required;
+        uint256 gap18 = underHedged ? required - s.notional18 : s.notional18 - required;
+        if (gap18 > MAX_REBALANCE_NOTIONAL_18) gap18 = MAX_REBALANCE_NOTIONAL_18;
+
+        uint256 certEquivalent = gap18 * 1e18 / px18;
+        _hedge(certEquivalent, px18, underHedged ? SIDE_BID : SIDE_ASK);
+    }
+
+    /// @notice Relay accrued funding, execution variance and realised basis into the buffer.
+    ///         Permissionless surface, attester-gated caller: only the oracle's attester may push
+    ///         a delta, but the resulting balance is readable by anyone via BufferBook (Law 3 —
+    ///         nothing here is hidden).
+    function accrueFunding(int256 delta18) external {
+        if (msg.sender != ICertOracleAttester(address(oracle)).attester()) revert CertVault_OnlyAttester();
+        buffer.accrue(address(this), delta18);
+    }
+
     // ---------------------------------------------------------------- internals
 
     function _requireCapacity(uint256 addNotional18) internal view {
@@ -406,4 +494,8 @@ contract CertVault {
             ? amount18 / (10 ** (18 - _collateralDecimals))
             : amount18 * (10 ** (_collateralDecimals - 18));
     }
+}
+
+interface ICertOracleAttester {
+    function attester() external view returns (address);
 }
