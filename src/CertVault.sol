@@ -10,6 +10,7 @@ import {BufferBook} from "./BufferBook.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "openzeppelin-contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol";
+import {SafeCast} from "openzeppelin-contracts/utils/math/SafeCast.sol";
 
 /// @notice One vault per asset. The vault IS a registered Lighter master account and submits its
 ///         own orders, deposits and withdrawals — there is no privileged trading key anywhere in
@@ -35,6 +36,8 @@ contract CertVault {
     event MintRequested(uint256 indexed receiptId, address indexed user, uint256 amountIn);
     event MintSettled(uint256 indexed receiptId, uint256 certOut, uint256 fillPx18);
     event MarginPosted(uint256 marginPosted, uint256 retainedAsHotBuffer);
+    event MarginWithdrawRequested(uint256 amount, uint256 postedMarginAfter);
+    event MarginWithdrawFailed(uint256 amount);
 
     struct Deps {
         address lighter;
@@ -85,6 +88,12 @@ contract CertVault {
     uint256 private _nextReceiptId = 1;
     mapping(uint256 => MintReceipt) public mintReceipts;
 
+    /// @notice Collateral posted to Lighter as margin, less what has been requested back.
+    /// @dev A sizing counter for withdrawals only. It deliberately does NOT track funding, PnL or
+    ///      liquidation — the authoritative backing figure is SolvencyRegistry's per-batch
+    ///      attestation. Do not use this for solvency.
+    uint256 public postedMargin;
+
     constructor(Deps memory d, VaultConfig memory c, string memory name_, string memory symbol_) {
         lighter = ILighter(d.lighter);
         oracle = ICertOracle(d.oracle);
@@ -114,6 +123,7 @@ contract CertVault {
         uint256 dust = 10 ** _collateralDecimals;
         IERC20(cfg.collateral).forceApprove(address(lighter), dust);
         lighter.deposit(address(this), cfg.collateralAssetIndex, cfg.routeType, dust);
+        postedMargin += dust;
     }
 
     function lighterAccountIndex() public view returns (uint48) {
@@ -253,6 +263,7 @@ contract CertVault {
         uint256 fee18 = gross18 * cfg.redeemFeeBps / 10_000;
         uint256 owed18 = gross18 - fee18;
 
+        uint256 supplyBefore = certificate.totalSupply(); // capture BEFORE certificate.burn
         certificate.burn(msg.sender, certIn);
 
         uint64 enqueuedAt = uint64(block.timestamp);
@@ -268,10 +279,27 @@ contract CertVault {
 
         _hedge(certIn, px18, SIDE_ASK);
 
-        uint256 owedCollateral = _from18(owed18);
-        uint256 fromMargin = owedCollateral * cfg.targetMarginBps / 10_000;
+        // Price-independent by construction: certIn <= supplyBefore always (the burn above would
+        // have reverted otherwise), so this holder's share of postedMargin can never exceed what
+        // was actually posted — unlike sizing off the current oracle price, which grows with it.
+        uint256 fromMargin = supplyBefore == 0 ? 0 : postedMargin * certIn / supplyBefore;
+        postedMargin -= fromMargin;
         if (fromMargin > 0) {
-            lighter.withdraw(lighterAccountIndex(), cfg.collateralAssetIndex, cfg.routeType, uint64(fromMargin));
+            // Computed before the try, not inside it: a silently truncated withdrawal amount
+            // would be worse than a revert, and this is unreachable below ~$18.4 trillion.
+            uint64 fromMargin64 = SafeCast.toUint64(fromMargin);
+            // forceExit is the Law 2 backstop and must work even if the venue itself refuses the
+            // withdrawal (withdrawals disabled, deposit cap, or a future rule) — so this call must
+            // never be able to revert the transaction. The burn and the receipt stand regardless;
+            // claimRedeem pays from the hot buffer when the margin round-trip has not returned.
+            try lighter.withdraw(lighterAccountIndex(), cfg.collateralAssetIndex, cfg.routeType, fromMargin64) {
+                emit MarginWithdrawRequested(fromMargin, postedMargin);
+            } catch {
+                // Restore the counter: without this a refused withdrawal would permanently
+                // understate postedMargin and shrink every later holder's share.
+                postedMargin += fromMargin;
+                emit MarginWithdrawFailed(fromMargin);
+            }
         }
 
         if (isForce) emit ForceExited(receiptId, msg.sender, certIn);
@@ -331,6 +359,7 @@ contract CertVault {
         if (marginPosted == 0) return 0;
         IERC20(cfg.collateral).forceApprove(address(lighter), marginPosted);
         lighter.deposit(address(this), cfg.collateralAssetIndex, cfg.routeType, marginPosted);
+        postedMargin += marginPosted;
         emit MarginPosted(marginPosted, netCollateral - marginPosted);
     }
 

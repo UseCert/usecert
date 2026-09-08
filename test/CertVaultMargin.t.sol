@@ -150,6 +150,9 @@ contract CertVaultMarginTest is VaultFixture {
         assertEq(cert.balanceOf(alice), 0);
     }
 
+    /// @notice Task 8c: fromMargin is sized pro-rata by burned supply against postedMargin, not by
+    ///         the current oracle price (see test_withdrawSizedProRataNotByPrice for the case where
+    ///         that distinction actually bites).
     function test_queuedRedeemWithdrawsFromMargin() public {
         vm.prank(alice);
         uint256 id0 = vault.requestMint(50_000e6);
@@ -158,18 +161,15 @@ contract CertVaultMarginTest is VaultFixture {
         uint256 bal = cert.balanceOf(alice);
 
         uint256 marginBefore = lighter.marginBalance();
-
-        (uint256 px18,) = oracle.pxUnguarded();
-        uint256 gross18 = bal * px18 / 1e18;
-        uint256 fee18 = gross18 * 10 / 10_000; // redeemFeeBps = 10
-        uint256 owed18 = gross18 - fee18;
-        uint256 owedCollateral = owed18 / 1e12; // 18 -> 6 decimals
-        uint256 expectedFromMargin = owedCollateral * 9_000 / 10_000; // targetMarginBps = 9_000
+        uint256 postedBefore = vault.postedMargin();
+        uint256 supplyBefore = cert.totalSupply();
+        uint256 expectedFromMargin = postedBefore * bal / supplyBefore;
 
         vm.prank(alice);
         uint256 id = vault.requestRedeem(bal);
 
         assertEq(lighter.marginBalance(), marginBefore - expectedFromMargin);
+        assertEq(vault.postedMargin(), postedBefore - expectedFromMargin);
 
         lighter.settleBatch();
 
@@ -178,5 +178,132 @@ contract CertVaultMarginTest is VaultFixture {
         uint256 out = vault.claimRedeem(id);
         assertGt(out, 0);
         assertEq(usdg.balanceOf(alice), before + out);
+    }
+
+    /// @dev Moves the Chainlink feed AND keeps the Lighter mark / oracle mark price in sync with
+    ///      it, mirroring what VaultFixture.setUp() does for the initial price. pxUnguarded() (what
+    ///      _queueExit prices redemptions off) reads the feed, not markPx18 — see CertOracle.
+    function _setPrice(uint256 px18) internal {
+        feed.set(int256(px18 / 1e10), block.timestamp); // feed has 8 decimals
+        vm.prank(attester);
+        oracle.setMarkPrice(px18);
+        lighter.setMarkPrice(MARKET, px18);
+    }
+
+    /// @notice Task 8c's core proof: the margin withdrawal request tracks the holder's share of
+    ///         what was actually posted, not a recomputation off the (now higher) price.
+    function test_withdrawSizedProRataNotByPrice() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        uint256 bal = cert.balanceOf(alice);
+        uint256 supplyBefore = cert.totalSupply();
+        uint256 postedBefore = vault.postedMargin();
+        uint256 marginBefore = lighter.marginBalance();
+
+        uint256 raisedPx = PX * 120 / 100; // +20%
+        _setPrice(raisedPx);
+
+        // What the OLD, price-derived sizing would have requested at the raised price — this is
+        // strictly more than was ever posted, which is exactly the defect this task fixes.
+        uint256 gross18 = bal * raisedPx / 1e18;
+        uint256 fee18 = gross18 * 10 / 10_000; // redeemFeeBps = 10
+        uint256 owedCollateral = (gross18 - fee18) / 1e12; // 18 -> 6 decimals
+        uint256 oldFromMargin = owedCollateral * 9_000 / 10_000; // targetMarginBps = 9_000
+
+        uint256 expectedFromMargin = postedBefore * bal / supplyBefore;
+        assertLt(expectedFromMargin, oldFromMargin);
+
+        vm.prank(alice);
+        vault.requestRedeem(bal);
+
+        assertEq(lighter.marginBalance(), marginBefore - expectedFromMargin);
+        assertEq(vault.postedMargin(), 0);
+    }
+
+    /// @notice Law 2 guard for this task: forceExit must survive the venue itself refusing the
+    ///         withdrawal (here modelled as an on-chain deposit-cap rejection, which is a real
+    ///         validation `AdditionalZkLighter.withdraw()` performs). The burn and the receipt must
+    ///         stand, and the counter must be restored rather than silently written off.
+    function test_forceExitSurvivesVenueRefusingWithdraw() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        uint256 bal = cert.balanceOf(alice);
+        uint256 postedBefore = vault.postedMargin();
+
+        lighter.setDepositCapTicks(1); // any real withdrawal request will be refused
+
+        vm.prank(alice);
+        uint256 id = vault.forceExit(bal);
+
+        assertGt(id, 0);
+        assertEq(cert.balanceOf(alice), 0);
+        (address user,,,, bool paid) = vault.redeemReceipts(id);
+        assertEq(user, alice);
+        assertFalse(paid);
+        assertEq(vault.postedMargin(), postedBefore);
+    }
+
+    /// @notice Load-bearing regression: under the old price-derived sizing, fromMargin could
+    ///         outgrow postedMargin after a large price move, and forceExit — the Law 2
+    ///         backstop — could hard-revert on the venue's depositCapTicks check. The task-8c
+    ///         report records verifying this test fails when the old sizing is restored.
+    function test_forceExitSurvivesAfterLargePriceRise() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        uint256 bal = cert.balanceOf(alice);
+
+        _setPrice(PX * 10); // 10x
+
+        vm.prank(alice);
+        uint256 id = vault.forceExit(bal);
+
+        assertGt(id, 0);
+        assertEq(cert.balanceOf(alice), 0);
+    }
+
+    /// @notice Redeeming in unequal parts must not strand margin: each partial redemption pulls
+    ///         exactly its pro-rata share of what remains posted, and the sum across all parts
+    ///         recovers the original posted margin (up to floor-division dust).
+    function test_partialRedemptionsDoNotStrandMargin() public {
+        vm.prank(alice);
+        vault.mintInstant(3_558.6e6);
+        uint256 bal = cert.balanceOf(alice);
+
+        uint256 part1 = bal * 20 / 100;
+        uint256 part2 = bal * 35 / 100;
+        uint256 part3 = bal - part1 - part2; // remainder: sums exactly to bal
+
+        uint256 originalPosted = vault.postedMargin();
+        uint256 totalWithdrawn;
+
+        totalWithdrawn += _redeemPartAndCheck(part1);
+        totalWithdrawn += _redeemPartAndCheck(part2);
+        totalWithdrawn += _redeemPartAndCheck(part3);
+
+        assertEq(cert.balanceOf(alice), 0);
+        assertEq(vault.postedMargin(), 0);
+        assertApproxEqAbs(totalWithdrawn, originalPosted, 2);
+    }
+
+    /// @dev Redeems `certIn` from alice, asserting postedMargin lands exactly where the same
+    ///      pro-rata formula the contract uses says it should, and returns the margin withdrawn.
+    function _redeemPartAndCheck(uint256 certIn) internal returns (uint256 withdrawn) {
+        uint256 supply = cert.totalSupply();
+        uint256 posted = vault.postedMargin();
+        uint256 expectedFromMargin = posted * certIn / supply;
+        uint256 marginBefore = lighter.marginBalance();
+
+        vm.prank(alice);
+        vault.requestRedeem(certIn);
+
+        withdrawn = marginBefore - lighter.marginBalance();
+        assertEq(vault.postedMargin(), posted - expectedFromMargin);
+    }
+
+    /// @notice postedMargin must account for bootstrap()'s registering dust deposit too, so the
+    ///         counter matches every deposit the vault has ever made to Lighter.
+    function test_postedMarginCountsBootstrapDust() public view {
+        // VaultFixture.setUp() already called bootstrap(); nothing else has posted margin since.
+        assertEq(vault.postedMargin(), 1e6); // dust = 10 ** collateralDecimals, USDG has 6
     }
 }

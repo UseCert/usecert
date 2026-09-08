@@ -20,6 +20,8 @@ contract MockLighter is ILighter {
     error MarketIndexTooHigh();
     error BadOrderType();
     error InsufficientMargin();
+    error ZeroBaseAmount();
+    error AboveDepositCap();
 
     IERC20 public immutable collateral;
     uint16 public immutable collateralAssetIndex;
@@ -37,6 +39,9 @@ contract MockLighter is ILighter {
     mapping(uint16 => uint256) public markPrice;
     /// @dev required margin as a fraction of resulting notional, in bps. Default 5_000 (2x).
     uint256 public requiredMarginBps = 5_000;
+    /// @dev Mirrors AssetConfig.depositCapTicks on the real contract, which withdraw() validates
+    ///      `_baseAmount` against. Defaults large so existing tests are unaffected.
+    uint256 public depositCapTicks = type(uint64).max;
 
     Order[] private _queue;
     mapping(address => mapping(uint16 => uint128)) private _pending;
@@ -50,6 +55,10 @@ contract MockLighter is ILighter {
 
     function setRequiredMarginBps(uint256 bps) external {
         requiredMarginBps = bps;
+    }
+
+    function setDepositCapTicks(uint256 cap) external {
+        depositCapTicks = cap;
     }
 
     function setMarkPrice(uint16 marketIndex, uint256 px18) external {
@@ -78,10 +87,21 @@ contract MockLighter is ILighter {
         _queue.push(Order(marketIndex, baseAmount, price, isAsk, orderType));
     }
 
+    /// @dev Models AdditionalZkLighter.withdraw() on the real contract: it does NOT check the
+    ///      account's balance — sufficiency is decided inside the rollup, not on-chain. It only
+    ///      validates baseAmount != 0 and baseAmount <= depositCapTicks before enqueuing a
+    ///      priority request. So this must not revert on insufficient marginBalance; instead it
+    ///      credits only min(baseAmount, marginBalance) to pending, modelling a rollup batch that
+    ///      fulfills what it can and strands the rest — which is how an oversized request would
+    ///      actually behave on the real venue.
     function withdraw(uint48 accountIndex, uint16 assetIndex, uint8, uint64 baseAmount) external {
         if (accountIndex == 0) revert AccountIsNotRegistered();
-        marginBalance -= baseAmount;
-        _pending[msg.sender][assetIndex] += baseAmount;
+        if (baseAmount == 0) revert ZeroBaseAmount();
+        if (baseAmount > depositCapTicks) revert AboveDepositCap();
+
+        uint256 fulfilled = baseAmount <= marginBalance ? baseAmount : marginBalance;
+        marginBalance -= fulfilled;
+        _pending[msg.sender][assetIndex] += uint128(fulfilled);
     }
 
     function cancelAllOrders(uint48) external {
