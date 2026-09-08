@@ -45,6 +45,11 @@ contract BufferBookTest is Test {
         assertEq(book.holdingFeeBps(asset), 200);
     }
 
+    function test_feeRoundsToNearestNotUpwards() public {
+        _fund(60_000e18 - 1); // exactly 1 wei shortfall
+        assertEq(book.holdingFeeBps(asset), 0);
+    }
+
     function test_crossingMintSlowFlagsIt() public {
         _fund(50_000e18);
         assertFalse(book.mintSlowed(asset));

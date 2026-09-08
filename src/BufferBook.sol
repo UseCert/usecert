@@ -71,7 +71,7 @@ contract BufferBook {
         if (c.feeOn18 == 0) return 0;
 
         uint256 shortfall = c.feeOn18 - uint256(b);
-        uint256 fee = (shortfall * feeCapBps + c.feeOn18 - 1) / c.feeOn18;
+        uint256 fee = (shortfall * feeCapBps + c.feeOn18 / 2) / c.feeOn18;
         return fee > feeCapBps ? feeCapBps : fee;
     }
 
