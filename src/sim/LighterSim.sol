@@ -66,6 +66,8 @@ contract LighterSim is LighterCore {
     event RequiredMarginBpsSet(uint256 previous, uint256 current);
     event MarkPriceSet(uint16 indexed marketIndex, uint256 previous, uint256 current);
     event DepositCapTicksSet(uint256 previous, uint256 current);
+    /// @dev Task 8, item 2. The venue's deposit granularity. See `setDepositTickSize`.
+    event DepositTickSizeSet(uint256 previous, uint256 current);
     event DepositorAllowedSet(address indexed depositor, bool allowed);
     /// @dev Emitted by the queue escape hatch. `accountIndex == 0` means the whole queue was
     ///      purged, and Task 7's `LighterSim_AccountIndexZeroIsReservedForPurge` is what makes that
@@ -222,6 +224,30 @@ contract LighterSim is LighterCore {
         uint256 previous = depositCapTicks;
         depositCapTicks = cap;
         emit DepositCapTicksSet(previous, cap);
+    }
+
+    /// @notice Set the venue's deposit granularity: `deposit` then refuses any amount that is not
+    ///         an exact multiple of it.
+    ///
+    /// @dev Task 8, item 2. Owner-gated like every other configuration knob here, for the reason in
+    ///      this contract's header: an ungated simulator knob is how a testnet silently certifies a
+    ///      bad design.
+    ///
+    ///      Zero is refused rather than accepted-and-bricking: at zero every deposit would revert
+    ///      on a division by zero, which is a panic with no name in it and no way for an operator
+    ///      to tell it from a bug in the vault.
+    ///
+    ///      There is no upper floor to enforce, and no "raise only" rule, because the DEFAULT (1)
+    ///      is already the loosest possible value — a tick of 1 accepts every amount. So no
+    ///      setting reachable through this function can make the simulator more permissive than
+    ///      the configuration the suite certifies, which is what Global Constraint 5 asks for. See
+    ///      `LighterCore.depositTickSize` for why the default is the identity rather than a guess
+    ///      at the venue's real, still-unread value.
+    function setDepositTickSize(uint256 tick) external onlyOwner {
+        if (tick == 0) revert LighterCore_TickSizeIsZero();
+        uint256 previous = depositTickSize;
+        depositTickSize = tick;
+        emit DepositTickSizeSet(previous, tick);
     }
 
     /// @notice Nominate (or clear, with the zero address) the keeper allowed to settle batches.
