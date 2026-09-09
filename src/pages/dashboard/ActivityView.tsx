@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Check } from "lucide-react";
 import { useDashboard } from "./store";
 import type { FlowType, VaultId } from "./store";
-import { Dropdown, Panel, UnderlineTabs, ViewHeader } from "./ui";
+import { Dropdown, EmptyState, Panel, UnderlineTabs, ViewHeader } from "./ui";
 import { fmtNum, fmtUSD, timeAgo, truncHash } from "./format";
 import { FlowTypeBadge } from "./flows";
 import { flowVaultLabel } from "./flowMeta";
@@ -51,7 +51,7 @@ function TxCell({ hash }: { hash: string }) {
 }
 
 export default function ActivityView() {
-  const { flows, loadMoreFlows } = useDashboard();
+  const { flows, loadMoreFlows, flowsUnavailable, vaults } = useDashboard();
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("ALL");
   const [assetFilter, setAssetFilter] = useState<string>("all");
 
@@ -79,9 +79,12 @@ export default function ActivityView() {
           className="w-[190px]"
           options={[
             { value: "all", label: "All assets" },
-            { value: "utsla", label: "uTSLA" },
-            { value: "unvda", label: "uNVDA" },
-            { value: "uspx", label: "uSPX" },
+            ...vaults.map((v) => ({
+              value: v.id,
+              label: v.name,
+              disabled: v.status !== "LIVE",
+              hint: v.status !== "LIVE" ? "not deployed" : undefined,
+            })),
             { value: "token", label: "Token" },
           ]}
           value={assetFilter}
@@ -90,7 +93,14 @@ export default function ActivityView() {
       </div>
 
       <Panel className="mt-4 overflow-x-auto">
-        {filtered.length === 0 ? (
+        {flowsUnavailable ? (
+          <EmptyState
+            className="border-0"
+            height={220}
+            title="No flow history yet: needs an indexer"
+            detail="Receipt ids are not enumerable on-chain and there is no receiptsOf(user), so a wallet's mints and redemptions can only be reconstructed from indexed MintRequested / RedeemRequested / RedeemClaimed events. Nothing is indexed yet, so nothing is listed — the previous list here was generated locally."
+          />
+        ) : filtered.length === 0 ? (
           <p className="py-20 text-center font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
             No flows match this filter.
           </p>
@@ -143,15 +153,17 @@ export default function ActivityView() {
         )}
       </Panel>
 
-      <div className="mt-6 flex justify-center">
-        <button
-          type="button"
-          onClick={loadMoreFlows}
-          className="border hairline-dark px-8 py-3.5 text-[12px] font-semibold uppercase tracking-[0.08em] text-white transition-all hover:bg-section-deep-2 active:scale-[0.98]"
-        >
-          Load more
-        </button>
-      </div>
+      {!flowsUnavailable && (
+        <div className="mt-6 flex justify-center">
+          <button
+            type="button"
+            onClick={loadMoreFlows}
+            className="border hairline-dark px-8 py-3.5 text-[12px] font-semibold uppercase tracking-[0.08em] text-white transition-all hover:bg-section-deep-2 active:scale-[0.98]"
+          >
+            Load more
+          </button>
+        </div>
+      )}
     </div>
   );
 }

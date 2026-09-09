@@ -1,83 +1,138 @@
-import { useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
 import { ArrowUpRight, ChevronRight } from "lucide-react";
-import { useDashboard } from "./store";
-import type { Timeframe } from "./store";
-import { MicroLabel, Panel, PulseDot, Sparkline, Stagger, UnderlineTabs, Flash, ViewHeader, GhostWord } from "./ui";
+import { isRouted, STATUS_HINT, STATUS_LABEL, useDashboard } from "./store";
+import type { Vault } from "./store";
+import {
+  AgeLine,
+  EmptyState,
+  Flash,
+  GhostWord,
+  MicroLabel,
+  Panel,
+  PulseDot,
+  Stagger,
+  UnverifiedTag,
+  ViewHeader,
+} from "./ui";
 import { useCountUp } from "./hooks";
-import { SolvencyChart } from "./charts";
-import { fmtCompactUSD, fmtNum, fmtUSD, timeAgo, truncHash } from "./format";
-import { FlowTypeBadge } from "./flows";
-import { flowVaultLabel } from "./flowMeta";
+import { EM_DASH, fmtCompactUSD, fmtNum, fmtOrDash, fmtUSD } from "./format";
 import { TickerStrip, BackingComposition, FundingMonitor, NetworkStrip, PegMonitor } from "./OverviewExtras";
 import { cn } from "@/lib/utils";
-
-const TF_OPTIONS: { value: Timeframe; label: string }[] = [
-  { value: "1H", label: "1H" },
-  { value: "24H", label: "24H" },
-  { value: "7D", label: "7D" },
-  { value: "ALL", label: "ALL" },
-];
 
 function BufferMiniBar({ pct }: { pct: number }) {
   return (
     <span className="relative inline-block h-[6px] w-[60px] bg-white/10 align-middle">
-      <span className="absolute left-0 top-0 h-full bg-green-bright transition-all duration-500" style={{ width: `${pct}%` }} />
-      {[20, 45, 70].map((t) => (
-        <span key={t} className="absolute top-[-2px] h-[10px] w-px bg-white/40" style={{ left: `${t}%` }} aria-hidden />
-      ))}
+      <span
+        className="absolute left-0 top-0 h-full bg-green-bright transition-all duration-500"
+        style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
+      />
     </span>
   );
 }
 
+/**
+ * One headline figure.
+ *
+ * `value` is nullable on purpose: until the first multicall lands there is no figure, and
+ * a count-up animating to zero would read as "the protocol holds nothing". There is no
+ * sparkline any more either — a 24-point series would have to be invented.
+ */
 function StatCard({
   index,
   caption,
   value,
   format,
-  delta,
-  spark,
+  note,
+  register = "primary",
 }: {
   index: number;
   caption: string;
-  value: number;
+  value: number | null;
   format: (n: number) => string;
-  delta: React.ReactNode;
-  spark: number[];
+  note: React.ReactNode;
+  /** `claim` renders in a different visual register: it is not a measured balance. */
+  register?: "primary" | "claim";
 }) {
-  const animated = useCountUp(value, 1.2);
+  const animated = useCountUp(value ?? 0, 1.2);
   return (
     <Stagger index={index}>
-      <Panel className="group flex h-full flex-col gap-2 p-5 transition-colors hover:bg-section-deep">
-        <div className="flex items-center justify-between">
-          <MicroLabel>{caption}</MicroLabel>
-          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-white-60/50 transition-colors group-hover:text-green-bright">
-            /{String(index + 1).padStart(2, "0")}
-          </span>
+      <Panel
+        className={cn(
+          "group flex h-full flex-col gap-2 p-5 transition-colors hover:bg-section-deep",
+          register === "claim" && "border-warn/25 bg-[#12120d]",
+        )}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <MicroLabel className={register === "claim" ? "text-warn/80" : undefined}>{caption}</MicroLabel>
+          {register === "claim" ? (
+            <UnverifiedTag />
+          ) : (
+            <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-white-60/50 transition-colors group-hover:text-green-bright">
+              /{String(index + 1).padStart(2, "0")}
+            </span>
+          )}
         </div>
-        <p className="font-mono text-[34px] leading-none tracking-[-0.04em] text-white md:text-[40px]">
-          <Flash value={animated} format={format} />
+        <p
+          className={cn(
+            "font-mono text-[34px] leading-none tracking-[-0.04em] md:text-[40px]",
+            register === "claim" ? "text-silver" : "text-white",
+          )}
+        >
+          {value === null ? (
+            <span className="text-white-60/60">{EM_DASH}</span>
+          ) : (
+            <Flash value={animated} format={format} />
+          )}
         </p>
-        <div className="font-mono text-[11px]">{delta}</div>
-        <Sparkline data={spark} className="mt-auto" />
+        <div className="mt-auto font-mono text-[11px]">{note}</div>
       </Panel>
     </Stagger>
   );
 }
 
-export default function Overview() {
-  const { totals, agg, block, vaults, goVault, flows, setView } = useDashboard();
-  const [tf, setTf] = useState<Timeframe>("24H");
-
-  const series = agg[tf];
-  const daySeries = agg["24H"];
-  const supplyChange = (daySeries[daySeries.length - 1].obligation / daySeries[0].obligation - 1) * 100;
-  const sparkBase = daySeries.slice(-24).map((p) => p.obligation);
-  const sparkBacking = daySeries.slice(-24).map((p) => p.backing / p.obligation);
-  const liveVaults = vaults.filter((v) => v.status === "LIVE");
-  const bufferSeries = liveVaults[0].funding.map((_, i) =>
-    liveVaults.reduce((s, v) => s + (v.funding[i]?.bufferAfter ?? 0), 0),
+/** A cell that only ever shows a figure for a routed vault. */
+function Cell({
+  vault,
+  value,
+  format,
+  className,
+}: {
+  vault: Vault;
+  value: number | null;
+  format: (n: number) => string;
+  className?: string;
+}) {
+  return (
+    <td className={cn("px-3 py-3.5 text-right tabular-nums", className)}>
+      {isRouted(vault) ? fmtOrDash(value, format) : EM_DASH}
+    </td>
   );
+}
+
+export default function Overview() {
+  const {
+    totals,
+    liveVaults,
+    vaults,
+    goVault,
+    setView,
+    block,
+    blockKnown,
+    maxAttestationAgeSec,
+    flowsUnavailable,
+    isLoading,
+    isError,
+  } = useDashboard();
+
+  // The one solvency point we can prove right now, summed across routed vaults. Stage 1
+  // computes obligation as supply × oracle price, falling back to the attested notional18
+  // when px() reverted — different provenance, so the caveat below says so.
+  const hasPoint = liveVaults.length > 0;
+  const obligationNow = hasPoint
+    ? liveVaults.reduce((s, v) => s + (v.solvency[0]?.obligation ?? 0), 0)
+    : null;
+  const backingNow = hasPoint
+    ? liveVaults.reduce((s, v) => s + (v.solvency[0]?.backing ?? 0), 0)
+    : null;
 
   return (
     <div className="relative">
@@ -103,66 +158,111 @@ export default function Overview() {
             Solvency, <span className="text-metallic">Live.</span>
           </>
         }
-        right={<UnderlineTabs options={TF_OPTIONS} value={tf} onChange={setTf} />}
+        right={
+          <div className="self-end text-right">
+            <AgeLine
+              ageSec={totals?.worstAgeSec ?? null}
+              stale={Boolean(totals?.anyStale)}
+              maxAgeSec={maxAttestationAgeSec}
+            />
+            <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.06em] text-white-60/60">
+              Worst attestation age across routed vaults
+            </p>
+          </div>
+        }
       />
 
-      {/* Stat cards */}
+      {isError && (
+        <p className="mt-6 border border-warn/40 bg-[#12120d] px-4 py-3 font-mono text-[11px] uppercase tracking-[0.06em] text-warn">
+          Chain reads failed. Nothing below is current — no figures are shown rather than stale ones.
+        </p>
+      )}
+
+      {/* Stat cards. buffer and accrual are two cards on purpose: they are not the same
+          kind of number and must never be summed into one "buffer" figure. */}
       <div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           index={0}
-          caption="Total Certificate Supply"
-          value={totals.notional}
+          caption="Position Notional (attested)"
+          value={totals ? totals.notional : null}
           format={(n) => fmtCompactUSD(n)}
-          delta={
-            <span className={cn(supplyChange >= 0 ? "text-green-bright" : "text-silver")}>
-              {supplyChange >= 0 ? "▲" : "▼"} {Math.abs(supplyChange).toFixed(1)}% / 24H
-            </span>
+          note={
+            <AgeLine
+              ageSec={totals?.worstAgeSec ?? null}
+              stale={Boolean(totals?.anyStale)}
+              maxAgeSec={maxAttestationAgeSec}
+            />
           }
-          spark={sparkBase}
         />
         <StatCard
           index={1}
-          caption="Backing Ratio"
-          value={totals.ratio}
+          caption="Margin / Notional (attested)"
+          value={totals ? totals.ratio : null}
           format={(n) => `${n.toFixed(2)}%`}
-          delta={<span className="text-green-bright">✓ invariant holds, every block</span>}
-          spark={sparkBacking}
+          note={<span className="text-white-60">both halves are attester-relayed figures</span>}
         />
         <StatCard
           index={2}
-          caption="Protocol Buffer"
-          value={totals.buffer}
+          caption="Buffer Held (ERC-20)"
+          value={totals ? totals.buffer : null}
           format={(n) => fmtCompactUSD(n)}
-          delta={<span className="text-green-bright">▲ 0.4% / 24H</span>}
-          spark={bufferSeries.length > 1 ? bufferSeries : [1, 1]}
+          note={<span className="text-green-bright">collateral the vaults actually hold</span>}
         />
         <StatCard
           index={3}
-          caption="Weighted Delta"
-          value={totals.delta}
-          format={(n) => n.toFixed(3)}
-          delta={<span className="text-white-60">target 1.0 across all vaults</span>}
-          spark={sparkBacking.map((v) => v * 0.999 + 0.0005)}
+          caption="Accrual Claimed"
+          value={totals ? totals.accrualClaimedUnverified : null}
+          format={(n) => fmtCompactUSD(n)}
+          register="claim"
+          note={
+            <span className="text-warn/80">
+              attester-relayed P&amp;L · not money · not added to the buffer
+            </span>
+          }
         />
       </div>
 
-      {/* Solvency chart */}
+      {/* Solvency: one provable point, and an honest gap where the series would be */}
       <Stagger index={4}>
         <Panel className="section-glow relative mt-3 p-5 md:p-6">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-5 font-mono text-[10px] uppercase tracking-[0.08em]">
-              <span className="flex items-center gap-2 text-white-60">
-                <span className="h-2 w-2 bg-green-bright" aria-hidden /> Backing
-              </span>
-              <span className="flex items-center gap-2 text-white-60">
-                <span className="h-2 w-2 bg-silver" aria-hidden /> Supply × Price
-              </span>
-            </div>
+            <MicroLabel>Solvency Now</MicroLabel>
             <span className="flex items-center gap-2 rounded-full border hairline-dark px-3 py-1 font-mono text-[10px] uppercase tracking-[0.08em] text-white-60">
-              <PulseDot /> Live · Block <span className="tabular-nums text-white">{block.toLocaleString("en-US")}</span>
+              <PulseDot /> Block{" "}
+              <span className="tabular-nums text-white">
+                {blockKnown ? block.toLocaleString("en-US") : EM_DASH}
+              </span>
             </span>
           </div>
-          <SolvencyChart points={series} tf={tf} height={380} />
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="border hairline-dark bg-[#0d0f0d] p-4">
+              <MicroLabel className="text-[10px]">Backing · margin + buffer held</MicroLabel>
+              <p className="mt-2 font-mono text-[26px] leading-none tabular-nums text-green-bright">
+                {fmtOrDash(backingNow, (n) => fmtCompactUSD(n))}
+              </p>
+            </div>
+            <div className="border hairline-dark bg-[#0d0f0d] p-4">
+              <MicroLabel className="text-[10px]">Obligation · supply × oracle price</MicroLabel>
+              <p className="mt-2 font-mono text-[26px] leading-none tabular-nums text-silver">
+                {fmtOrDash(obligationNow, (n) => fmtCompactUSD(n))}
+              </p>
+            </div>
+          </div>
+
+          <p className="mt-3 font-mono text-[10px] leading-[1.7] uppercase tracking-[0.06em] text-white-60/70">
+            Backing excludes the unverified accrual claim.
+            {totals?.anyPriceUnavailable
+              ? " One or more oracles reverted, so that vault's obligation falls back to the attested notional — different provenance."
+              : ""}
+          </p>
+
+          <EmptyState
+            className="mt-4"
+            height={220}
+            title="No solvency history yet: needs an indexer"
+            detail="No view function on these contracts returns a time series, so there is no 60-point curve to draw. The figures above are a single point, proven at the attestation age shown. A curve would have to be invented."
+          />
         </Panel>
       </Stagger>
 
@@ -186,7 +286,9 @@ export default function Overview() {
       <Stagger index={5}>
         <Panel className="mt-3 overflow-x-auto">
           <div className="flex items-center justify-between border-b hairline-dark px-5 py-4">
-            <MicroLabel>Vaults</MicroLabel>
+            <MicroLabel>
+              Vaults · {vaults.filter(isRouted).length} of {vaults.length} routed on chain 46630
+            </MicroLabel>
             <button
               type="button"
               onClick={() => setView("vaults")}
@@ -195,77 +297,146 @@ export default function Overview() {
               All vaults <ArrowUpRight size={13} />
             </button>
           </div>
-          <table className="w-full min-w-[760px] font-mono text-[12px]">
+          <table className="w-full min-w-[900px] font-mono text-[12px]">
             <thead>
               <tr className="border-b hairline-dark text-left text-[10px] uppercase tracking-[0.08em] text-white-60">
                 <th className="px-5 py-3 font-medium">Vault</th>
                 <th className="px-3 py-3 font-medium">Status</th>
-                <th className="px-3 py-3 text-right font-medium">Price</th>
+                <th className="px-3 py-3 text-right font-medium">Oracle Price</th>
                 <th className="px-3 py-3 text-right font-medium">Supply</th>
-                <th className="hidden px-3 py-3 text-right font-medium lg:table-cell">Position Notional</th>
-                <th className="hidden px-3 py-3 text-right font-medium xl:table-cell">Margin</th>
-                <th className="hidden px-3 py-3 font-medium md:table-cell">Buffer</th>
-                <th className="px-3 py-3 text-right font-medium">Delta</th>
+                <th className="hidden px-3 py-3 text-right font-medium lg:table-cell">Notional (att.)</th>
+                <th className="hidden px-3 py-3 text-right font-medium xl:table-cell">Margin (att.)</th>
+                <th className="hidden px-3 py-3 font-medium md:table-cell">Buffer held</th>
+                <th className="px-3 py-3 text-right font-medium">Delta drift</th>
+                <th className="hidden px-3 py-3 text-right font-medium lg:table-cell">Proven</th>
                 <th className="w-8" />
               </tr>
             </thead>
             <tbody>
               {vaults.map((v) => {
-                const live = v.status === "LIVE";
-                const notional = v.supply * v.price;
+                const routed = isRouted(v);
                 return (
                   <tr
                     key={v.id}
-                    onClick={() => live && goVault(v.id)}
+                    onClick={routed ? () => goVault(v.id) : undefined}
+                    aria-disabled={!routed}
+                    title={routed ? v.full : STATUS_HINT[v.status]}
                     className={cn(
                       "group relative border-b hairline-dark transition-colors last:border-b-0",
-                      live ? "cursor-pointer hover:bg-section-deep" : "opacity-50",
+                      routed
+                        ? "cursor-pointer hover:bg-section-deep"
+                        : "pointer-events-none select-none opacity-40 grayscale",
                     )}
                   >
                     <td className="relative px-5 py-3.5">
-                      <span className="absolute left-0 top-0 h-full w-[2px] scale-y-0 bg-green-bright transition-transform group-hover:scale-y-100" aria-hidden />
+                      <span
+                        className="absolute left-0 top-0 h-full w-[2px] scale-y-0 bg-green-bright transition-transform group-hover:scale-y-100"
+                        aria-hidden
+                      />
                       <span className="flex items-center gap-3">
-                        <img src={v.img} alt="" className="h-8 w-8 border hairline-dark object-cover" />
-                        <span className="font-sans text-[14px] font-semibold uppercase tracking-[-0.01em] text-white">{v.name}</span>
+                        <img
+                          src={v.img}
+                          alt=""
+                          className={cn(
+                            "h-8 w-8 border hairline-dark object-cover",
+                            v.imgPlaceholder && "object-contain p-1 opacity-80",
+                          )}
+                        />
+                        <span className="font-sans text-[14px] font-semibold uppercase tracking-[-0.01em] text-white">
+                          {v.name}
+                        </span>
                       </span>
                     </td>
                     <td className="px-3 py-3.5">
                       <span
                         className={cn(
-                          "rounded-full border px-2.5 py-0.5 text-[10px] uppercase tracking-[0.08em]",
-                          live ? "border-green-bright/40 text-green-bright" : "border-warn/40 text-warn",
+                          "whitespace-nowrap rounded-full border px-2.5 py-0.5 text-[10px] uppercase tracking-[0.08em]",
+                          routed
+                            ? "border-green-bright/40 text-green-bright"
+                            : "border-white/20 text-white-60",
                         )}
                       >
-                        {v.status}
+                        {STATUS_LABEL[v.status]}
                       </span>
                     </td>
-                    <td className="px-3 py-3.5 text-right tabular-nums text-white">{live ? fmtUSD(v.price) : "-"}</td>
-                    <td className="px-3 py-3.5 text-right tabular-nums text-white">{live ? fmtNum(v.supply, 0) : "-"}</td>
-                    <td className="hidden px-3 py-3.5 text-right tabular-nums text-silver lg:table-cell">{live ? fmtCompactUSD(notional) : "-"}</td>
-                    <td className="hidden px-3 py-3.5 text-right tabular-nums text-silver xl:table-cell">{live ? fmtCompactUSD(notional * 1.0002) : "-"}</td>
-                    <td className="hidden px-3 py-3.5 md:table-cell">
-                      {live ? (
-                        <span className="flex items-center gap-2">
-                          <BufferMiniBar pct={v.bufferPct} />
-                          <span className="tabular-nums text-white-60">{v.bufferPct.toFixed(0)}%</span>
-                        </span>
+                    <td className="px-3 py-3.5 text-right tabular-nums text-white">
+                      {!routed ? (
+                        EM_DASH
+                      ) : v.priceUnavailable ? (
+                        <span className="text-warn">unavailable</span>
                       ) : (
-                        "-"
+                        fmtOrDash(v.price, (n) => fmtUSD(n))
                       )}
                     </td>
-                    <td className="px-3 py-3.5 text-right tabular-nums text-white">{live ? v.delta.toFixed(3) : "-"}</td>
+                    <Cell vault={v} value={v.supply} format={(n) => fmtNum(n, 2)} className="text-white" />
+                    <Cell
+                      vault={v}
+                      value={v.backing ? v.backing.notional : null}
+                      format={(n) => fmtCompactUSD(n)}
+                      className="hidden text-silver lg:table-cell"
+                    />
+                    <Cell
+                      vault={v}
+                      value={v.backing ? v.backing.margin : null}
+                      format={(n) => fmtCompactUSD(n)}
+                      className="hidden text-silver xl:table-cell"
+                    />
+                    <td className="hidden px-3 py-3.5 md:table-cell">
+                      {routed && v.buffer !== null ? (
+                        <span className="flex items-center gap-2">
+                          {v.bufferPct !== null && <BufferMiniBar pct={v.bufferPct} />}
+                          {/* Ratio of the held balance to bufferCapacity18 — NOT a
+                              "percent of target": see INTEGRATION-STAGE2.md. */}
+                          <span
+                            className="tabular-nums text-white-60"
+                            title="Buffer held (ERC-20 balance) over bufferCapacity18, both read on-chain."
+                          >
+                            {fmtCompactUSD(v.buffer)}
+                            {v.bufferPct !== null ? ` · ${v.bufferPct.toFixed(0)}% of capacity18` : ""}
+                          </span>
+                        </span>
+                      ) : (
+                        EM_DASH
+                      )}
+                    </td>
+                    {/* deltaBps is UNSIGNED on-chain: magnitude only, never a direction. */}
+                    <td className="px-3 py-3.5 text-right tabular-nums text-white">
+                      {routed ? fmtOrDash(v.deltaBps, (n) => `${n.toFixed(2)}% from target`) : EM_DASH}
+                    </td>
+                    <td className="hidden px-3 py-3.5 text-right lg:table-cell">
+                      {routed ? (
+                        <AgeLine
+                          ageSec={v.ageSec}
+                          stale={v.attestationStale}
+                          maxAgeSec={maxAttestationAgeSec}
+                          batch={v.backing ? v.backing.provenAtBatch : null}
+                        />
+                      ) : (
+                        <span className="text-white-60">{EM_DASH}</span>
+                      )}
+                    </td>
                     <td className="pr-4 text-white-60">
-                      {live && <ChevronRight size={14} className="transition-transform group-hover:translate-x-0.5 group-hover:text-green-bright" />}
+                      {routed && (
+                        <ChevronRight
+                          size={14}
+                          className="transition-transform group-hover:translate-x-0.5 group-hover:text-green-bright"
+                        />
+                      )}
                     </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+          {isLoading && (
+            <p className="border-t hairline-dark px-5 py-3 font-mono text-[10px] uppercase tracking-[0.08em] text-white-60">
+              Reading chain 46630…
+            </p>
+          )}
         </Panel>
       </Stagger>
 
-      {/* Recent activity strip */}
+      {/* Recent activity strip: nothing to show without an indexer */}
       <Stagger index={6}>
         <Panel className="mt-3">
           <div className="flex items-center justify-between border-b hairline-dark px-5 py-4">
@@ -278,28 +449,13 @@ export default function Overview() {
               View all <ArrowUpRight size={13} />
             </button>
           </div>
-          <ul>
-            <AnimatePresence initial={false}>
-              {flows.slice(0, 5).map((f) => (
-                <motion.li
-                  key={f.id}
-                  layout="position"
-                  initial={{ opacity: 0, y: -14 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.4 }}
-                  className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b hairline-dark px-5 py-3 font-mono text-[12px] last:border-b-0"
-                >
-                  <FlowTypeBadge type={f.type} className="w-[110px]" />
-                  <span className="w-[60px] text-white">{flowVaultLabel(f)}</span>
-                  <span className="tabular-nums text-silver">{fmtNum(f.amount, f.vault === "token" ? 2 : 4)}</span>
-                  <span className="tabular-nums text-white">{fmtUSD(f.usdc, 0)}</span>
-                  <span className="hidden tabular-nums text-white-60 md:inline">{f.feeBps > 0 ? `${f.feeBps} bps` : "0 bps"}</span>
-                  <span className="ml-auto text-white-60">{timeAgo(f.time)}</span>
-                  <span className="hidden text-white-60 sm:inline">{truncHash(f.tx)}</span>
-                </motion.li>
-              ))}
-            </AnimatePresence>
-          </ul>
+          {flowsUnavailable && (
+            <EmptyState
+              className="border-0"
+              title="No flow history yet: needs an indexer"
+              detail="Receipt ids are not enumerable on-chain and there is no receiptsOf(user); a flow list can only be built from indexed events. None are indexed yet."
+            />
+          )}
         </Panel>
       </Stagger>
     </div>

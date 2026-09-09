@@ -1,4 +1,45 @@
-/** Formatting + mock-data helpers for the dashboard. */
+/** Formatting helpers for the dashboard. */
+
+/** What a missing figure looks like. Never a zero, never a placeholder value. */
+export const EM_DASH = "—";
+
+/**
+ * The only way a number should reach the screen.
+ *
+ * Every figure on the live model is nullable, because plenty of them have no on-chain
+ * source and three of the five vaults have no contracts at all. Passing the value through
+ * here means an absent figure renders as an em-dash instead of a confident `$0.00`.
+ */
+export function fmtOrDash(value: number | null | undefined, format: (n: number) => string): string {
+  return value === null || value === undefined ? EM_DASH : format(value);
+}
+
+/**
+ * Seconds → an age phrase. Used for `ageSec`, which must be on screen wherever backing
+ * is: a solvency figure with no age is the claim this project spent the most effort not
+ * making.
+ */
+export function fmtAge(sec: number | null | undefined): string {
+  if (sec === null || sec === undefined) return EM_DASH;
+  if (sec < 0) return EM_DASH;
+  if (sec < 90) return `${Math.round(sec)}s ago`;
+  const m = Math.floor(sec / 60);
+  if (m < 60) return `${m}m ${Math.round(sec % 60)}s ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m ago`;
+  return `${Math.floor(h / 24)}d ${h % 24}h ago`;
+}
+
+/** Seconds → a countdown, for the faucet cooldown. */
+export function fmtCountdown(sec: number): string {
+  if (sec <= 0) return "now";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m`;
+  if (m > 0) return `${m}m ${String(s).padStart(2, "0")}s`;
+  return `${s}s`;
+}
 
 export function fmtNum(n: number, decimals = 2): string {
   return n.toLocaleString("en-US", {
@@ -43,14 +84,7 @@ export function randHash(rand: () => number = Math.random): string {
   return out;
 }
 
-/** Deterministic PRNG so seeded series are stable between reloads. */
-export function mulberry32(seed: number): () => number {
-  let a = seed;
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+/* `mulberry32` (a seeded PRNG) used to live here. It existed only to generate the mock
+ * solvency curves, funding bars and flow list, all of which are now read from chain or
+ * rendered as an honest empty state, so it is gone. If a future series generator is
+ * wanted for tests, it does not belong in the dashboard's formatting module. */

@@ -64,10 +64,12 @@ import type { FundingBar, SeriesPoint, Vault } from "@/pages/dashboard/store";
 /**
  * The vaults that actually exist in this deployment.
  *
- * NOTE the collision with `store.tsx`, which declares
- * `type VaultId = "utsla" | "unvda" | "uspx" | "uqqq"`. Only uTSLA exists in both.
- * `unvda`, `uspx` and `uqqq` are NOT deployed, and the deployed uSPY is not in the
- * store's union. Resolving that union is stage 2's job — `store.tsx` is untouched here.
+ * This is the subset of the store's `VaultId` that has contracts. The store's union now
+ * reads `"utsla" | "uspy" | "unvda" | "uspx" | "uqqq"`: `uspy` was added because it is
+ * deployed (market 26), and `unvda` / `uspx` / `uqqq` were kept because the UI still shows
+ * them — greyed, non-interactive and carrying no figures, since there is no vault, no
+ * certificate token and no oracle for them on chain 46630. Anything crossing from the UI
+ * into this layer goes through `isChainVaultId` in the store.
  */
 export type ChainVaultId = "utsla" | "uspy";
 
@@ -76,7 +78,7 @@ export const CHAIN_VAULT_IDS: readonly ChainVaultId[] = ["utsla", "uspy"];
 /** Past this age the vault reports zero capacity and minting is off. */
 export const MAX_ATTESTATION_AGE_SEC = 300;
 
-interface MirrorMeta {
+export interface MirrorMeta {
   id: ChainVaultId;
   name: string;
   full: string;
@@ -111,6 +113,18 @@ function mirrorFor(id: ChainVaultId): Mirror {
   const mirror = MIRRORS.find((m) => MIRROR_META[m.symbol].id === id);
   if (!mirror) throw new Error(`No deployed mirror for vault id "${id}"`);
   return mirror;
+}
+
+/**
+ * Presentation metadata for a deployed mirror, by vault id.
+ *
+ * Exported so that a consumer rendering a routed vault BEFORE the first multicall
+ * returns (a loading placeholder) does not invent its own name, title or plate for it.
+ * This file stays the single source of truth for those, including `imgPlaceholder`:
+ * there is no `cert-plate-uspy.jpg`, and uSPY must not borrow the uSPX plate.
+ */
+export function chainVaultMeta(id: ChainVaultId): MirrorMeta {
+  return MIRROR_META[mirrorFor(id).symbol];
 }
 
 /* ─────────────────────────────────────────────────────────────── returned shapes */
@@ -151,6 +165,21 @@ export interface LiveVault extends Omit<Vault, "id" | "price"> {
   oracleAddress: `0x${string}`;
   marketIndex: number;
   imgPlaceholder: boolean;
+
+  /* ------------------------------------------------------------- non-null figures */
+  /**
+   * Every figure on the store's `Vault` is nullable, because three of the five ids in
+   * `VaultId` have no contracts at all and must render nothing. A DEPLOYED mirror always
+   * has these, so they are narrowed back to `number` here — `price` stays the one genuine
+   * exception, because `oracle.px()` really does revert.
+   */
+  supply: number;
+  buffer: number;
+  bufferPct: number;
+  /** `1 + deltaBps/10_000`. Render magnitude only — see `deltaBps`. */
+  delta: number;
+  change24h: number;
+  funding8h: number;
 
   /* -------------------------------------------------------------------- price */
   /**

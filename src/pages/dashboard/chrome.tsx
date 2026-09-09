@@ -22,8 +22,25 @@ const NAV_ITEMS: { id: ViewId; label: string; short: string; icon: LucideIcon }[
 /* ---------------------------------------------------------------- top bar */
 
 export function TopBar() {
-  const { block, totals } = useDashboard();
-  const healthy = totals.ratio >= 100;
+  const {
+    block,
+    blockKnown,
+    totals,
+    isError,
+    wrongNetwork,
+    switchToUseCert,
+    isSwitchingChain,
+    maxAttestationAgeSec,
+  } = useDashboard();
+  // No data is not "healthy" and it is not "degraded" either — it is unknown, and the
+  // chip says so rather than asserting either one.
+  const status: "unknown" | "healthy" | "degraded" = isError
+    ? "degraded"
+    : totals === null
+      ? "unknown"
+      : totals.ratio >= 100 && !totals.anyStale && !totals.anyPriceUnavailable
+        ? "healthy"
+        : "degraded";
   return (
     <header className="fixed left-0 right-0 top-0 z-40 h-16 border-b hairline-dark bg-abyss/85 backdrop-blur-[12px]">
       <div className="relative grid h-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 md:px-6">
@@ -39,13 +56,29 @@ export function TopBar() {
           <span
             className={cn(
               "hidden shrink-0 items-center gap-2 rounded-full border px-3 py-1 font-mono text-[10px] uppercase tracking-[0.08em] md:flex",
-              healthy ? "border-green-bright/40 text-green-bright" : "border-warn/40 text-warn",
+              status === "healthy"
+                ? "border-green-bright/40 text-green-bright"
+                : status === "degraded"
+                  ? "border-warn/40 text-warn"
+                  : "border-white/20 text-white-60",
             )}
           >
-            <PulseDot /> {healthy ? "All systems operational" : "Degraded"}
+            <PulseDot />{" "}
+            {status === "healthy"
+              ? "Attested backing holds"
+              : status === "degraded"
+                ? "Degraded · check age and oracle"
+                : "Reading chain…"}
           </span>
+          {/* Margin/notional, both attester-relayed, with the age of that attestation. A
+              backing figure with no age is the claim this project spent the most effort
+              not making. */}
           <span className="hidden truncate font-mono text-[10px] uppercase tracking-[0.08em] text-white-60 xl:block">
-            Backing {totals.ratio.toFixed(2)}% · oracle 3s
+            {totals === null
+              ? "Margin / notional —"
+              : `Margin / notional ${totals.ratio.toFixed(2)}% (attested) · proven ${Math.round(
+                  totals.worstAgeSec,
+                )}s ago${totals.anyStale ? ` · stale >${maxAttestationAgeSec}s` : ""}`}
           </span>
         </div>
 
@@ -53,15 +86,28 @@ export function TopBar() {
         <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-2 rounded-full border hairline-dark bg-section-deep-2 px-4 py-1.5 lg:flex">
           <PulseDot />
           <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
-            Robinhood Chain · Mainnet
+            Robinhood Chain · Testnet 46630
           </span>
+          {wrongNetwork && (
+            <button
+              type="button"
+              onClick={switchToUseCert}
+              disabled={isSwitchingChain}
+              className="border border-warn/40 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.08em] text-warn transition-colors hover:bg-warn/10 disabled:opacity-50"
+            >
+              {isSwitchingChain ? "Switching…" : "Wrong network · switch"}
+            </button>
+          )}
         </div>
 
         {/* Right: search + block ticker + wallet */}
         <div className="flex shrink-0 items-center gap-2 md:gap-4">
           <CommandTrigger className="hidden sm:flex" />
           <span className="hidden font-mono text-[11px] uppercase tracking-[0.06em] text-silver md:block">
-            BLOCK <span className="tabular-nums text-white">{block.toLocaleString("en-US")}</span>
+            BLOCK{" "}
+            <span className="tabular-nums text-white">
+              {blockKnown ? block.toLocaleString("en-US") : "—"}
+            </span>
           </span>
           <WalletButton />
         </div>

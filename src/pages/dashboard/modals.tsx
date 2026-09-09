@@ -1,11 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Check, Copy, ExternalLink, Loader2, LogOut, X } from "lucide-react";
+import { useConnect, useConnectors } from "wagmi";
 import { cn } from "@/lib/utils";
 import { useDashboard } from "./store";
 import { truncHash } from "./format";
 import { MicroLabel } from "./ui";
+import { explorerAddressUrl } from "@/chain/config";
+import { decodeRevert } from "@/chain/useActions";
 
 /* ------------------------------------------------------------- modal shell */
 
@@ -65,50 +68,66 @@ export function ModalShell({
 
 /* ------------------------------------------------------------ wallet modal */
 
-const WALLETS = [
-  { name: "Robinhood Wallet", note: "Native on Robinhood Chain" },
-  { name: "MetaMask", note: "Browser extension" },
-  { name: "WalletConnect", note: "Scan with any mobile wallet" },
-];
-
+/**
+ * Real wallet connection.
+ *
+ * The list is `useConnectors()` — whatever the wagmi config actually declares, which here
+ * is the injected connector and nothing else. The previous hardcoded three (Robinhood
+ * Wallet / MetaMask / WalletConnect) offered choices this build cannot honour, and
+ * "any wallet connects the same mock account" is no longer true: this connects a real
+ * wallet to chain 46630.
+ */
 export function WalletModal() {
-  const { walletModalOpen, setWalletModalOpen, connect } = useDashboard();
-  const [connecting, setConnecting] = useState<string | null>(null);
-  const timer = useRef(0);
+  const { walletModalOpen, setWalletModalOpen, chainId } = useDashboard();
+  const connectors = useConnectors();
+  const { mutateAsync: connectAsync, isPending } = useConnect();
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
 
   const close = () => {
-    window.clearTimeout(timer.current);
-    setConnecting(null);
+    setPendingId(null);
+    setFailure(null);
     setWalletModalOpen(false);
   };
 
-  const choose = (name: string) => {
-    setConnecting(name);
-    timer.current = window.setTimeout(() => {
-      connect();
-      setConnecting(null);
+  const choose = async (connector: (typeof connectors)[number]) => {
+    setPendingId(connector.uid);
+    setFailure(null);
+    try {
+      await connectAsync({ connector, chainId });
       setWalletModalOpen(false);
-    }, 1200);
+    } catch (err) {
+      setFailure(decodeRevert(err).message);
+    } finally {
+      setPendingId(null);
+    }
   };
 
   return (
     <ModalShell open={walletModalOpen} onClose={close}>
       <MicroLabel>Connect Wallet</MicroLabel>
-      <h3 className="mt-3 text-[28px] font-semibold uppercase leading-none tracking-[-0.03em]">Choose a wallet</h3>
+      <h3 className="mt-3 text-[28px] font-semibold uppercase leading-none tracking-[-0.03em]">
+        Choose a wallet
+      </h3>
       <div className="mt-6 flex flex-col gap-px border hairline-dark bg-hairline-dark">
-        {WALLETS.map((w) => (
+        {connectors.length === 0 && (
+          <p className="bg-[#0d0f0d] px-5 py-4 font-mono text-[11px] leading-[1.6] text-white-60">
+            No browser wallet detected. Install one that can add a custom network, then reload.
+          </p>
+        )}
+        {connectors.map((c) => (
           <button
-            key={w.name}
+            key={c.uid}
             type="button"
-            disabled={connecting !== null}
-            onClick={() => choose(w.name)}
+            disabled={isPending}
+            onClick={() => void choose(c)}
             className="group flex items-center justify-between bg-[#0d0f0d] px-5 py-4 text-left transition-colors hover:bg-section-deep-2 disabled:opacity-60"
           >
             <span>
-              <span className="block text-[15px] font-medium text-white">{w.name}</span>
-              <span className="block font-mono text-[11px] text-white-60">{w.note}</span>
+              <span className="block text-[15px] font-medium text-white">{c.name}</span>
+              <span className="block font-mono text-[11px] text-white-60">{c.type}</span>
             </span>
-            {connecting === w.name ? (
+            {pendingId === c.uid ? (
               <span className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.08em] text-green-bright">
                 <Loader2 size={14} className="animate-spin" /> Connecting…
               </span>
@@ -118,8 +137,10 @@ export function WalletModal() {
           </button>
         ))}
       </div>
+      {failure && <p className="mt-4 font-mono text-[11px] leading-[1.6] text-warn">{failure}</p>}
       <p className="mt-5 font-mono text-[10px] uppercase leading-[1.6] tracking-[0.06em] text-white-60">
-        Demo environment: any wallet connects the same mock account on Robinhood Chain.
+        Chain 46630 (Robinhood Chain testnet) only. Mainnet is deliberately not offered: that chain id
+        has never been verified from the contracts repo.
       </p>
     </ModalShell>
   );
@@ -128,18 +149,19 @@ export function WalletModal() {
 /* ------------------------------------------------------ connected pill + menu */
 
 export function WalletButton() {
-  const { connected, address, setWalletModalOpen, disconnect } = useDashboard();
+  const { connected, address, setWalletModalOpen, disconnect, isConnecting, wrongNetwork } =
+    useDashboard();
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  if (!connected) {
+  if (!connected || !address) {
     return (
       <button
         type="button"
         onClick={() => setWalletModalOpen(true)}
         className="bg-green-bright px-4 py-2.5 font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-ink transition-all hover:bg-[#b8d4b4] active:scale-[0.98] md:px-6"
       >
-        Connect Wallet
+        {isConnecting ? "Connecting…" : "Connect Wallet"}
       </button>
     );
   }
@@ -161,7 +183,9 @@ export function WalletButton() {
         onClick={() => setOpen((o) => !o)}
         className="flex items-center gap-2 rounded-full border hairline-dark bg-section-deep-2 px-4 py-2 font-mono text-[12px] text-white"
       >
-        <span className="h-1.5 w-1.5 rounded-full bg-green-bright" />
+        <span
+          className={cn("h-1.5 w-1.5 rounded-full", wrongNetwork ? "bg-warn" : "bg-green-bright")}
+        />
         {truncHash(address)}
       </button>
       {open && (
@@ -177,7 +201,7 @@ export function WalletButton() {
               {copied ? "Copied" : "Copy address"}
             </button>
             <a
-              href={`https://explorer.robinhood.com/address/${address}`}
+              href={explorerAddressUrl(address)}
               target="_blank"
               rel="noreferrer"
               className="flex w-full items-center gap-3 px-4 py-2.5 font-mono text-[12px] uppercase tracking-[0.06em] text-white-60 transition-colors hover:bg-section-deep-2 hover:text-white"

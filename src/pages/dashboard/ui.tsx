@@ -297,6 +297,120 @@ export function DeltaLine({ value, suffix, invert }: { value: number; suffix?: s
   );
 }
 
+/* ------------------------------------------------------------ honesty bits */
+
+/**
+ * What a panel shows when the data does not exist.
+ *
+ * Used for the 60-point solvency series, the 48 funding bars, the flow list and the 24h
+ * change — none of which have an on-chain source. Interpolating them, repeating the
+ * current value, or keeping the mock curve would make the dashboard lie about the one
+ * thing it exists to prove.
+ */
+export function EmptyState({
+  title,
+  detail,
+  height,
+  className,
+}: {
+  title: string;
+  detail?: ReactNode;
+  height?: number;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "flex flex-col items-center justify-center gap-2 border border-dashed border-white/10 px-6 py-10 text-center",
+        className,
+      )}
+      style={height ? { minHeight: height } : undefined}
+    >
+      <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">{title}</p>
+      {detail && (
+        <p className="max-w-[52ch] font-mono text-[10px] leading-[1.7] tracking-[0.04em] text-white-60/70">
+          {detail}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The age of the attestation a backing figure rests on.
+ *
+ * There is no code path in the vault that returns backing without also returning its age,
+ * and this component is why: wherever backing is on screen, so is this. Past
+ * `maxAgeSec` (300 s) capacity is zero and minting is off, which is the single most likely
+ * reason a healthy-looking deployment refuses to mint.
+ */
+export function AgeLine({
+  ageSec,
+  stale,
+  maxAgeSec,
+  batch,
+  className,
+}: {
+  ageSec: number | null;
+  stale: boolean;
+  maxAgeSec: number;
+  batch?: number | null;
+  className?: string;
+}) {
+  const age =
+    ageSec === null
+      ? "age unknown"
+      : ageSec < 90
+        ? `proven ${Math.round(ageSec)}s ago`
+        : `proven ${Math.floor(ageSec / 60)}m ${Math.round(ageSec % 60)}s ago`;
+  return (
+    <span
+      className={cn(
+        "font-mono text-[10px] uppercase tracking-[0.06em]",
+        stale ? "text-warn" : "text-white-60",
+        className,
+      )}
+    >
+      {ageSec === null ? age : stale ? `${age} · attestation stale (>${maxAgeSec}s) · minting off` : age}
+      {batch !== undefined && batch !== null && ageSec !== null ? ` · batch ${batch}` : ""}
+    </span>
+  );
+}
+
+/**
+ * Marks a figure that is an attester's claim rather than a measured balance.
+ *
+ * `accrual18` is relayed by an attester and nothing on-chain verifies it. It shares a
+ * screen with `buffer18`, which is the vault's own ERC-20 balance, and the two were one
+ * field once — published as "the buffer", measured drifting 100,000.01 against 91,028.00
+ * actually held. Different visual register, explicit label.
+ */
+export function UnverifiedTag({ className }: { className?: string }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 border border-warn/40 px-1.5 py-px font-mono text-[9px] uppercase tracking-[0.08em] text-warn",
+        className,
+      )}
+      title="Attester-relayed claim. Nothing on-chain verifies this figure, and it is not collateral the vault holds."
+    >
+      Unverified claim
+    </span>
+  );
+}
+
+/** "price unavailable / minting paused" — a designed oracle state, never a $0.00. */
+export function PriceUnavailable({ className }: { className?: string }) {
+  return (
+    <span
+      className={cn("font-mono text-[11px] uppercase tracking-[0.06em] text-warn", className)}
+      title="oracle.px() reverted: the feed is stale, deviant or badly fed. Minting is paused; redemption still works."
+    >
+      Price unavailable · minting paused
+    </span>
+  );
+}
+
 /* --------------------------------------------------------- stagger helper */
 
 export function Stagger({ index, children, className }: { index: number; children: ReactNode; className?: string }) {

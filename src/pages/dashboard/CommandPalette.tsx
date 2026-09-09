@@ -208,7 +208,7 @@ export default function CommandPalette() {
 
               <div className="flex items-center justify-between gap-3 border-t hairline-dark px-4 py-2.5 font-mono text-[10px] uppercase tracking-[0.08em] text-white-60/70">
                 <span>↑ ↓ to move · ↵ to run</span>
-                <span className="hidden sm:block">Robinhood Chain · Mainnet</span>
+                <span className="hidden sm:block">Robinhood Chain · Testnet 46630</span>
               </div>
             </motion.div>
           </motion.div>

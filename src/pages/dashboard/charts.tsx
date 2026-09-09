@@ -1,3 +1,12 @@
+/**
+ * Canvas charts for a solvency series and a funding-bar series.
+ *
+ * NOTE: both are currently unmounted. No view function on the UseCert contracts returns a
+ * time series, so there is no 60-point solvency curve and no 48-bar funding history to
+ * draw; the views render an honest empty state instead of a curve derived from one point.
+ * These are kept, unchanged, for whenever an event indexer exists to feed them — do not
+ * wire them to interpolated or repeated values in the meantime.
+ */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FundingBar, SeriesPoint, Timeframe } from "./store";
 import { fmtCompactUSD, fmtUSD } from "./format";
