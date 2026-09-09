@@ -670,6 +670,88 @@ Without these the testnet vault stops minting within ~15 minutes of deployment, 
 
 ---
 
+## Task 13: close `_readFeed`'s second overflow, the sibling of Task 3's
+
+**Files:** `src/CertOracle.sol`, `test/CertOracle.t.sol`, `docs/DEPLOYMENT-CHECKLIST.md`
+
+Self-reported by Tasks 2+3 and then **confirmed by execution** in the review. This is the same class
+as the external audit's Finding 1 ("make every quantity-times-price product a total function"),
+which took two passes to close last time — so it is being scoped explicitly rather than left.
+
+### The exposure
+
+`src/CertOracle.sol:315`:
+
+```solidity
+px18 = d <= 18 ? uint256(answer) * (10 ** (18 - d)) : uint256(answer) / (10 ** (d - 18));
+```
+
+Task 3's new `d > 36` bound at `:314` guards the **exponent**. The **product** is unguarded.
+`_tryFeed` guards both (`:376-379`, added in the CRITICAL B re-audit) — `_readFeed` never did.
+
+**Reachable for `d` in 0..17**, where the overflow threshold is `(2**256 - 1) / 10**(18-d)`:
+~1.1579e59 at `d = 0`, ~1.1579e67 at `d = 8` (the Chainlink standard, and what every live RH feed
+reports), ~1.1579e76 at `d = 17` — all below `int256` max (~5.789e76), so every `d <= 17` has a
+reachable range. **Unreachable for `d` in 18..36**: at `d == 18` the multiplier is 1, and above it
+the branch divides. So Task 3's guard and this one are **disjoint, not overlapping**.
+
+Confirmed by running it: a feed at `decimals() = 0, answer = 2e59` makes `px()` revert
+`panic 0x11` — an anonymous panic on both mint paths — and `new CertOracle(...)` against
+`MockAggregatorV3(0, 2e59)` **panics at deploy time** too, the same second-order consequence Task 3
+fixed for the decimals case.
+
+**Law 2 is unaffected, and this was verified rather than assumed:** in that exact state
+`pxUnguarded()` returns the last-good snapshot, because `_tryFeed:378` returns its failure tuple and
+`pxUnguarded:334-336` falls back. Every `src/` redemption reader uses `pxUnguarded()` only
+(`src/CertVault.sol:989, 1052, 1265, 1408, 1502`); `px()` is reached at `:599` and `:654` alone,
+both mint. So this is a **mint-path availability and error-quality defect**, exactly like Task 3's.
+
+### The fix — verified to compile and to leave the suite unchanged
+
+One error declaration plus one functional line, keeping the ternary intact:
+
+```solidity
+// beside CertOracle_FeedDecimalsOutOfRange:
+error CertOracle_AnswerNotNormalisable();
+
+// in _readFeed, immediately after the d > 36 bound:
+if (d <= 18 && uint256(answer) > type(uint256).max / (10 ** (18 - d))) {
+    revert CertOracle_AnswerNotNormalisable();
+}
+```
+
+Three specification notes, all load-bearing:
+
+1. **A new error is unavoidable — there is nothing to copy.** `_tryFeed` handles this condition by
+   *returning its failure tuple*, not by reverting, so unlike Task 3's `d > 36` there is no existing
+   name to reuse. **Do not reuse `CertOracle_FeedDecimalsOutOfRange`**: the conditions are disjoint
+   (`d <= 18` with a huge answer, versus `d > 36`) and a caller must be able to tell "the feed's
+   scale is absurd" from "the feed's print is unrepresentable."
+2. **Guard the product, not a magnitude.** Use `type(uint256).max / scale`, mirroring `_tryFeed`'s
+   comment at `:369-375`, so the bound tracks `d` rather than hard-coding the `d = 0` threshold.
+3. **Two tests plus a boundary assertion, and one doc row.** A `px()` mirror of the existing
+   `test_pxUnguardedSurvivesAnAnswerTooLargeToNormalise`, asserting the named error **and** that
+   `pxUnguarded()` still returns last-good in the same state (Law 2 restated); a constructor case
+   (`MockAggregatorV3(0, 2e59)` refused by name, matching `test_readFeedRevertsNamedOnAbsurdDecimals`);
+   and one assertion that `d == 18` is safe, since that is the exact edge of the new condition.
+
+### Also fix, because it is the same row's sibling
+
+`docs/DEPLOYMENT-CHECKLIST.md` §2's **"Feed answer magnitude"** row still claims "Normalisation is
+guarded, so an unrepresentable answer makes the feed unusable rather than panicking," with `—` in the
+Violation column. That is true of `_tryFeed` and **false of `_readFeed`**. It is a pre-existing
+inaccuracy, but it is the direct sibling of the row Task 3 just marked RESOLVED, and after this task
+it can finally make the same claim honestly.
+
+### Also add one sentence to the `singleSource` checklist row
+
+With Task 2's loosening, `mintAllowed() == true` while `markPx18 == 0` is reachable for the first
+time. Any monitor carrying the implicit invariant "minting open implies a mark is attested" is wrong
+in single-source mode. The new checklist row covers the `basisBps()` side well; spell this pairing
+out in one sentence.
+
+---
+
 ## Deferred to a second wave, after the deployment is rolling
 
 These raise simulator fidelity but are not required for a functional testnet, and each is
