@@ -297,8 +297,49 @@ design mainnet would reject:
 4. `LighterSim`'s constructor must take the IMF and reject anything below the floor, so a
    misconfigured sim cannot be deployed at all.
 
+### Added by the Task 4 review — routed here, and this is the most urgent item in the plan
+
+**C1 — the deployed simulator is an unconditional drain, and the operator gating above does NOT
+close it.** `LighterCore.withdraw(accountIndex, ...)` gates only on `accountIndex == 0` and never
+binds `msg.sender`; it then credits `_pending[msg.sender]` out of a single global `marginBalance`.
+So any address passes a literal non-zero index, takes `min(baseAmount, equity())` — every
+depositor's collateral — and drains it via `withdrawPendingBalance`. No deposit, no registration,
+one transaction. `createOrder` and `cancelAllOrders` share the unbound gate, so any address can also
+queue orders onto the shared position and `delete _queue` the vault's hedge.
+
+This is **not a regression** — it is identical in the pre-refactor mock — but Task 4 is what made it
+deployable, and it is a **fidelity** defect as much as a safety one: the real venue derives the
+acting account from `msg.sender` via `validateAndGetAccountIndexFromAddress`. The simulator
+diverging from that in the *permissive* direction is a Global Constraint 5 violation.
+
+7. **Bind every account-scoped entry point to its caller.** In `LighterCore`, require
+   `accountIndex == addressToAccountIndex[msg.sender]` on `withdraw`, `createOrder` and
+   `cancelAllOrders`, reverting a named `LighterCore_AccountNotCaller()`. Make
+   `cancelAllOrders(accountIndex)` stop ignoring its argument. This is venue fidelity, so it belongs
+   on the core rather than on `LighterSim`, and it must apply to `MockLighter` too. Expect existing
+   tests to need a `prank` — list every one you touch and why.
+8. **Add the fail-closed mark guard the refactor should have carried (review finding I1).** The
+   reviewer established that a `LighterSim`-only override reverting `MarkPriceUnset()` is
+   behaviour-neutral for all existing tests, because `test/mocks/MockLighter.t.sol:39-58`
+   deliberately settles with no mark set — so the guard cannot go on the core, but it can go on
+   `LighterSim`. Item 3 above already requires this; the review confirms independently that it is
+   both necessary and free.
+
+**Why C2 is worse than first reported:** at `markPrice == 0`, `_applyFill` records
+`entryPrice = 0`, and `_pnl18` early-returns on `entry == 0`. So `unrealisedPnl()` is always 0 and
+`equity() == marginBalance` — **the entire mark-to-market layer is dead on the deployed artefact**,
+not merely the margin check. That layer exists because unmodelled PnL is precisely what hid the C1
+audit Critical. Until items 3 and 8 land, the deployed simulator sits in the exact epistemic state
+that produced that finding.
+
 ### Tests
 
+- [ ] `test_withdrawRejectsAnUnboundCaller` — **the C1 proof.** A stranger who never deposited calls
+      `withdraw` with a non-zero index and must revert `LighterCore_AccountNotCaller`. Assert the
+      simulator's collateral balance is unchanged. Then prove the drain existed: assert that the
+      same call *succeeded* before the fix by keeping a regression test that pins the new revert.
+- [ ] `test_createOrderRejectsAnUnboundCaller`, `test_cancelAllOrdersRejectsAnUnboundCaller`.
+- [ ] `test_cancelAllOrdersOnlyTouchesTheCallersQueue` — it currently ignores its argument entirely.
 - [ ] `test_setRequiredMarginBpsIsOwnerOnly` — a stranger reverts `LighterSim_OnlyOwner`.
 - [ ] `test_marginCannotGoBelowVenueFloor` — owner setting `4999` reverts; `5000` and `9000` succeed.
 - [ ] `test_constructorRejectsMarginBelowFloor`.
@@ -347,6 +388,21 @@ Some of the 256 passing tests will now need a `settleBatch()` between setup and 
 is the same evidence as the margin-enforcement change that broke 9 tests and proved the gap was
 real.** Update them minimally, and **list every changed test in your report with the reason**. Do
 not weaken an assertion to make it pass.
+
+### Added by the Task 4 review — finding I2, fix it while restructuring `withdraw`
+
+The `_fundPending()` divergence is conservative in *direction* but **fails late and mid-state**.
+When a gain-drawing withdrawal exceeds what the simulator can pay, `withdraw` currently **succeeds**
+— debiting `marginBalance`, rewriting `entryPrice` through `_realiseGain`, and crediting
+`_pending`/`_pendingTotal` — and only the later `withdrawPendingBalance` reverts on the token
+transfer. The result is a permanently unsweepable pending credit against books that have already
+moved, which on testnet presents as a vault wedged in `_sweepPending` forever: a genuinely
+confusing failure to debug.
+
+Since this task restructures `withdraw` into an enqueue-then-fulfil shape anyway, make the decision
+point fail closed: a request the simulator cannot fund must be refused, or consumed with nothing
+credited and nothing mutated, but never half-applied. Add a test asserting `marginBalance`,
+`entryPrice` and `_pendingTotal` are **all** unchanged after such a refusal.
 
 ### Tests
 
