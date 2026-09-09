@@ -59,6 +59,39 @@ import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 ///      `test_C2_theHatchIsOnTheDeployableFrontEndOnly` are untouched. The remaining 14 tests in
 ///      this file, including both Critical 1 gates, are untouched. The attack stays a valid
 ///      question even after the answer changed — this is that re-point, not a deletion.
+///
+///      RESEQUENCED 2026-09-09 (same day, second re-point — a RECORD of what was done, not a
+///      prediction of what might be). Task 6 made the simulator's venue ASYNCHRONOUS, matching
+///      `ZkLighter`: `withdraw` performs no balance check and credits nothing in the calling
+///      transaction, and `addressToAccountIndex` resolves only once the rollup executes the
+///      registering deposit. Eight of these fifteen tests then failed on `AccountIsNotRegistered()`
+///      or on an index that read 0 — every one because the FIXTURE deposited and immediately
+///      traded, which is no longer something the venue permits. Not one was a reopened Critical.
+///      See `.superpowers/sdd/2026-09-09-usecert-testnet-execution/task-6-report.md` §7, which
+///      disclosed the failures and proved this remediation in a scratch copy rather than editing
+///      this file, and `drainpoc-resequence-report.md` beside it, which is this change.
+///
+///      WHAT CHANGED, EXHAUSTIVELY: a `settleBatch()` inserted where the async model now requires
+///      one (`setUp`, the allowlisted withdraw path, the mock's free registration), and the three
+///      C2 tests that register a stranger mid-test REORDERED so that registration settles before
+///      the honest hedge is queued — with `test_C2_poisonOrderIsRejectedAndSettlementSurvives`'s
+///      expected `batchId` moving 1 → 3 to match. The reorder is not cosmetic: a registration batch
+///      run after the hedge was enqueued would FILL that hedge, and all three tests would then
+///      assert their closing position against an order that had already left the queue — green,
+///      and proving nothing. Each still proves exactly what it proved before.
+///
+///      WHAT DID NOT CHANGE: no assertion weakened, no `expectRevert` relaxed, no test deleted, no
+///      error selector swapped for a more convenient one. In particular
+///      `test_C1_aRegisteredAccountCannotNameAnothersIndex` still expects
+///      `LighterCore_AccountNotCaller`. The async window made it reach `AccountIsNotRegistered`
+///      first, and the remedy was to register the account properly so the test still exercises the
+///      caller binding it was written for — NOT to change which refusal it accepts.
+///
+///      This file is OURS: an earlier fix round wrote it at the operator's instruction, and this
+///      header has always anticipated being re-pointed when the underlying behaviour legitimately
+///      changes. That is why re-pointing it is legitimate where `test/AuditPoC.t.sol` and
+///      `test/AttackSuite.t.sol` — the external auditor's files — are never edited by the audited
+///      party, whatever they now report.
 contract DrainPoCTest is Test {
     uint16 constant ASSET_IDX = 3;
     uint8 constant SIZE_DECIMALS = 4;
@@ -100,6 +133,11 @@ contract DrainPoCTest is Test {
         vm.prank(depositorB);
         sim.deposit(depositorB, ASSET_IDX, 0, 400_000e6);
 
+        // ASYNC RESEQUENCE 2026-09-09 (see the file header). Registration resolves when the
+        // rollup executes the registering deposit, so both indices read 0 until a batch runs.
+        // The batch is empty of orders — it only closes the registration window the fixture's
+        // deposits opened.
+        sim.settleBatch();
         assertEq(usdgSim.balanceOf(address(sim)), 1_000_000e6, "fixture");
     }
 
@@ -182,6 +220,10 @@ contract DrainPoCTest is Test {
 
         vm.prank(depositorA);
         sim.withdraw(aIdx, ASSET_IDX, 0, 100e6);
+        // ASYNC RESEQUENCE 2026-09-09: `withdraw` enqueues a priority request and credits
+        // nothing in the calling transaction, so the pending balance the happy path is measured
+        // by appears only once a batch executes the request. The amount asserted is unchanged.
+        sim.settleBatch();
         assertEq(sim.getPendingBalance(depositorA, ASSET_IDX), 100e6, "A's own withdraw broke");
     }
 
@@ -227,6 +269,9 @@ contract DrainPoCTest is Test {
         usdgMock.mint(address(this), 1_000e6);
         usdgMock.approve(address(mockL), type(uint256).max);
         mockL.deposit(stranger, ASSET_IDX, 0, 1_000e6);
+        // ASYNC RESEQUENCE 2026-09-09: the deferral is on `LighterCore`, so the mock inherits it.
+        // Freely, on the mock, still means "with no allowlist" — not "in the same transaction".
+        mockL.settleBatch();
         assertGt(mockL.addressToAccountIndex(stranger), 0, "the mock stopped registering freely");
     }
 
@@ -253,17 +298,27 @@ contract DrainPoCTest is Test {
         sim.setMarkPrice(MARKET, 100e18);
         sim.setDepositorAllowed(stranger, true);
 
-        uint48 aIdx = sim.addressToAccountIndex(depositorA);
-        vm.prank(depositorA);
-        sim.createOrder(aIdx, MARKET, 100, 10_000, 0, 1); // the vault's legitimate hedge, queued first
-
+        // ASYNC RESEQUENCE 2026-09-09 — a genuine REORDER, not just an inserted batch. The
+        // attacker's registration must be settled BEFORE the hedge is queued: a registration
+        // batch run after the hedge was enqueued would fill that hedge, and the batch under test
+        // would then have no honest order left to survive alongside the rejection. Registering
+        // first keeps both orders in the same batch, which is the whole question this test asks.
+        // The prank is ended before `settleBatch` because it is owner-or-keeper gated on
+        // `LighterSim`. Order ids are unchanged: the hedge is still 1, the poison pill still 2.
         usdgSim.mint(stranger, 1e6);
         vm.startPrank(stranger);
         usdgSim.approve(address(sim), type(uint256).max);
         sim.deposit(stranger, ASSET_IDX, 0, 1e6); // $1, nowhere near enough
-        uint48 sIdx = sim.addressToAccountIndex(stranger);
-        sim.createOrder(sIdx, MARKET, type(uint48).max, 10_000, 0, 1); // the poison pill, queued second
         vm.stopPrank();
+        sim.settleBatch();
+
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        uint48 sIdx = sim.addressToAccountIndex(stranger);
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 100, 10_000, 0, 1); // the vault's legitimate hedge, queued first
+
+        vm.prank(stranger);
+        sim.createOrder(sIdx, MARKET, type(uint48).max, 10_000, 0, 1); // the poison pill, queued second
 
         // One call, no revert, from the owner: the refusal is on the record, naming the order and
         // the reason, instead of stopping the batch.
@@ -272,9 +327,11 @@ contract DrainPoCTest is Test {
         // was the QUEUE INDEX and is now the monotonic `Order.id`, and a `batchId` was appended.
         // The assertion is unchanged in substance and strictly sharper in fact: the poison order is
         // the SECOND order created in this test, so its id is 2 — where the old queue index of 1
-        // named a slot that compaction could later hand to a different order. This settlement is
-        // the venue's first, so `batchId` is 1.
-        emit LighterCore.OrderRejected(sIdx, MARKET, 2, 1, LighterCore.InsufficientMargin.selector);
+        // named a slot that compaction could later hand to a different order. ASYNC RESEQUENCE
+        // 2026-09-09: `batchId` is now 3, not 1 — the fixture's registration batch and the
+        // attacker's registration batch both run in front of this one. The batch NUMBER is not
+        // the property under test; that the rejection names its own batch is, and it still does.
+        emit LighterCore.OrderRejected(sIdx, MARKET, 2, 3, LighterCore.InsufficientMargin.selector);
         sim.settleBatch();
 
         // The vault's hedge filled at its full, requested size...
@@ -304,17 +361,26 @@ contract DrainPoCTest is Test {
         sim.setMarkPrice(MARKET, 100e18);
         sim.setDepositorAllowed(stranger, true);
 
-        uint48 aIdx = sim.addressToAccountIndex(depositorA);
-        vm.prank(depositorA);
-        sim.createOrder(aIdx, MARKET, 100, 10_000, 0, 1);
-
+        // ASYNC RESEQUENCE 2026-09-09 — REORDERED for the same reason as the poison-order test
+        // above, and here it is what keeps the assertion meaningful rather than merely green: if
+        // the attacker's registration batch ran after A's hedge was queued, that batch would fill
+        // the hedge, and `positionBase(MARKET) == 100` afterwards would hold even if the hatch had
+        // taken every order in the queue. Registering first leaves A's hedge STILL QUEUED when
+        // `ownerCancelAccountOrders(sIdx)` runs, which is the scoping this test exists to prove.
         usdgSim.mint(stranger, 1e6);
         vm.startPrank(stranger);
         usdgSim.approve(address(sim), type(uint256).max);
         sim.deposit(stranger, ASSET_IDX, 0, 1e6);
-        uint48 sIdx = sim.addressToAccountIndex(stranger);
-        sim.createOrder(sIdx, MARKET, type(uint48).max, 10_000, 0, 1);
         vm.stopPrank();
+        sim.settleBatch();
+
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        uint48 sIdx = sim.addressToAccountIndex(stranger);
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 100, 10_000, 0, 1);
+
+        vm.prank(stranger);
+        sim.createOrder(sIdx, MARKET, type(uint48).max, 10_000, 0, 1);
 
         sim.ownerCancelAccountOrders(sIdx);
         sim.settleBatch();
@@ -330,17 +396,24 @@ contract DrainPoCTest is Test {
         sim.setMarkPrice(MARKET, 100e18);
         sim.setDepositorAllowed(stranger, true);
 
-        uint48 aIdx = sim.addressToAccountIndex(depositorA);
-        vm.prank(depositorA);
-        sim.createOrder(aIdx, MARKET, 100, 10_000, 0, 1);
-
+        // ASYNC RESEQUENCE 2026-09-09 — REORDERED, same reason as the two tests above: the
+        // attacker registers and that batch settles BEFORE A's hedge is queued, so the hedge is
+        // still in the queue when the markless order jams it. Otherwise the jam would form over an
+        // already-filled hedge and "A's hedge did not survive the unjam" would prove nothing.
         usdgSim.mint(stranger, 1e6);
         vm.startPrank(stranger);
         usdgSim.approve(address(sim), type(uint256).max);
         sim.deposit(stranger, ASSET_IDX, 0, 1e6);
-        uint48 sIdx = sim.addressToAccountIndex(stranger);
-        sim.createOrder(sIdx, MARKET_NO_MARK, 1, 10_000, 0, 1);
         vm.stopPrank();
+        sim.settleBatch();
+
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        uint48 sIdx = sim.addressToAccountIndex(stranger);
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 100, 10_000, 0, 1);
+
+        vm.prank(stranger);
+        sim.createOrder(sIdx, MARKET_NO_MARK, 1, 10_000, 0, 1);
 
         vm.expectRevert(abi.encodeWithSelector(LighterSim.LighterSim_MarkPriceUnset.selector, MARKET_NO_MARK));
         sim.settleBatch();
