@@ -412,6 +412,39 @@ point fail closed: a request the simulator cannot fund must be refused, or consu
 credited and nothing mutated, but never half-applied. Add a test asserting `marginBalance`,
 `entryPrice` and `_pendingTotal` are **all** unchanged after such a refusal.
 
+> ### CORRECTION to the paragraph above, 2026-09-09 — read this before implementing it
+>
+> A first attempt at this task found, before it was interrupted, that the instruction as written
+> would break the protocol:
+>
+> > *"`recallMargin` **deliberately over-requests**, relying on `min(request, available)`; making
+> > withdrawals all-or-nothing would reintroduce the Law 2 breach the C1 wave closed."*
+>
+> That is correct, and it is a real contradiction in my own amendment. `CertVault.recallMargin`
+> asks the venue for **what the vault owes, not what it deposited** — that *was* the C1 audit fix,
+> and it is safe precisely because the venue fulfils `min(request, available)` and `_sweepPending`
+> reconciles whatever actually arrives. Measured at the time: a receipt owed 7,102.97 while
+> everything recallable totalled 3,559.54. Turn partial fulfilment into all-or-nothing and that
+> receipt becomes unpayable again — the sharpest Law 2 breach the audit found, reintroduced through
+> the simulator.
+>
+> **So the two cases must be separated, and only the second is "fail closed":**
+>
+> 1. **A request larger than the account's available equity — partial fulfilment. KEEP IT.** This
+>    is real venue behaviour (`withdraw` performs no balance check and the rollup fulfils what it
+>    can), Law 2 depends on it, and `CertVault` is written against it. Fulfil
+>    `min(request, available)`, credit that, and emit the shortfall so an observer can see what
+>    mainnet would hide.
+> 2. **The simulator's own token balance cannot cover a credit it has already decided to make** —
+>    the `_fundPending` case. *This* is what must fail closed, because today `withdraw` succeeds,
+>    debits margin, rewrites `entryPrice`, bumps the pending total, and only the later
+>    `withdrawPendingBalance` reverts on the transfer — leaving an unsweepable pending credit
+>    against books that have already moved. That is a bookkeeping half-application, not a partial
+>    fill, and it is the one the fail-closed assertions above belong to.
+>
+> Conflating the two is easy and the consequence is severe, which is why this correction is in the
+> plan rather than in a dispatch message.
+
 ### Tests
 
 - [ ] `test_withdrawCreditsOnlyAfterBatch` — pending balance stays 0 until `settleBatch`.
