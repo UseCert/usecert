@@ -211,7 +211,7 @@ export default function Overview() {
         <span className="flex items-center gap-2">
           <PulseDot /> Testnet 46630
         </span>
-        <span className="hidden md:block">Robinhood Chain©</span>
+        <span className="hidden md:block">Robinhood Chain</span>
         <span>Solvency proven per attestation · age published</span>
       </div>
 

@@ -12,7 +12,7 @@ export default function WhyNow() {
       <div className="relative z-[2] mx-auto max-w-[1440px] px-4 py-16 md:px-6 md:py-24 lg:px-12 lg:py-32">
         {/* Top stat row */}
         <div className="flex flex-wrap items-center justify-between gap-3 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
-          {["Q2 2026", "$213B RWA perp volume", "Robinhood Chain©"].map((s, i) => (
+          {["Q2 2026", "$213B RWA perp volume", "Robinhood Chain"].map((s, i) => (
             <motion.span
               key={s}
               initial={{ opacity: 0 }}

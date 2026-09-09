@@ -152,7 +152,21 @@ export default function Footer() {
             </Link>
           </div>
           <p>© 2026 UseCert®. All rights reserved.</p>
-          <p>Built on Robinhood Chain</p>
+          <p>Deployed on Robinhood Chain testnet (chain 46630)</p>
+          {/* Stated explicitly, and not only as courtesy. This site uses a third party's
+              network name, mirrors real equity tickers and asks visitors to connect a wallet -
+              which together is the shape automated wallet-security classifiers score as brand
+              impersonation. Naming the relationship is both accurate and the standard
+              mitigation. The bare name is nominative use; "Robinhood Chain©" previously
+              appeared here and on the dashboard, which asserted OUR copyright over someone
+              else's mark. */}
+          <p className="max-w-[640px] text-white-40">
+            UseCert is an independent project and is not affiliated with, endorsed by, or
+            sponsored by Robinhood Markets, Inc., nor by Tesla, State Street, NVIDIA, Invesco or
+            any issuer whose ticker a certificate mirrors. All trademarks are the property of
+            their respective owners. Certificates are not equity, confer no shareholder rights,
+            and this is a testnet deployment carrying no real-world value.
+          </p>
         </motion.div>
       </div>
     </footer>
