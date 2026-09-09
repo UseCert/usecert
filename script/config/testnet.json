@@ -1,0 +1,76 @@
+{
+  "_comment": [
+    "Robinhood Chain testnet (46630) deployment parameters for script/DeployTestnet.s.sol.",
+    "PROVENANCE: docs/TESTNET-PLAN.md §1 and §3, and the verified venue table in",
+    "docs/superpowers/plans/2026-09-09-usecert-testnet-execution.md 'Global Constraints'.",
+    "This file is DOCUMENTATION of the values the script compiles in as named constants.",
+    "The script does NOT read it: a Foundry script parsing JSON for safety-critical",
+    "immutables adds a failure mode (a silent key typo yields zero) for no benefit, and",
+    "every value here is immutable at the vault anyway. Keep the two in sync by review.",
+    "Addresses are NOT here - they are outputs, written to deployments/46630.json."
+  ],
+  "chainId": 46630,
+  "shared": {
+    "targetMarginBps": 9000,
+    "settleWindow": 86400,
+    "settleBandBps": 500,
+    "mintFeeBps": 10,
+    "redeemFeeBps": 10,
+    "instantCap18": "1000000000000000000000",
+    "stalenessSeconds": 900,
+    "pokeConfirmationSeconds": 300,
+    "deviationBps": 500,
+    "basisBandBps": 500,
+    "singleSource": false,
+    "depthBps": 1000,
+    "minDepthBps": 100,
+    "maxDepthBps": 3000,
+    "maxAttestationAgeSec": 300,
+    "maxAbsoluteCap18": "1000000000000000000000000000",
+    "venueWithdrawCap": "18446744073709551615",
+    "collateralDecimals": 6,
+    "collateralAssetIndex": 3,
+    "routeType": 0,
+    "simRequiredMarginBps": 5000,
+    "feedDecimals": 8
+  },
+  "assets": [
+    {
+      "symbol": "uTSLA",
+      "name": "UseCert TSLA",
+      "marketIndex": 16,
+      "priceDecimals": 2,
+      "sizeDecimals": 4,
+      "seedPrice18": "366620400000000000000",
+      "feedDescription": "RHTSLA / USD",
+      "absoluteCap18": "90000000000000000000000",
+      "openInterest18": "900000000000000000000000",
+      "bufferFloor18": "9000000000000000000000",
+      "bufferFeeOn18": "5400000000000000000000",
+      "bufferMintSlow18": "2700000000000000000000",
+      "bufferInsuranceDraw18": "0"
+    },
+    {
+      "symbol": "uSPY",
+      "name": "UseCert SPY",
+      "marketIndex": 26,
+      "priceDecimals": 2,
+      "sizeDecimals": 4,
+      "seedPrice18": "650000000000000000000",
+      "feedDescription": "RHSPY / USD",
+      "absoluteCap18": "5000000000000000000000000",
+      "openInterest18": "50000000000000000000000000",
+      "bufferFloor18": "500000000000000000000000",
+      "bufferFeeOn18": "300000000000000000000000",
+      "bufferMintSlow18": "150000000000000000000000",
+      "bufferInsuranceDraw18": "0"
+    }
+  ],
+  "env": {
+    "DEPLOYER_PK": "deploys the simulators, CapacityOracle, CertFactory and both vaults",
+    "GOV_PK": "deploys SolvencyRegistry and both CertOracles (checklist §4) and runs the governance phase",
+    "ATTESTER_PK": "runs attest() and setMarkPrice(); never deploys anything",
+    "COLLATERAL": "address of the deployed 6-decimal test collateral (Task 8 artefact)",
+    "TEST_FAUCET": "optional; address of the deployed TestFaucet (Task 8 artefact), recorded only"
+  }
+}

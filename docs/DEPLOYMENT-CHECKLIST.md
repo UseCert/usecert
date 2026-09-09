@@ -172,6 +172,13 @@ An explicit `_governance` constructor parameter is the C2 cleanup. The arity is 
 before the vault only because `registerVault` needs to exist to be called — the vault does not
 depend on the factory at all, and holds no reference to it.
 
+**The script is `script/DeployTestnet.s.sol`**, and it implements this sequence in this order with
+the three-sender split section 4 requires. Every read-back in section 9 is a `require()` in it, so a
+misconfiguration aborts the run before any transaction is broadcast — but **those `require`s observe
+the local simulation, never on-chain state**, because `forge script --broadcast` simulates the whole
+run first and only then sends what it collected. Section 9 is discharged on-chain by
+`script/VerifyTestnet.s.sol`. Both exist; neither replaces the other.
+
 1. Deploy `SolvencyRegistry` and `CertOracle` **from the multisig** (section 4).
 2. Deploy `CapacityOracle`, then `CertFactory`.
 3. **Deploy the vault directly** — `new CertVault(Deps{lighter, oracle, registry, capacity,
@@ -189,6 +196,28 @@ depend on the factory at all, and holds no reference to it.
 6. Transfer at least `10 ** collateralDecimals` of collateral to the vault (`seedBuffer` is the
    permissionless way) — `bootstrap()` deposits exactly that much as registering dust and will
    revert without it.
+6a. **`LighterSim.setDepositorAllowed(vault, true)` — the simulator's `owner`, and only on a
+   deployment against `src/sim/LighterSim.sol`.** **`bootstrap()` reverts
+   `LighterSim_DepositorNotAllowed(vault)` until this is done**, and the failure is otherwise
+   unattributable: the sequence stops at step 7 with a named error that appears in no other
+   document, on a step nothing else in this checklist mentions.
+
+   Task 5's fix round added this owner-gated registration allowlist to `LighterSim` as the interim
+   that closes the self-registration drain — Critical 1, where a zero-value `transferFrom` succeeds
+   with no allowance and no balance, so venue registration was *free* rather than merely open; and
+   Critical 2's entry condition, since an attacker needs an account before it can queue the
+   oversized order that made `settleBatch` revert for every account at once. On the single-vault
+   testnet deployment the approved set is `{vault}`, which reduces the account set to one and closes
+   both at once.
+
+   It **fails closed**, which is the right direction, and it is read back in section 9.
+
+   **This has no counterpart on the real venue, which registers anyone, and must never be read as
+   modelling one.** A mainnet deployment against Lighter itself has no such step and no such
+   mapping. Task 7 supersedes the allowlist with per-account collateral isolation — which makes an
+   open registration *harmless* rather than merely impossible — at which point this row and the
+   mapping should both be deleted rather than kept as defence in depth, because keeping it would
+   leave the simulator permanently diverged from the venue on who may hold an account.
 7. `bootstrap()` — one-time, permissionless, sets `bootstrapped`.
 8. **Wait for the rollup to execute the registering deposit.** `createOrder` reverts
    `AccountIsNotRegistered` until `addressToAccountIndex[vault]` is populated, so every mint reverts
@@ -253,6 +282,14 @@ Read these back on-chain before funding:
 - [ ] `vault.cfg()` decimals and indices match the venue's market config (section 3)
 - [ ] `vault.venueWithdrawCap() <= type(uint64).max`
 - [ ] `vault.lighterAccountIndex() != 0` (the registering deposit has executed)
+- [ ] **Simulator deployments only:** `LighterSim.depositorAllowed(vault)` is `true` (section 6,
+      step 6a) and `LighterSim.owner()` is the key you intend to run the batch advancer and the mark
+      updates with. Reaching a bootstrapped vault already implies the first — `bootstrap()` cannot
+      have succeeded otherwise — so read it back to catch the case where a later run reorders the
+      allowlist call after the bootstrap, and to confirm no *other* address was approved. Also check
+      `LighterSim.requiredMarginBps() >= VENUE_IMF_BPS` (5000, verified live across all 57 markets):
+      a simulator more permissive than the venue is how this project shipped three defects a green
+      suite could not see. **Not applicable to a mainnet deployment against Lighter itself**
 - [ ] `oracle.toTickPrice(oracle.px())` returns a sane tick, i.e. the live price is inside the
       uint32 domain at the configured `priceDecimals`
 - [ ] a `forceExit` of a dust position succeeds on the live deployment — this is Law 2 and it is

@@ -1,0 +1,1134 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity 0.8.24;
+
+import {Script} from "forge-std/Script.sol";
+import {console2} from "forge-std/console2.sol";
+import {CertVault} from "../src/CertVault.sol";
+import {Certificate} from "../src/Certificate.sol";
+import {CertOracle} from "../src/CertOracle.sol";
+import {CertFactory} from "../src/CertFactory.sol";
+import {SolvencyRegistry} from "../src/SolvencyRegistry.sol";
+import {CapacityOracle} from "../src/CapacityOracle.sol";
+import {LighterSim} from "../src/sim/LighterSim.sol";
+import {ReplayAggregator} from "../src/sim/ReplayAggregator.sol";
+import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "openzeppelin-contracts/token/ERC20/extensions/IERC20Metadata.sol";
+
+/// @title  UseCert C1 testnet deployment — Robinhood Chain testnet (46630)
+///
+/// @notice THE ONLY REPRODUCIBLE PATH TO A DEPLOYMENT. `CertFactory` cannot deploy a vault and no
+///         contract can: `CertVault`'s creation code is 25,743 B and any contract embedding it
+///         would have to fit that inside EIP-170's 24,576 B *runtime* ceiling. See
+///         `docs/DEPLOYMENT-CHECKLIST.md` §0. `CertFactory` is a registry now, and this script is
+///         what deploys the vaults it registers.
+///
+/// @dev    `docs/DEPLOYMENT-CHECKLIST.md` IS NORMATIVE. This script implements §4 (governance
+///         binding), §5 (governance parameters and their order), §6 (the bootstrap sequence) and
+///         §9 (the read-backs). Read it before changing a line here.
+///
+/// @dev    WHAT THE `require`s IN THIS SCRIPT DO AND DO NOT PROVE. `forge script --broadcast`
+///         simulates the entire run first and only then sends the transactions it collected. So
+///         every `require` below asserts the **local simulation's** state, never on-chain state.
+///         That is genuinely valuable — a misconfiguration aborts the run before a single
+///         transaction is broadcast, rather than half-completing an unrepairable deployment of
+///         immutables — but it is NOT §9, which says "read these back on-chain". §9 is discharged
+///         by `script/VerifyTestnet.s.sol` (Task 11), which reads `deployments/46630.json` and
+///         re-asserts every item against the live chain, and by `script/smoke/SmokeTest.s.sol`,
+///         which performs the one real dust `forceExit` §9 asks for. Do not delete either on the
+///         grounds that this script already checks those things. It does not.
+///
+/// @dev    THREE SENDERS, and the split is a safety property, not tidiness:
+///
+///           - `DEPLOYER_PK`  — the simulators, `CapacityOracle`, `CertFactory`, both vaults, and
+///                              the bootstrap/collateral phase.
+///           - `GOV_PK`       — `SolvencyRegistry` and both `CertOracle`s, plus the governance
+///                              phase. §4: both bind `governance = msg.sender` AT CONSTRUCTION and
+///                              it is immutable, so they are constructed inside
+///                              `vm.startBroadcast(GOV_PK)` in `run()`'s own frame — never from a
+///                              helper contract, never via CREATE2. If governance lands on an
+///                              address nobody controls, attester rotation is unreachable forever
+///                              and the remedy is a full redeployment.
+///           - `ATTESTER_PK`  — `attest()` and `setMarkPrice()` only. It deploys nothing.
+///
+///         No key is ever hardcoded, logged, or derived from a mnemonic here. The operator sets the
+///         three env vars. Only the derived ADDRESSES are logged.
+///
+/// @dev    USAGE
+///
+///           export DEPLOYER_PK=0x...  GOV_PK=0x...  ATTESTER_PK=0x...
+///           export COLLATERAL=0x...            # 6-decimal test collateral (see the blocker below)
+///           export TEST_FAUCET=0x...           # optional, recorded in the address book only
+///           forge script script/DeployTestnet.s.sol \
+///             --rpc-url robinhood_testnet --broadcast --slow
+///
+///         `--slow` matters: the run spans three senders and later transactions depend on earlier
+///         ones having landed.
+///
+/// @dev    BLOCKER — THE COLLATERAL TOKEN AND THE FAUCET ARE NOT IN THIS TREE.
+///
+///         `docs/superpowers/plans/2026-09-09-usecert-testnet-execution.md` Task 8 owns
+///         `src/sim/TestFaucet.sol` and the deployable test collateral, and neither has landed:
+///         `src/sim/` holds only `LighterCore.sol`, `LighterSim.sol` and `ReplayAggregator.sol`.
+///         This script therefore takes the collateral as an ALREADY-DEPLOYED address from
+///         `COLLATERAL` rather than inventing a token, and asserts its decimals are 6.
+///
+///         Six decimals is not a detail. `USDG` on the real chain has 6, and `CertVault` reads
+///         `IERC20Metadata(collateral).decimals()` exactly ONCE at construction and stores it as an
+///         immutable. Deploy against an 18-decimal token by mistake and `_to18`/`_from18` are wrong
+///         in both directions forever — every published figure off by 10**12 — with no setter to
+///         repair it. Hence the hard check rather than a comment.
+///
+///         WHEN TASK 8 LANDS: deploy `TestCollateral` and `TestFaucet` from the deployer inside
+///         `_phase1_simulators()` where the marker comment says so, and drop the `COLLATERAL`
+///         requirement. Until then the operator deploys the token out of band.
+contract DeployTestnet is Script {
+    // ---------------------------------------------------------------------------------- errors
+
+    /// @dev Guarded so the script cannot be pointed at mainnet by accident. A named error rather
+    ///      than a `require` string because this is the one condition a test asserts by selector.
+    error DeployTestnet_WrongChain(uint256 actual, uint256 expected);
+    /// @dev Task 8's artefact is missing; see the contract NatSpec.
+    error DeployTestnet_MissingCollateral();
+
+    // ------------------------------------------------------------------------------- the chain
+
+    /// @dev Robinhood Chain testnet. Verified live 2026-09-09 with `cast chain-id` against
+    ///      https://rpc.testnet.chain.robinhood.com. Mainnet's chain ID is still UNVERIFIED
+    ///      (docs/TESTNET-PLAN.md §8), which is a second reason this guard is an equality and not
+    ///      a "not mainnet" test.
+    uint256 internal constant CHAIN_ID = 46_630;
+
+    // ------------------------------------------------------- shared parameters, and why each one
+    //
+    // Every value below is IMMUTABLE at the vault or the oracle. There is no setter and no upgrade
+    // path (Law 6). A number got wrong here is got wrong permanently.
+
+    /// @dev `docs/TESTNET-PLAN.md` §1 and §3. NEVER RELAX THIS. Leverage is
+    ///      `10000 / targetMarginBps`, so 9000 is ~1.11x and 5000 (the constructor's floor) is the
+    ///      2x ceiling. The whole design is a 1:1 hedge with a margin cushion; relaxing this turns
+    ///      the vault into a leveraged fund and every solvency argument in the audit stops holding.
+    uint256 internal constant TARGET_MARGIN_BPS = 9_000;
+
+    /// @dev `docs/TESTNET-PLAN.md` §3, the "Testnet (either)" row — deliberately BELOW the
+    ///      capacity-derived figures for real vaults (uTSLA 2_000e18, uSPY 50_000e18) so testers
+    ///      cross into the QUEUED mint/redeem path on purpose rather than never exercising it.
+    ///      The instant path's mint-to-fill variance lands on the hot buffer (~10% of TVL), so an
+    ///      instant cap above the buffer is decorative.
+    uint256 internal constant INSTANT_CAP_18 = 1_000e18;
+
+    /// @dev C3: how long a mint receipt stays settleable before it can only be refunded. Bounds
+    ///      how far the price may have moved between `requestMint`'s recorded `requestPx18` and
+    ///      `settleMint`'s band check.
+    uint256 internal constant SETTLE_WINDOW = 1 days;
+
+    /// @dev The band `settleMint` allows between the request price and the settle price.
+    uint256 internal constant SETTLE_BAND_BPS = 500;
+
+    uint256 internal constant MINT_FEE_BPS = 10;
+    /// @dev Must be <= 10_000 or `gross18 - fee18` underflows inside `forceExit` for every holder —
+    ///      a reachable Law 2 breach, bounded at construction since Finding 1. 10 bps is nowhere
+    ///      near it; the note is here so nobody "tunes" this field without reading that bound.
+    uint256 internal constant REDEEM_FEE_BPS = 10;
+
+    /// @dev ============================ TESTNET REACHABILITY VALUE ============================
+    ///      900 s (15 min) IS A TESTNET VALUE AND MUST NOT BE CARRIED TO MAINNET.
+    ///
+    ///      `docs/TESTNET-PLAN.md` §1 sets the MAINNET shape at **93_600 s (26 hours)**, just above
+    ///      the real Chainlink feeds' own 24 h heartbeat, so the 24/5 market gap, the weekend, and
+    ///      a corporate-action pause do not read as a dead feed.
+    ///
+    ///      On testnet 46630 THERE IS NO CHAINLINK AT ALL (six mainnet proxies return `0x`), so the
+    ///      feed is the `ReplayAggregator` this script deploys and the only thing that advances it
+    ///      is `script/FeedKeeper.s.sol`. 900 s answers one question — how old may an observation
+    ///      be and still be usable — against a keeper we run ourselves, and it means the keeper
+    ///      must push at least every 15 minutes or MINTING PAUSES. That is the intended trade: a
+    ///      short bound makes a stopped keeper obvious immediately instead of certifying a stale
+    ///      price for a day.
+    ///
+    ///      Copying 900 to mainnet would pause minting every weekend. Copying 93_600 to testnet
+    ///      would let a dead keeper keep minting open for a day. Neither value is portable.
+    ///      Redemption is unaffected either way — `forceExit` prices off `pxUnguarded()` (Law 2).
+    ///      =====================================================================================
+    uint256 internal constant STALENESS_SECONDS = 900;
+
+    /// @dev Task 1 DECOUPLED this from `stalenessSeconds`; do not set them equal out of habit,
+    ///      that coupling is exactly what Task 1 removed. This is H-1's confirmation window: how
+    ///      long an out-of-band price must hold before the deviation reference concedes one
+    ///      clamped `deviationBps` step. A RISK TOLERANCE, not a heartbeat. Must not be 0
+    ///      (`CertOracle_ConfigOutOfBounds`) — at zero the `roundId` proof is the only gate and it
+    ///      bounds round distinctness, not rate, degrading to a full clamped step per block.
+    ///      300 s is short for a testnet so a tester can actually observe the two-phase poke
+    ///      complete inside a session; mainnet's reasoning puts it on the order of an hour.
+    uint256 internal constant POKE_CONFIRMATION_SECONDS = 300;
+
+    /// @dev NEVER 0. At zero the H-1 clamp permits no advance in either direction, so the FIRST
+    ///      price tick pauses minting and it stays paused until an operator widens their own
+    ///      tolerance — which they cannot, because this is immutable. 500 bps (5%) is ~10x the
+    ///      widest honest basis measured live (11.3-49.3 bps across 13 markets), so it does not
+    ///      fire on ordinary noise, and it is the per-window budget a sustained dislocation gets.
+    uint256 internal constant DEVIATION_BPS = 500;
+
+    /// @dev The band between the independent feed and the venue's attested mark. Read ONLY when
+    ///      `singleSource == false`, which is this deployment's mode — see SINGLE_SOURCE.
+    uint256 internal constant BASIS_BAND_BPS = 500;
+
+    /// @dev ================== §2's SHARPEST PRE-DEPLOY GATE, AND A HUMAN ASSERTION ==============
+    ///      `false` DECLARES that `feed` and the venue mark are INDEPENDENT price sources. Nothing
+    ///      on-chain can check that; the whole basis guard rests on this bit.
+    ///
+    ///      Why `false` here. The feed is a `ReplayAggregator` owned by the DEPLOYER and advanced
+    ///      by `script/FeedKeeper.s.sol` from real Chainlink mainnet prints (TSLA and SPY both have
+    ///      live mainnet feeds — this is why the plan picks SPY over NVDA). The venue mark is
+    ///      written by the ATTESTER from `LighterSim`'s own state. Two different keys, two
+    ///      different sources, so the basis band is a real cross-check and `mintAllowed()` keeps
+    ///      all three of its guards. `true` would additionally cap `deviationBps` at
+    ///      MAX_SINGLE_SOURCE_DEVIATION_BPS = 200 and construction would REVERT at our 500.
+    ///
+    ///      STATED PLAINLY RATHER THAN SOFTENED (§8): on testnet that independence is
+    ///      ORGANISATIONAL, not economic. Both price paths are ultimately operated by us, and a
+    ///      single operator running both keepers can move them together in a way no mainnet
+    ///      attacker could. Testnet does not prove the basis band works; it proves it is wired and
+    ///      that honest operation passes it. Do not let this configuration be read as evidence
+    ///      about mainnet.
+    ///
+    ///      FOR A REAL MIRROR: set this `true` for any market with no Chainlink feed — 28 of the
+    ///      venue's 57 perp markets, 20.5% of open interest, including XAU, XAG, ANTHROPIC, OPENAI
+    ///      and SHEIN — and verify `oracle.singleSource()` against the feed actually wired before
+    ///      funding anything. Set `false` on a venue-derived feed and the deployment fails
+    ///      SILENTLY: `basisBpsChecked()` returns `known = true, bps = 0`, a healthy basis
+    ///      asserted and never computed.
+    ///      =====================================================================================
+    bool internal constant SINGLE_SOURCE = false;
+
+    /// @dev CapacityOracle's depth leg: capacity is `depthBps` of attested open interest, inside
+    ///      the immutable `[minDepthBps, maxDepthBps]` bounds governance can never escape. 10% of
+    ///      OI is the figure every capacity number in `docs/TESTNET-PLAN.md` is quoted at.
+    uint256 internal constant DEPTH_BPS = 1_000;
+    uint256 internal constant MIN_DEPTH_BPS = 100;
+    uint256 internal constant MAX_DEPTH_BPS = 3_000;
+
+    /// @dev Below this age `maxNotional18` returns 0 and MINTING IS OFF. It must exceed the
+    ///      attester keeper's real cadence with margin. 300 s is why `script/keepers/Attester.s.sol`
+    ///      MUST be running: without it minting stops ~5 minutes after deployment, and the runbook's
+    ///      first troubleshooting row exists because that reads like a deploy failure.
+    uint256 internal constant MAX_ATTESTATION_AGE_SEC = 300;
+
+    /// @dev THE SINGLE IMMUTABLE BOUND ON A COMPROMISED OR LYING ATTESTER (§5). The attester writes
+    ///      `openInterest18` and the depth leg is derived from it, so without this ceiling an
+    ///      attester can widen capacity arbitrarily. `type(uint256).max` would remove the only
+    ///      bound that survives them. 1e9 * 1e18 is ~1000x the largest real market's capacity and
+    ///      still a real, finite, considered number.
+    uint256 internal constant MAX_ABSOLUTE_CAP_18 = 1_000_000_000e18;
+
+    /// @dev The venue's per-asset withdrawal ceiling, in venue base units. `uint64` max is
+    ///      effectively unbounded, which is correct for the simulator; §9 asserts the `<= uint64`
+    ///      bound because `LighterCore.withdraw` takes a `uint64`.
+    uint256 internal constant VENUE_WITHDRAW_CAP = type(uint64).max;
+
+    /// @dev Verified live across all 57 venue markets: `5000` = 50% of `ASSET_MARGIN_TICK`. Passed
+    ///      as exactly `LighterSim.VENUE_IMF_BPS` so the simulator matches the venue and is never
+    ///      MORE PERMISSIVE than it (Global Constraint 5 — this project has shipped three defects a
+    ///      passing suite could not see because the mock was easier than the venue).
+    uint256 internal constant SIM_REQUIRED_MARGIN_BPS = 5_000;
+
+    /// @dev The real Robinhood Chain feeds report 8 (verified live, e.g. the TSLA feed at
+    ///      0x4A1166a659A55625345e9515b32adECea5547C38). `ReplayAggregator` matches them.
+    uint8 internal constant FEED_DECIMALS = 8;
+
+    /// @dev USDG's index in the venue's collateral asset table.
+    uint16 internal constant COLLATERAL_ASSET_INDEX = 3;
+    uint8 internal constant ROUTE_TYPE = 0;
+
+    /// @dev What the deployer seeds into each vault's buffer. Must be >= `10 ** decimals` or
+    ///      `bootstrap()` reverts (§6 step 6), and large enough that `bufferCapacity18()` is not
+    ///      the binding leg of `maxNotional18`'s `min()` at deployment.
+    uint256 internal constant SEED_COLLATERAL = 100_000e6;
+
+    /// @dev The one figure the whole deployment turns on, and it is NOT a style choice: `USDG` has
+    ///      6 decimals and `CertVault` reads the collateral's decimals once, at construction, into
+    ///      an immutable. See the contract NatSpec.
+    uint8 internal constant COLLATERAL_DECIMALS = 6;
+
+    // ------------------------------------------------------------------------------ the assets
+
+    /// @dev Per-mirror parameters. `docs/TESTNET-PLAN.md` §6 is the playbook: shared across all
+    ///      mirrors are `SolvencyRegistry`, `CapacityOracle`, `CertFactory` and the simulator; new
+    ///      per mirror are a `CertOracle`, a `CertVault`, and the `Certificate` + `BufferBook` the
+    ///      vault's constructor deploys.
+    struct AssetParams {
+        string name;
+        string symbol;
+        string feedDescription;
+        uint16 marketIndex;
+        uint8 priceDecimals;
+        uint8 sizeDecimals;
+        uint256 seedPx18;
+        uint256 absoluteCap18;
+        uint256 openInterest18;
+        uint256 bufferFloor18;
+        uint256 bufferFeeOn18;
+        uint256 bufferMintSlow18;
+    }
+
+    /// @dev Deployed addresses per mirror, kept in storage rather than in locals: `run()` would be
+    ///      "stack too deep" otherwise, and the address book needs them all at the end anyway.
+    struct AssetDeployment {
+        address aggregator;
+        address oracle;
+        address vault;
+        address certificate;
+        address bufferBook;
+    }
+
+    AssetParams[] internal assets;
+    AssetDeployment[] internal deployed;
+
+    // shared addresses
+    address internal collateral;
+    address internal testFaucet;
+    address internal lighter;
+    address internal registry;
+    address internal capacity;
+    address internal factory;
+
+    // senders
+    address internal deployerAddr;
+    address internal govAddr;
+    address internal attesterAddr;
+
+    // ------------------------------------------------------------------------------------ setup
+
+    /// @dev DELIBERATELY NOT read from `script/config/testnet.json`. A Foundry script parsing JSON
+    ///      for safety-critical immutables adds a failure mode — a mistyped key yields zero, and
+    ///      `absoluteCap18 = 0` means "no capacity" while `deviationBps = 0` locks minting shut —
+    ///      in exchange for nothing, since every value is immutable at the vault. The JSON is
+    ///      documentation of these values; the compiler is the source of truth. Keep them in sync
+    ///      by review.
+    function _loadAssets() internal {
+        // uTSLA FIRST: market 16, for continuity with the existing suite (the whole test fixture
+        // is built at TSLA's price and market index).
+        assets.push(
+            AssetParams({
+                name: "UseCert TSLA",
+                symbol: "uTSLA",
+                feedDescription: "RHTSLA / USD",
+                marketIndex: 16,
+                priceDecimals: 2,
+                sizeDecimals: 4,
+                // $366.6204, the live mainnet Chainlink print on 2026-09-09.
+                seedPx18: 366.6204e18,
+                // §5: "a real, considered number". TSLA's capacity at 10% depth is $90k — 18th of
+                // the 57 markets, and its OI fell 24% in two days. This is the capacity the vault
+                // is sized from, so `absoluteCap18` and the depth leg agree at deployment rather
+                // than one being decorative.
+                absoluteCap18: 90_000e18,
+                // The attester's seed figure. $900k of OI * 1000 bps = the $90k capacity above.
+                openInterest18: 900_000e18,
+                // M-2: RETUNED, not the constructor's 100k/60k/30k defaults, which are meaningless
+                // against a $90k book. Buffer is ~10% of capacity (1 - targetMarginBps); the
+                // 100/60/30/0 RATIO is preserved. These gate nothing — a reporting choice, per §5 —
+                // and `BufferBook.configure` requires them non-increasing.
+                bufferFloor18: 9_000e18,
+                bufferFeeOn18: 5_400e18,
+                bufferMintSlow18: 2_700e18
+            })
+        );
+
+        // uSPY SECOND: market 26. NOT NVDA — SPY has a real Chainlink mainnet feed (so
+        // `singleSource == false` is honest for it) and 55x TSLA's capacity: $5.00M against $90k,
+        // the highest of all 57 markets at 10% depth.
+        assets.push(
+            AssetParams({
+                name: "UseCert SPY",
+                symbol: "uSPY",
+                feedDescription: "RHSPY / USD",
+                marketIndex: 26,
+                priceDecimals: 2,
+                sizeDecimals: 4,
+                seedPx18: 650e18,
+                absoluteCap18: 5_000_000e18,
+                // $50.0M of OI * 1000 bps = the $5.00M capacity.
+                openInterest18: 50_000_000e18,
+                bufferFloor18: 500_000e18,
+                bufferFeeOn18: 300_000e18,
+                bufferMintSlow18: 150_000e18
+            })
+        );
+    }
+
+    // ------------------------------------------------------------- injection seams, for tests
+    //
+    // The two inputs a test needs to vary, behind `virtual` functions so a test can override them
+    // by SUBCLASSING rather than by mutating the process environment. That matters: `vm.setEnv`
+    // writes process-global state that Foundry does not roll back between test cases, so tests
+    // that each set a different `GOV_PK` interfere with one another and fail in whichever order
+    // they happen to run. Production behaviour is unchanged — the defaults are the env reads.
+
+    /// @dev The three senders. NEVER hardcode, log, or derive these from a mnemonic here; the
+    ///      operator owns them and this script only ever asks the environment for them.
+    function _senderKeys() internal view virtual returns (uint256 deployerPk, uint256 govPk, uint256 attesterPk) {
+        return (vm.envUint("DEPLOYER_PK"), vm.envUint("GOV_PK"), vm.envUint("ATTESTER_PK"));
+    }
+
+    /// @dev The 6-decimal test collateral. Injected because Task 8 owns the deployable token; see
+    ///      the contract NatSpec's blocker note.
+    function _collateralAddress() internal view virtual returns (address) {
+        return vm.envOr("COLLATERAL", address(0));
+    }
+
+    // ------------------------------------------------------------------------------------- run
+
+    function run() external {
+        if (block.chainid != CHAIN_ID) revert DeployTestnet_WrongChain(block.chainid, CHAIN_ID);
+
+        (uint256 deployerPk, uint256 govPk, uint256 attesterPk) = _senderKeys();
+
+        deployerAddr = vm.addr(deployerPk);
+        govAddr = vm.addr(govPk);
+        attesterAddr = vm.addr(attesterPk);
+
+        // Three DISTINCT senders. Collapsing any two would silently defeat §4's separation: with
+        // governance == deployer, "governance is a multisig" stops being true and the emergency
+        // `setAbsoluteCap(vault, 0)` lever sits on the same key that ran the deployment.
+        require(deployerAddr != govAddr, "SENDERS: deployer == governance");
+        require(deployerAddr != attesterAddr, "SENDERS: deployer == attester");
+        require(govAddr != attesterAddr, "SENDERS: governance == attester");
+
+        _loadAssets();
+
+        // See the contract NatSpec: Task 8 owns the deployable token, so it is injected.
+        collateral = _collateralAddress();
+        if (collateral == address(0)) revert DeployTestnet_MissingCollateral();
+        testFaucet = vm.envOr("TEST_FAUCET", address(0));
+
+        // ------------------------------------------------------------------- phase 1: deployer
+        vm.startBroadcast(deployerPk);
+        _phase1_simulators();
+        vm.stopBroadcast();
+
+        // ----------------------------------------------------------------- phase 2: GOVERNANCE
+        //
+        // §4, AND THE MOST IMPORTANT TEN LINES IN THIS FILE.
+        //
+        // `SolvencyRegistry` and `CertOracle` both do `governance = msg.sender` in their
+        // constructors and the field is IMMUTABLE. Under `vm.startBroadcast(govPk)` a `new X()`
+        // written HERE — in `run()`'s own frame, at depth 1 — is sent as a bare CREATE from the
+        // governance EOA, so `msg.sender` inside the constructor is `govAddr`.
+        //
+        // MOVE THESE INTO A HELPER CONTRACT AND THE DEPLOYMENT IS PERMANENTLY BROKEN: `msg.sender`
+        // becomes the helper's address, governance lands somewhere nobody controls, attester
+        // rotation is unreachable forever, and the only remedy is a full redeployment. Same for a
+        // CREATE2 factory. They stay written out inline, in this frame, on purpose — an internal
+        // function would in fact keep the same frame, but writing them here removes the question.
+        vm.startBroadcast(govPk);
+
+        registry = address(new SolvencyRegistry(attesterAddr));
+
+        uint256 n = assets.length;
+        for (uint256 i = 0; i < n; ++i) {
+            deployed.push(
+                AssetDeployment({
+                    aggregator: address(0),
+                    oracle: address(0),
+                    vault: address(0),
+                    certificate: address(0),
+                    bufferBook: address(0)
+                })
+            );
+        }
+        // The aggregators were deployed in phase 1; the oracles that read them are governance's.
+        for (uint256 i = 0; i < n; ++i) {
+            deployed[i].aggregator = _aggregatorOf(i);
+            deployed[i].oracle = address(
+                new CertOracle(
+                    _aggregatorOf(i),
+                    attesterAddr,
+                    assets[i].priceDecimals,
+                    STALENESS_SECONDS,
+                    DEVIATION_BPS,
+                    BASIS_BAND_BPS,
+                    POKE_CONFIRMATION_SECONDS,
+                    SINGLE_SOURCE
+                )
+            );
+        }
+
+        vm.stopBroadcast();
+
+        // ------------------------------------------------------------------- phase 3: deployer
+        vm.startBroadcast(deployerPk);
+        _phase3_coreAndVaults();
+        vm.stopBroadcast();
+
+        // ----------------------------------------------------------------- phase 4: governance
+        vm.startBroadcast(govPk);
+        _phase4_governance();
+        vm.stopBroadcast();
+
+        // ------------------------------------------------- phase 5: deployer / venue operator
+        vm.startBroadcast(deployerPk);
+        _phase5_allowlistMarksAndBootstrap();
+        vm.stopBroadcast();
+
+        // ------------------------------------------------------------------- phase 6: attester
+        vm.startBroadcast(attesterPk);
+        _phase6_attest();
+        vm.stopBroadcast();
+
+        // ------------------------------------------------------------- verify, then write it down
+        _verifyLocalSimulation();
+        _writeAddressBook();
+        _report();
+    }
+
+    // ------------------------------------------------------------------------------- phase 1
+
+    /// @dev The simulators, from the deployer. Robinhood Chain testnet has NEITHER dependency:
+    ///      Lighter is absent (both candidate `ZkLighter` addresses return `0x`) and Chainlink is
+    ///      absent (six known mainnet proxies return `0x`), both verified live 2026-09-09. So the
+    ///      deployment brings its own venue and its own aggregator.
+    function _phase1_simulators() internal virtual {
+        // TASK 8 INTEGRATION POINT. When `src/sim/TestFaucet.sol` and the deployable 6-decimal
+        // test collateral land, deploy them HERE and delete the `COLLATERAL` env requirement in
+        // `run()`:
+        //     collateral = address(new TestCollateral("Test USDG", "tUSDG", 6));
+        //     testFaucet = address(new TestFaucet(IERC20(collateral), ...));
+        // Until then both are injected, and only the token is required.
+        require(
+            IERC20Metadata(collateral).decimals() == COLLATERAL_DECIMALS,
+            "COLLATERAL: decimals() != 6 - CertVault fixes this immutably at construction"
+        );
+
+        // The venue. `_owner` is the deployer, standing in for the venue operator: the allowlist,
+        // the mark prices and the stuck-queue hatches are all `onlyOwner`, and `settleBatch()` is
+        // deliberately NOT (Task 12's `BatchAdvancer` is permissionless, as the real venue is).
+        //
+        // `sizeDecimals` is taken from the FIRST asset because it is a per-simulator field while
+        // the venue has it per-market. Both C1 markets are `size_decimals 4` (verified live), so
+        // this is exact today; the require makes a future mirror with a different value fail loudly
+        // here rather than mis-quantise every hedge on one of the two vaults.
+        for (uint256 i = 1; i < assets.length; ++i) {
+            require(
+                assets[i].sizeDecimals == assets[0].sizeDecimals,
+                "SIM: one LighterSim cannot serve two different sizeDecimals - deploy a second sim"
+            );
+        }
+        lighter = address(
+            new LighterSim(
+                IERC20(collateral),
+                COLLATERAL_ASSET_INDEX,
+                assets[0].sizeDecimals,
+                SIM_REQUIRED_MARGIN_BPS,
+                deployerAddr
+            )
+        );
+
+        // One aggregator per asset. `ReplayAggregator` — NOT `MockAggregatorV3`, which is a test
+        // mock and not deployable scaffolding. It writes round 1 in its own constructor so
+        // `roundId` starts at a real value, and `roundId` STRICTLY INCREMENTS on every write, which
+        // is load-bearing: §2 makes `pokeLastGood`'s round-distinctness proof `roundId >
+        // pendingRoundId`, so a feed serving a constant `roundId` freezes H-1's reference
+        // permanently and a large sustained repricing could never be absorbed.
+        //
+        // Owner is the DEPLOYER, not the attester, and that is the point: the attester writes
+        // `markPx18`, so giving it the feed too would make the two "independent" sources one key
+        // and `singleSource == false` a lie. `script/FeedKeeper.s.sol` must therefore be invoked
+        // with DEPLOYER_PK.
+        for (uint256 i = 0; i < assets.length; ++i) {
+            address agg = address(
+                new ReplayAggregator(
+                    deployerAddr, FEED_DECIMALS, assets[i].feedDescription, _toFeedAnswer(assets[i].seedPx18)
+                )
+            );
+            _pushAggregator(agg);
+        }
+    }
+
+    // ------------------------------------------------------------------------------- phase 3
+
+    /// @dev `CapacityOracle`, `CertFactory` and the vaults, from the deployer.
+    ///
+    ///      Neither of these binds governance to `msg.sender` — both take it as an explicit
+    ///      parameter — so unlike phase 2 they are safe to deploy from the deployer, and §6 step 2
+    ///      says to. `CertFactory` comes before the vaults only because `registerVault` has to
+    ///      exist to be called; the vault holds NO reference to the factory and does not depend on
+    ///      it at all.
+    function _phase3_coreAndVaults() internal virtual {
+        capacity = address(
+            new CapacityOracle(
+                registry, govAddr, DEPTH_BPS, MIN_DEPTH_BPS, MAX_DEPTH_BPS, MAX_ATTESTATION_AGE_SEC, MAX_ABSOLUTE_CAP_18
+            )
+        );
+
+        factory = address(new CertFactory(lighter, registry, capacity, govAddr));
+
+        for (uint256 i = 0; i < assets.length; ++i) {
+            // §6 step 3: deployed DIRECTLY, never through `CertFactory.deployVault` — that reverts
+            // `CertFactory_UseRegisterVault` by construction, because no contract can `new
+            // CertVault` under EIP-170 (§0).
+            //
+            // The four `Deps` addresses MUST be the same four the factory holds. `registerVault`
+            // does NOT check this for you and a mismatch is not repairable — every dependency on
+            // both sides is immutable — so it is asserted in `_verifyLocalSimulation` and again
+            // on-chain by `VerifyTestnet`.
+            CertVault v = new CertVault(
+                CertVault.Deps({
+                    lighter: lighter,
+                    oracle: deployed[i].oracle,
+                    registry: registry,
+                    capacity: capacity,
+                    governance: govAddr
+                }),
+                CertVault.VaultConfig({
+                    collateral: collateral,
+                    collateralAssetIndex: COLLATERAL_ASSET_INDEX,
+                    routeType: ROUTE_TYPE,
+                    marketIndex: assets[i].marketIndex,
+                    sizeDecimals: assets[i].sizeDecimals,
+                    mintFeeBps: MINT_FEE_BPS,
+                    redeemFeeBps: REDEEM_FEE_BPS,
+                    instantCap18: INSTANT_CAP_18,
+                    settleBandBps: SETTLE_BAND_BPS,
+                    targetMarginBps: TARGET_MARGIN_BPS
+                }),
+                VENUE_WITHDRAW_CAP,
+                SETTLE_WINDOW,
+                assets[i].name,
+                assets[i].symbol
+            );
+            deployed[i].vault = address(v);
+            // The vault's constructor deployed both of these. Read them back — the certificate
+            // address is needed for `registerVault`, which cross-checks it.
+            deployed[i].certificate = address(v.certificate());
+            deployed[i].bufferBook = address(v.buffer());
+        }
+    }
+
+    // ------------------------------------------------------------------------------- phase 4
+
+    /// @dev The governance phase, in §5's order.
+    function _phase4_governance() internal virtual {
+        for (uint256 i = 0; i < assets.length; ++i) {
+            // §6 step 4. Records the vault in `vaults`/`isVault` and cross-checks the certificate.
+            CertFactory(factory).registerVault(deployed[i].vault, deployed[i].certificate);
+
+            // §6 step 5, AND THE SINGLE MOST LIKELY WAY THIS DEPLOYMENT APPEARS BROKEN.
+            //
+            // `absoluteCap18` is ZERO by default and `maxNotional18`'s `min()` makes zero mean
+            // "NO CAPACITY" — not "unbounded". There is deliberately no first-call exception for a
+            // stranger to bootstrap it (that would let anyone front-run the one number holding a
+            // compromised attester in check). So a vault that reads as perfectly deployed —
+            // registered, bootstrapped, attested, `mintAllowed() == true` — still reverts
+            // `CertVault_AtCapacity` on every mint until this line runs. It is read back below.
+            CapacityOracle(capacity).setAbsoluteCap(deployed[i].vault, assets[i].absoluteCap18);
+
+            // M-2: retune the published buffer ladder off the asset's real book size. The
+            // constructor's 100k/60k/30k/0 defaults are the same for every asset regardless of
+            // size. They gate nothing (§5: a reporting choice, not a safety one).
+            CertVault(deployed[i].vault).setBufferThresholds(
+                assets[i].bufferFloor18, assets[i].bufferFeeOn18, assets[i].bufferMintSlow18, 0
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------------------- phase 5
+
+    /// @dev Allowlist, venue marks, collateral, bootstrap, batch advance — from the deployer,
+    ///      which is also the simulator's owner.
+    function _phase5_allowlistMarksAndBootstrap() internal virtual {
+        for (uint256 i = 0; i < assets.length; ++i) {
+            // ============================== PLAN STEP 3a — DO NOT REMOVE ==========================
+            // `bootstrap()` REVERTS `LighterSim_DepositorNotAllowed(vault)` WITHOUT THIS LINE.
+            //
+            // Task 5's fix round added an owner-gated registration allowlist to `LighterSim` as the
+            // interim that closes the self-registration drain (Critical 1: a zero-value
+            // `transferFrom` succeeds with no allowance and no balance, so registration used to be
+            // free rather than merely open; and Critical 2's entry condition, since an attacker
+            // needs an account to queue the poison order that blocks settlement for everyone).
+            //
+            // It FAILS CLOSED, which is right. But it is a deployment step that exists in no
+            // earlier document — `docs/DEPLOYMENT-CHECKLIST.md` was off-limits to the task that
+            // introduced it — and without it the deployment stops at §6 step 7 with an error
+            // nothing explains. The checklist row was added by this task; the line is here.
+            //
+            // SIMULATOR-ONLY. It has no counterpart on the real venue, which registers anyone, and
+            // must never be read as modelling one. Task 7 supersedes it with per-account collateral
+            // isolation, at which point this line and the mapping both go.
+            // =====================================================================================
+            LighterSim(lighter).setDepositorAllowed(deployed[i].vault, true);
+
+            // The VENUE's own mark, distinct from `CertOracle.markPx18`. `LighterSim.settleBatch`
+            // refuses outright to settle a market whose mark is unset, and that guard exists
+            // because at a zero mark the simulator is not merely missing a margin check — the
+            // whole mark-to-market layer is DEAD: notional is `|position| * 0` so the
+            // `InsufficientMargin` gate passes vacuously at any size, and `entryPrice = 0` makes
+            // `unrealisedPnl()` permanently zero. A deploy script that forgot this would look
+            // completely clean while certifying the vault against a venue with no margin
+            // requirement and no PnL — which is precisely the epistemic state that hid a Critical
+            // in this project's external audit.
+            LighterSim(lighter).setMarkPrice(assets[i].marketIndex, assets[i].seedPx18);
+
+            // §6 step 6: collateral IN BEFORE `bootstrap()`. `bootstrap()` deposits exactly
+            // `10 ** collateralDecimals` as registering dust and reverts without it. `seedBuffer`
+            // is the permissionless way in and also lifts `bufferCapacity18()` off zero, which is
+            // one of the three legs of `maxNotional18`'s `min()`.
+            IERC20(collateral).approve(deployed[i].vault, SEED_COLLATERAL);
+            CertVault(deployed[i].vault).seedBuffer(SEED_COLLATERAL);
+
+            // §6 step 7. One-time, permissionless.
+            CertVault(deployed[i].vault).bootstrap();
+        }
+
+        // §6 step 8 / plan step 3: THE BATCH ADVANCE, and it is MANDATORY.
+        //
+        // `createOrder` reverts `AccountIsNotRegistered` until `addressToAccountIndex[vault]` is
+        // populated, so every mint reverts as one atomic transaction until the registering deposit
+        // has been EXECUTED by a batch. Task 6 makes registration asynchronous on the simulator, so
+        // the deposit alone is not enough; this is what makes it land. Harmless when the queue is
+        // empty, so it is called unconditionally rather than conditioned on the simulator's current
+        // sync-or-async behaviour.
+        //
+        // Permissionless by design — Task 12's `BatchAdvancer` keeper calls exactly this on an
+        // interval, and on mainnet Lighter advances its own batches.
+        LighterSim(lighter).settleBatch();
+    }
+
+    // ------------------------------------------------------------------------------- phase 6
+
+    /// @dev §6 step 9. Attest once and set the mark so `maxNotional18` and `mintAllowed()` are
+    ///      live. Nothing else in the deployment is sent by this key.
+    function _phase6_attest() internal virtual {
+        for (uint256 i = 0; i < assets.length; ++i) {
+            // `asset` is keyed by the VAULT address, not the certificate and not the market index.
+            // `batchId` must strictly increase (`SolvencyRegistry_StaleBatch`), so the deployment
+            // seeds 1 and Task 12's keeper continues from there.
+            //
+            // `notional18` and `margin18` are 0 because the vault has no position yet — it has
+            // minted nothing. `_requireCapacity` takes `max(own18, attested18)`, so a non-zero
+            // seed here would fabricate exposure that does not exist and eat real capacity.
+            SolvencyRegistry(registry).attest(deployed[i].vault, 1, 0, 0, assets[i].openInterest18);
+
+            // `CertOracle.markPx18`: the venue-side price the basis band is measured against. Seeded
+            // equal to the feed, so the basis is 0 bps at deployment and well inside the 500 bps
+            // band. It has NO timestamp and NO staleness check anywhere (§2) — its liveness is an
+            // operational assumption on the attester keeper's cadence, not a contract guarantee.
+            CertOracle(deployed[i].oracle).setMarkPrice(assets[i].seedPx18);
+        }
+    }
+
+    // ------------------------------------------------------------- §9, against the simulation
+
+    /// @dev EVERY §9 ITEM, AS A `require` WITH A NAMED MESSAGE, so a bad deployment aborts before
+    ///      broadcasting rather than half-completing a set of immutables.
+    ///
+    ///      READ THE CONTRACT NATSPEC ON WHAT THIS DOES NOT PROVE. `forge script --broadcast`
+    ///      simulates the whole run and only then sends transactions, so these assert the LOCAL
+    ///      SIMULATION. They are an abort gate, not §9. `script/VerifyTestnet.s.sol` (Task 11) is
+    ///      what discharges §9 against the live chain.
+    function _verifyLocalSimulation() internal view {
+        // ---- §4 / §9: governance and attester binding on the two msg.sender-bound contracts
+        require(SolvencyRegistry(registry).governance() == govAddr, "S9: registry.governance != GOV");
+        require(SolvencyRegistry(registry).attester() == attesterAddr, "S9: registry.attester != ATTESTER");
+        require(SolvencyRegistry(registry).pendingAttester() == address(0), "S9: registry.pendingAttester != 0");
+        require(SolvencyRegistry(registry).ATTESTER_ROTATION_DELAY() == 2 days, "S9: registry rotation delay != 2d");
+
+        // ---- §5 / §9: the capacity oracle's immutable ceiling and its governance
+        require(CapacityOracle(capacity).governance() == govAddr, "S9: capacity.governance != GOV");
+        require(CapacityOracle(capacity).maxAbsoluteCap() == MAX_ABSOLUTE_CAP_18, "S9: capacity.maxAbsoluteCap wrong");
+        require(CapacityOracle(capacity).maxAbsoluteCap() != type(uint256).max, "S9: maxAbsoluteCap is unbounded");
+        require(CapacityOracle(capacity).depthBps() == DEPTH_BPS, "S9: capacity.depthBps wrong");
+        require(CapacityOracle(capacity).minDepthBps() == MIN_DEPTH_BPS, "S9: capacity.minDepthBps wrong");
+        require(CapacityOracle(capacity).maxDepthBps() == MAX_DEPTH_BPS, "S9: capacity.maxDepthBps wrong");
+        require(
+            CapacityOracle(capacity).maxAttestationAgeSec() == MAX_ATTESTATION_AGE_SEC,
+            "S9: capacity.maxAttestationAgeSec wrong"
+        );
+
+        // ---- §9: the factory's own four immutables, which the vaults must match
+        require(CertFactory(factory).lighter() == lighter, "S9: factory.lighter wrong");
+        require(CertFactory(factory).registry() == registry, "S9: factory.registry wrong");
+        require(CertFactory(factory).capacity() == capacity, "S9: factory.capacity wrong");
+        require(CertFactory(factory).governance() == govAddr, "S9: factory.governance != GOV");
+        require(CertFactory(factory).vaultCount() == assets.length, "S9: factory.vaultCount != vaults deployed");
+
+        // ---- §1: the collateral decimals, immutably baked into every vault
+        require(IERC20Metadata(collateral).decimals() == COLLATERAL_DECIMALS, "S9: collateral decimals != 6");
+
+        for (uint256 i = 0; i < assets.length; ++i) {
+            _verifyAsset(i);
+        }
+    }
+
+    /// @dev Split into four, and the split is forced rather than stylistic: `foundry.toml` sets
+    ///      `via_ir = false` and must not be changed (Global Constraint 1), so the legacy codegen's
+    ///      stack limit binds. `vault.cfg()`'s ten-field destructuring alone nearly exhausts it, and
+    ///      one flat function here failed to compile with "Stack too deep".
+    function _verifyAsset(uint256 i) internal view {
+        _verifyAssetOracle(i);
+        _verifyAssetDeps(i);
+        _verifyAssetConfig(i);
+        _verifyAssetGate(i);
+    }
+
+    function _verifyAssetOracle(uint256 i) internal view {
+        AssetParams memory a = assets[i];
+        AssetDeployment memory d = deployed[i];
+        CertOracle o = CertOracle(d.oracle);
+
+        // ---- §4 / §9: the oracle's governance binding. THE ITEM WITH NO REMEDY BUT REDEPLOYMENT.
+        require(o.governance() == govAddr, "S9: oracle.governance != GOV");
+        require(o.attester() == attesterAddr, "S9: oracle.attester != ATTESTER");
+        require(o.pendingAttester() == address(0), "S9: oracle.pendingAttester != 0");
+        require(o.ATTESTER_ROTATION_DELAY() == 2 days, "S9: oracle rotation delay != 2d");
+        require(
+            o.ATTESTER_ROTATION_DELAY() == SolvencyRegistry(registry).ATTESTER_ROTATION_DELAY(),
+            "S9: oracle/registry rotation delays differ"
+        );
+
+        // ---- §2: the oracle's configuration, and the two values that must never be wrong
+        require(address(o.feed()) == d.aggregator, "S9: oracle.feed != aggregator");
+        require(o.singleSource() == SINGLE_SOURCE, "S9: oracle.singleSource != declared mode");
+        require(o.deviationBps() == DEVIATION_BPS, "S9: oracle.deviationBps wrong");
+        require(o.deviationBps() != 0, "S9: deviationBps == 0 locks minting shut on the first tick");
+        require(o.stalenessSeconds() == STALENESS_SECONDS, "S9: oracle.stalenessSeconds wrong");
+        require(o.pokeConfirmationSeconds() == POKE_CONFIRMATION_SECONDS, "S9: pokeConfirmationSeconds wrong");
+        require(o.pokeConfirmationSeconds() != 0, "S9: pokeConfirmationSeconds == 0");
+        require(o.basisBandBps() == BASIS_BAND_BPS, "S9: oracle.basisBandBps wrong");
+        require(o.priceDecimals() == a.priceDecimals, "S9: oracle.priceDecimals != venue price_decimals");
+        require(o.lastGoodPx18() != 0, "S9: oracle.lastGoodPx18 == 0, mintAllowed fails closed");
+
+        // ---- §9: `absoluteCap18(vault)` is set. Zero means NO CAPACITY, not unbounded.
+        //      The `!= 0` assertion comes FIRST deliberately: it is the failure that actually
+        //      happens (governance forgot `setAbsoluteCap`), and "UNSET - cannot mint" tells the
+        //      operator what to do, where the generic "wrong" would send them looking for a typo.
+        require(CapacityOracle(capacity).absoluteCap18(d.vault) != 0, "S9: absoluteCap18(vault) UNSET - cannot mint");
+        require(CapacityOracle(capacity).absoluteCap18(d.vault) == a.absoluteCap18, "S9: absoluteCap18(vault) wrong");
+    }
+
+    // ------------------------------------------------------- accessors, for tests and Task 11
+
+    /// @dev Read-only views over what the run deployed. `VerifyTestnet` reads the address book
+    ///      rather than these, but a test that runs this script in-process needs them.
+    function assetCount() external view returns (uint256) {
+        return assets.length;
+    }
+
+    function deploymentOf(uint256 i) external view returns (AssetDeployment memory) {
+        return deployed[i];
+    }
+
+    function paramsOf(uint256 i) external view returns (AssetParams memory) {
+        return assets[i];
+    }
+
+    function sharedAddresses()
+        external
+        view
+        returns (address collateral_, address faucet_, address lighter_, address registry_, address capacity_, address factory_)
+    {
+        return (collateral, testFaucet, lighter, registry, capacity, factory);
+    }
+
+    function _verifyAssetDeps(uint256 i) internal view {
+        AssetParams memory a = assets[i];
+        AssetDeployment memory d = deployed[i];
+        CertVault v = CertVault(d.vault);
+
+        // ---- §9: the vault's five immutable dependencies
+        require(v.governance() == govAddr, "S9: vault.governance != GOV");
+        require(address(v.lighter()) == lighter, "S9: vault.lighter wrong");
+        require(address(v.oracle()) == d.oracle, "S9: vault.oracle wrong");
+        require(address(v.registry()) == registry, "S9: vault.registry wrong");
+        require(address(v.capacity()) == capacity, "S9: vault.capacity wrong");
+
+        // ---- §9: THE ONE `registerVault` DOES NOT CHECK. The old `deployVault` wired these four
+        //      from the factory's own immutables and guaranteed the match structurally; the
+        //      deployment script does it now, and a mismatch is a redeployment.
+        require(address(v.lighter()) == CertFactory(factory).lighter(), "S9: vault.lighter != factory.lighter");
+        require(address(v.registry()) == CertFactory(factory).registry(), "S9: vault.registry != factory.registry");
+        require(address(v.capacity()) == CertFactory(factory).capacity(), "S9: vault.capacity != factory.capacity");
+        require(v.governance() == CertFactory(factory).governance(), "S9: vault.governance != factory.governance");
+
+        // ---- §9: registration, and exactly one slot
+        require(CertFactory(factory).isVault(d.vault), "S9: factory.isVault(vault) false");
+        require(CertFactory(factory).vaults(i) == d.vault, "S9: factory.vaults(i) != vault");
+        require(!CertFactory(factory).enabled(d.vault), "S9: vault enabled - L-1 says do not, it is cosmetic");
+
+        // ---- §9: the certificate cross-check (`registerVault` enforced it; this is the read-back)
+        require(address(v.certificate()) == d.certificate, "S9: vault.certificate != recorded certificate");
+        require(Certificate(d.certificate).vault() == d.vault, "S9: certificate.vault != vault");
+        require(
+            keccak256(bytes(Certificate(d.certificate).symbol())) == keccak256(bytes(a.symbol)),
+            "S9: certificate symbol wrong"
+        );
+    }
+
+    /// @dev §9 / §3: the vault config against the venue's own market config. Split across two
+    ///      functions, each destructuring only the half of `cfg()`'s ten-field tuple it asserts on
+    ///      (the rest elided with bare commas) — one flat read of all ten plus the comparison
+    ///      operands exceeds the legacy codegen's stack, and `via_ir` is not available to us.
+    function _verifyAssetConfig(uint256 i) internal view {
+        _verifyAssetConfigVenue(i);
+        _verifyAssetConfigEconomics(i);
+    }
+
+    /// @dev The venue-shaped half: these must match Lighter's own per-market config exactly, and
+    ///      `sizeDecimals` in particular decides every hedge quantisation.
+    function _verifyAssetConfigVenue(uint256 i) internal view {
+        (address cCollateral, uint16 cAssetIdx, uint8 cRouteType, uint16 cMarketIndex, uint8 cSizeDecimals,,,,,) =
+            CertVault(deployed[i].vault).cfg();
+        require(cCollateral == collateral, "S9: cfg.collateral wrong");
+        require(cAssetIdx == COLLATERAL_ASSET_INDEX, "S9: cfg.collateralAssetIndex wrong");
+        require(cRouteType == ROUTE_TYPE, "S9: cfg.routeType wrong");
+        require(cMarketIndex == assets[i].marketIndex, "S9: cfg.marketIndex != venue market_id");
+        require(cSizeDecimals == assets[i].sizeDecimals, "S9: cfg.sizeDecimals != venue size_decimals");
+    }
+
+    /// @dev The economics half.
+    function _verifyAssetConfigEconomics(uint256 i) internal view {
+        (,,,,, uint256 cMintFee, uint256 cRedeemFee, uint256 cInstantCap, uint256 cBand, uint256 cMargin) =
+            CertVault(deployed[i].vault).cfg();
+        require(cMintFee == MINT_FEE_BPS, "S9: cfg.mintFeeBps wrong");
+        require(cRedeemFee == REDEEM_FEE_BPS, "S9: cfg.redeemFeeBps wrong");
+        // A fee above 100% underflows `gross18 - fee18` inside forceExit for EVERY holder: a
+        // reachable Law 2 breach, bounded at construction since Finding 1. Asserted anyway.
+        require(cRedeemFee <= 10_000, "S9: redeemFeeBps > 100pct - Law 2 breach in forceExit");
+        require(cInstantCap == INSTANT_CAP_18, "S9: cfg.instantCap18 wrong");
+        require(cBand == SETTLE_BAND_BPS, "S9: cfg.settleBandBps wrong");
+        // NEVER RELAXED.
+        require(cMargin == TARGET_MARGIN_BPS, "S9: cfg.targetMarginBps != 9000 - NEVER RELAX THIS");
+    }
+
+    function _verifyAssetGate(uint256 i) internal view {
+        AssetParams memory a = assets[i];
+        AssetDeployment memory d = deployed[i];
+        CertVault v = CertVault(d.vault);
+        CertOracle o = CertOracle(d.oracle);
+
+        // ---- §9: the venue withdraw cap fits the venue's own uint64 parameter
+        require(v.venueWithdrawCap() == VENUE_WITHDRAW_CAP, "S9: venueWithdrawCap wrong");
+        require(v.venueWithdrawCap() <= type(uint64).max, "S9: venueWithdrawCap > uint64 max");
+        require(v.settleWindow() == SETTLE_WINDOW, "S9: vault.settleWindow wrong");
+
+        // ---- §9: the registering deposit has EXECUTED (this is what the batch advance buys)
+        require(v.bootstrapped(), "S9: vault not bootstrapped");
+        require(v.lighterAccountIndex() != 0, "S9: lighterAccountIndex == 0 - registering deposit not executed");
+
+        // ---- plan step 3a: the allowlist row, read back
+        require(LighterSim(lighter).depositorAllowed(d.vault), "S9: depositorAllowed(vault) false");
+
+        // ---- §5 / Global Constraint 5: the simulator is not easier than the venue
+        require(
+            LighterSim(lighter).requiredMarginBps() >= LighterSim(lighter).VENUE_IMF_BPS(),
+            "S9: sim margin below the venue floor"
+        );
+        require(LighterSim(lighter).markPrice(a.marketIndex) != 0, "S9: venue mark unset - settleBatch would revert");
+        require(LighterSim(lighter).owner() == deployerAddr, "S9: sim owner != DEPLOYER");
+
+        // ---- §9: the live price is inside the uint32 tick domain at the configured priceDecimals
+        require(o.toTickPrice(o.px()) != 0, "S9: toTickPrice(px) == 0");
+
+        // ---- the attestation is live and the mint gate is ACTUALLY OPEN
+        require(SolvencyRegistry(registry).ageSec(d.vault) <= MAX_ATTESTATION_AGE_SEC, "S9: attestation already stale");
+        require(SolvencyRegistry(registry).latest(d.vault).openInterest18 != 0, "S9: attested openInterest18 == 0");
+        require(o.markPx18() != 0, "S9: oracle.markPx18 == 0 - basis band fails closed at false");
+        (bool basisKnown, uint256 basisBps) = o.basisBpsChecked();
+        require(basisKnown, "S9: basis unknown in dual-source mode");
+        require(basisBps <= BASIS_BAND_BPS, "S9: basis outside the band at deployment");
+        require(o.mintAllowed(), "S9: MINT GATE CLOSED - oracle.mintAllowed() is false");
+        require(
+            CapacityOracle(capacity).maxNotional18(d.vault, v.bufferCapacity18()) != 0,
+            "S9: MINT GATE CLOSED - maxNotional18 == 0"
+        );
+    }
+
+    // ------------------------------------------------------------------------ the address book
+
+    /// @dev `deployments/46630.json`, written per deployment and NEVER HAND-EDITED.
+    ///
+    ///      Each new mirror is a new vault AND a new `Certificate` token. A hand-edited map would
+    ///      silently repoint a UI at a new token while real balances sat in the old one — the
+    ///      holder's certificates would simply stop being visible, with nothing on-chain wrong.
+    ///      Re-run the script to regenerate; `script/VerifyTestnet.s.sol` reads this file and
+    ///      re-asserts §9 against the live chain from it.
+    /// @dev Assembled row by row through the three `_j*` helpers below rather than in a few large
+    ///      `string.concat` calls. Not a style choice: a wide `string.concat` blows the legacy
+    ///      codegen's stack ("Stack too deep" in the generated assembly) and `via_ir` is off and
+    ///      must stay off (Global Constraint 1).
+    function _writeAddressBook() internal {
+        string memory out = "{\n";
+        out = string.concat(out, _jStr("  ", "_generatedBy", "script/DeployTestnet.s.sol"));
+        out = string.concat(
+            out,
+            _jStr(
+                "  ",
+                "_warning",
+                "GENERATED PER DEPLOYMENT. NEVER HAND-EDIT: each mirror is a new vault AND a new certificate token, and an edited map repoints a UI at a new token while balances sit in the old one. Re-run the script."
+            )
+        );
+        out = string.concat(out, _jNum("  ", "chainId", block.chainid));
+        out = string.concat(out, _jNum("  ", "blockNumber", block.number));
+        out = string.concat(out, _jNum("  ", "timestamp", block.timestamp));
+        out = string.concat(out, _jStr("  ", "commit", _commit()));
+
+        out = string.concat(out, '  "senders": {\n');
+        out = string.concat(out, _jAddr("    ", "deployer", deployerAddr));
+        out = string.concat(out, _jAddr("    ", "governance", govAddr));
+        out = string.concat(out, _jAddr("    ", "attester", attesterAddr));
+        out = string.concat(out, "    \"_note\": \"governance deployed SolvencyRegistry and every CertOracle itself (checklist S4); those bindings are immutable\"\n  },\n");
+
+        out = string.concat(out, '  "shared": {\n');
+        out = string.concat(out, _jAddr("    ", "collateral", collateral));
+        out = string.concat(out, _jNum("    ", "collateralDecimals", COLLATERAL_DECIMALS));
+        out = string.concat(out, _jAddr("    ", "testFaucet", testFaucet));
+        out = string.concat(
+            out,
+            _jStr(
+                "    ",
+                "_testFaucetNote",
+                "address(0) means Task 8 (src/sim/TestFaucet.sol) had not landed at deploy time"
+            )
+        );
+        out = string.concat(out, _jAddr("    ", "lighterSim", lighter));
+        out = string.concat(out, _jAddr("    ", "solvencyRegistry", registry));
+        out = string.concat(out, _jAddr("    ", "capacityOracle", capacity));
+        out = string.concat(out, _jAddrLast("    ", "certFactory", factory));
+        out = string.concat(out, "  },\n");
+
+        out = string.concat(out, '  "parameters": {\n');
+        out = string.concat(out, _parametersJson());
+        out = string.concat(out, "\n  },\n");
+
+        out = string.concat(out, '  "vaults": [\n');
+        for (uint256 i = 0; i < assets.length; ++i) {
+            out = string.concat(out, _assetJson(i));
+            out = string.concat(out, i + 1 == assets.length ? "\n" : ",\n");
+        }
+        out = string.concat(out, "  ]\n}\n");
+
+        vm.writeFile(string.concat("deployments/", vm.toString(block.chainid), ".json"), out);
+    }
+
+    function _jStr(string memory pad, string memory k, string memory v) internal pure returns (string memory) {
+        return string.concat(pad, '"', k, '": "', v, '",\n');
+    }
+
+    function _jNum(string memory pad, string memory k, uint256 v) internal pure returns (string memory) {
+        return string.concat(pad, '"', k, '": ', vm.toString(v), ",\n");
+    }
+
+    function _jAddr(string memory pad, string memory k, address v) internal pure returns (string memory) {
+        return _jStr(pad, k, vm.toString(v));
+    }
+
+    function _jAddrLast(string memory pad, string memory k, address v) internal pure returns (string memory) {
+        return string.concat(pad, '"', k, '": "', vm.toString(v), '"\n');
+    }
+
+    function _parametersJson() internal pure returns (string memory) {
+        return string.concat(
+            '    "targetMarginBps": 9000,\n',
+            '    "instantCap18": "1000000000000000000000",\n',
+            '    "settleWindow": 86400,\n',
+            '    "settleBandBps": 500,\n',
+            '    "mintFeeBps": 10,\n',
+            '    "redeemFeeBps": 10,\n',
+            '    "stalenessSeconds": 900,\n',
+            '    "_stalenessSecondsNote": "TESTNET REACHABILITY VALUE. Mainnet is 93600 (TESTNET-PLAN.md S1). Must not be carried over.",\n',
+            '    "pokeConfirmationSeconds": 300,\n',
+            '    "deviationBps": 500,\n',
+            '    "basisBandBps": 500,\n',
+            '    "singleSource": false,\n',
+            '    "_singleSourceNote": "Declares feed and venue mark independent. On testnet that independence is ORGANISATIONAL (two keys), not economic - both keepers are operated by us. Not evidence about mainnet.",\n',
+            '    "depthBps": 1000,\n',
+            '    "minDepthBps": 100,\n',
+            '    "maxDepthBps": 3000,\n',
+            '    "maxAttestationAgeSec": 300,\n',
+            '    "maxAbsoluteCap18": "1000000000000000000000000000",\n',
+            '    "venueWithdrawCap": "18446744073709551615",\n',
+            '    "simRequiredMarginBps": 5000,\n',
+            '    "feedDecimals": 8'
+        );
+    }
+
+    function _assetJson(uint256 i) internal view returns (string memory) {
+        string memory out = "    {\n";
+        out = string.concat(out, _jStr("      ", "symbol", assets[i].symbol));
+        out = string.concat(out, _jStr("      ", "name", assets[i].name));
+        out = string.concat(out, _jNum("      ", "marketIndex", assets[i].marketIndex));
+        out = string.concat(out, _jNum("      ", "priceDecimals", assets[i].priceDecimals));
+        out = string.concat(out, _jNum("      ", "sizeDecimals", assets[i].sizeDecimals));
+        out = string.concat(out, _jAddr("      ", "vault", deployed[i].vault));
+        out = string.concat(out, _jAddr("      ", "certificate", deployed[i].certificate));
+        out = string.concat(out, _jAddr("      ", "bufferBook", deployed[i].bufferBook));
+        out = string.concat(out, _jAddr("      ", "certOracle", deployed[i].oracle));
+        out = string.concat(out, _jAddr("      ", "replayAggregator", deployed[i].aggregator));
+        // Quoted strings, not JSON numbers: these exceed 2^53 and would lose precision in any
+        // JavaScript consumer that parsed them as numbers. The front-end adapter reads this file.
+        out = string.concat(out, _jStr("      ", "seedPrice18", vm.toString(assets[i].seedPx18)));
+        out = string.concat(out, _jStr("      ", "absoluteCap18", vm.toString(assets[i].absoluteCap18)));
+        out = string.concat(
+            out, string.concat('      "seedOpenInterest18": "', vm.toString(assets[i].openInterest18), '"\n    }')
+        );
+        return out;
+    }
+
+    /// @dev The commit being deployed. §9's last item requires `forge build --sizes` to have been
+    ///      run against THIS commit, so the commit has to be recorded for that claim to be
+    ///      checkable later.
+    ///
+    ///      Taken from the `COMMIT` env var rather than shelled out with FFI: `ffi` is not enabled
+    ///      in `foundry.toml` and enabling it would let any dependency in the compilation unit run
+    ///      arbitrary commands during a run that handles three private keys. Not worth it for a
+    ///      string. The deploy command in `docs/TESTNET-RUNBOOK.md` sets it:
+    ///          COMMIT=$(git rev-parse HEAD) forge script ...
+    ///      Falls back to a loud marker rather than reverting the deployment.
+    function _commit() internal view returns (string memory) {
+        return vm.envOr("COMMIT", string("UNKNOWN - COMMIT env unset; record it by hand before publishing"));
+    }
+
+    // --------------------------------------------------------------------------------- helpers
+
+    /// @dev `seedPx18` (18 decimals) into the aggregator's own `FEED_DECIMALS` (8). Division, so it
+    ///      cannot overflow. The exponent is widened to `uint256` deliberately: left as `uint8`,
+    ///      `10 ** (18 - FEED_DECIMALS)` is `10 ** 10` evaluated in `uint8` and overflows.
+    function _toFeedAnswer(uint256 px18) internal pure returns (int256) {
+        return int256(px18 / (10 ** (uint256(18) - uint256(FEED_DECIMALS))));
+    }
+
+    /// @dev Phase 1 runs before `deployed` is sized (the oracles are governance's and come later),
+    ///      so the aggregators are parked in their own array and joined up by index.
+    address[] internal aggregators;
+
+    function _pushAggregator(address a) internal {
+        aggregators.push(a);
+    }
+
+    function _aggregatorOf(uint256 i) internal view returns (address) {
+        return aggregators[i];
+    }
+
+    function _report() internal view {
+        console2.log("=== UseCert testnet deployment, chain", block.chainid, "===");
+        console2.log("deployer       ", deployerAddr);
+        console2.log("governance     ", govAddr);
+        console2.log("attester       ", attesterAddr);
+        console2.log("collateral     ", collateral);
+        console2.log("testFaucet     ", testFaucet);
+        console2.log("LighterSim     ", lighter);
+        console2.log("SolvencyRegistry", registry);
+        console2.log("CapacityOracle ", capacity);
+        console2.log("CertFactory    ", factory);
+        for (uint256 i = 0; i < assets.length; ++i) {
+            console2.log("---", assets[i].symbol, "market", assets[i].marketIndex);
+            console2.log("  ReplayAggregator", deployed[i].aggregator);
+            console2.log("  CertOracle      ", deployed[i].oracle);
+            console2.log("  CertVault       ", deployed[i].vault);
+            console2.log("  Certificate     ", deployed[i].certificate);
+            console2.log("  BufferBook      ", deployed[i].bufferBook);
+        }
+        console2.log("address book -> deployments/%s.json", vm.toString(block.chainid));
+        console2.log("NEXT: script/VerifyTestnet.s.sol (this script's requires are simulation-only),");
+        console2.log("      then the two keepers, or minting stops in ~5 minutes.");
+    }
+}

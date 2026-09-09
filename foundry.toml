@@ -14,6 +14,15 @@ remappings = [
   "openzeppelin-contracts/=lib/openzeppelin-contracts/contracts/",
 ]
 
+# Task 10: `script/DeployTestnet.s.sol` writes the address book `deployments/<chainId>.json`, and
+# `vm.writeFile` refuses any path not listed here. Scoped to that ONE directory and nothing else.
+#
+# This changes NOTHING about compilation: `via_ir` stays false, the optimizer and `optimizer_runs`
+# are untouched, and the EIP-170 size check is unaffected. `ffi` is deliberately NOT enabled — the
+# deploy script handles three private keys, so it takes the deployed commit from a `COMMIT` env var
+# rather than shelling out to `git`.
+fs_permissions = [{ access = "read-write", path = "./deployments" }]
+
 [profile.default.fuzz]
 runs = 512
 
