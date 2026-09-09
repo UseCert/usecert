@@ -13,9 +13,19 @@ contract CertOracle is ICertOracle {
     error CertOracle_TickOverflow();
     error CertOracle_OnlyAttester();
     /// @dev H-1: the deviation reference is rate-limited. An out-of-band price has been observed
-    ///      but has not yet held for a full staleness window, so the reference may not advance
-    ///      onto it yet. Poke again once the window has elapsed.
+    ///      but has not yet held for a full `pokeConfirmationSeconds`, so the reference may not
+    ///      advance onto it yet. The remedy is to wait: poke again once the window has elapsed.
     error CertOracle_ReferenceRateLimited();
+    /// @dev H-1 / Task 1: the confirmation window HAS elapsed, but the feed is still reporting the
+    ///      same round that armed the candidate, so nothing has independently re-reported the
+    ///      dislocation. Distinct from CertOracle_ReferenceRateLimited on purpose: the two have
+    ///      different remedies and a caller must be able to tell "wait longer" from "the feed has
+    ///      not spoken again". Sharing one error would make a dead feed look like a young one.
+    error CertOracle_ReferenceRoundNotAdvanced();
+    /// @dev Task 1: a constructor parameter outside its permitted range. Currently only
+    ///      `pokeConfirmationSeconds == 0`, which would let an arm and its confirmation land in
+    ///      the same block — exactly the atomic poke sequence H-1 exists to prevent.
+    error CertOracle_ConfigOutOfBounds();
     /// @dev M-5: only the rotation authority bound at deploy may propose a new attester.
     error CertOracle_OnlyGovernance();
     /// @dev L-3, and M-5's hard floor: an attester of address(0) would freeze markPx18 and
@@ -61,6 +71,11 @@ contract CertOracle is ICertOracle {
     uint256 public immutable deviationBps;
     /// @dev max |mark - chainlink| in bps before minting pauses
     uint256 public immutable basisBandBps;
+    /// @notice How long an out-of-band observation must hold before the deviation reference may
+    ///         take one clamped step onto it.
+    /// @dev Task 1: the breaker's rate limit, and DELIBERATELY NOT `stalenessSeconds`. See
+    ///      pokeLastGood for the full argument. Never zero (CertOracle_ConfigOutOfBounds).
+    uint256 public immutable pokeConfirmationSeconds;
 
     uint256 public markPx18;
     /// @dev The deviation breaker's reference price. Only the constructor and pokeLastGood write
@@ -89,6 +104,13 @@ contract CertOracle is ICertOracle {
     ///      has survived in the real world, and a feed that lags reports would otherwise shorten
     ///      its own confirmation window.
     uint256 public pendingSince;
+    /// @dev H-1 / Task 1: the feed ROUND ID of the observation that armed `pendingPx18`. This is
+    ///      the distinctness proof's anchor: a confirmation is only accepted from a round strictly
+    ///      greater than this one, so "the price held" means the feed independently re-reported
+    ///      it and never that one round was read twice. Written and cleared in lockstep with
+    ///      `pendingSince` — see `_clearPending` and the two arming sites in pokeLastGood — so the
+    ///      pair can never disagree about whether a candidate is armed.
+    uint80 public pendingRoundId;
 
     constructor(
         address _feed,
@@ -96,13 +118,21 @@ contract CertOracle is ICertOracle {
         uint8 _priceDecimals,
         uint256 _stalenessSeconds,
         uint256 _deviationBps,
-        uint256 _basisBandBps
+        uint256 _basisBandBps,
+        uint256 _pokeConfirmationSeconds
     ) {
         // L-3: no constructor in src/ validated its dependencies, so a mistyped address deployed
         // silently and failed later at an arbitrary call site. A zero feed is the sharpest case —
         // _readFeed below would revert on it and take the whole deployment down anyway, but with an
         // anonymous low-level failure rather than a named error.
         if (_feed == address(0) || _attester == address(0)) revert CertOracle_ZeroAddress();
+        // Task 1: a zero confirmation window leaves the roundId proof as the ONLY gate, and that
+        // proof bounds distinctness, not RATE. With the window at zero, every fresh round the
+        // feed publishes buys another clamped step, so a feed reporting more than once in a block
+        // (or a poke sequence riding several rounds inside one transaction) walks the reference at
+        // whatever speed the feed happens to run at — which is exactly the atomic reference reset
+        // H-1 fixed. Refuse it at deploy time rather than discover it live.
+        if (_pokeConfirmationSeconds == 0) revert CertOracle_ConfigOutOfBounds();
         feed = IAggregatorV3(_feed);
         attester = _attester;
         governance = msg.sender;
@@ -110,12 +140,13 @@ contract CertOracle is ICertOracle {
         stalenessSeconds = _stalenessSeconds;
         deviationBps = _deviationBps;
         basisBandBps = _basisBandBps;
+        pokeConfirmationSeconds = _pokeConfirmationSeconds;
 
         // L-4: the constructor checked positivity but not staleness, so a vault could be deployed
         // against an already-dead feed and start life with a reference price nobody had quoted for
         // days. Same guard shape as px(), future-timestamp half FIRST so it short-circuits the
         // subtraction (CRITICAL B) — and the same named error, not an arithmetic panic.
-        (uint256 p, uint256 t) = _readFeed();
+        (uint256 p, uint256 t,) = _readFeed();
         if (t > block.timestamp || block.timestamp - t > _stalenessSeconds) revert CertOracle_StalePrice();
         lastGoodPx18 = p;
         // L-4: the feed round timestamp, matching pokeLastGood and pxUnguarded's live branch.
@@ -153,12 +184,17 @@ contract CertOracle is ICertOracle {
         emit AttesterRotated(previous, next);
     }
 
-    function _readFeed() internal view returns (uint256 px18, uint256 updatedAt) {
-        (, int256 answer,, uint256 t,) = feed.latestRoundData();
+    /// @dev Task 1: also returns the round id. Every guard is byte-for-byte the one that was here
+    ///      before — `answer <= 0` first, then the unchanged decimals normalisation. The round id
+    ///      is read, not validated: this function's callers (the constructor and px()) do not use
+    ///      it, and validating it here would silently add a new revert to px().
+    function _readFeed() internal view returns (uint256 px18, uint256 updatedAt, uint80 roundId) {
+        (uint80 r, int256 answer,, uint256 t,) = feed.latestRoundData();
         if (answer <= 0) revert CertOracle_NonPositivePrice();
         uint8 d = feed.decimals();
         px18 = d <= 18 ? uint256(answer) * (10 ** (18 - d)) : uint256(answer) / (10 ** (d - 18));
         updatedAt = t;
+        roundId = r;
     }
 
     /// @dev CRITICAL B: `t > block.timestamp` is checked FIRST and reverts the NAMED error.
@@ -168,23 +204,27 @@ contract CertOracle is ICertOracle {
     ///      not "return something": it is to revert with the error callers can actually switch
     ///      on. A future timestamp is not "extremely fresh", it is a broken feed.
     function px() external view returns (uint256) {
-        (uint256 p, uint256 t) = _readFeed();
+        (uint256 p, uint256 t,) = _readFeed();
         if (t > block.timestamp || block.timestamp - t > stalenessSeconds) revert CertOracle_StalePrice();
         return p;
     }
 
     /// @notice Never reverts on guard state. The published last-good-price path for redemption.
     function pxUnguarded() external view returns (uint256, uint256) {
-        (bool ok, uint256 p, uint256 t) = _tryFeed();
+        (bool ok, uint256 p, uint256 t,) = _tryFeed();
         if (ok) return (p, t);
         return (lastGoodPx18, lastGoodAt);
     }
 
     /// @dev Never lets an external feed failure propagate: pxUnguarded(), basisBps() and
     ///      mintAllowed() all rely on this returning cleanly no matter what the feed does.
-    function _tryFeed() internal view returns (bool ok, uint256 px18, uint256 updatedAt) {
-        try feed.latestRoundData() returns (uint80, int256 answer, uint256, uint256 t, uint80) {
-            if (answer <= 0) return (false, 0, 0);
+    /// @dev Task 1: also returns the round id, used only by pokeLastGood's distinctness proof.
+    ///      Every failure tuple returns roundId 0 alongside the zero price and timestamp — an
+    ///      `ok == false` return means "this feed observation does not exist", so no member of the
+    ///      tuple carries information and callers must key off `ok`, exactly as before.
+    function _tryFeed() internal view returns (bool ok, uint256 px18, uint256 updatedAt, uint80 roundId) {
+        try feed.latestRoundData() returns (uint80 r, int256 answer, uint256, uint256 t, uint80) {
+            if (answer <= 0) return (false, 0, 0, 0);
             // CRITICAL B (C1 final review): the `t > block.timestamp` half of this condition is
             // the fix, and it must come FIRST so it short-circuits the subtraction. Without it,
             // `block.timestamp - t` underflows on a feed reporting a future updatedAt and panics
@@ -196,7 +236,7 @@ contract CertOracle is ICertOracle {
             // immutable in CertVault, so there was no swap out of it either.
             // A future timestamp is NOT "fresher than fresh": it is a malfunctioning feed, so it
             // is unusable and returns the failure tuple like any other _tryFeed() failure.
-            if (t > block.timestamp || block.timestamp - t > stalenessSeconds) return (false, 0, 0);
+            if (t > block.timestamp || block.timestamp - t > stalenessSeconds) return (false, 0, 0, 0);
             try feed.decimals() returns (uint8 d) {
                 // Finding 2 (Task 10 review): arithmetic inside a try's success block is NOT
                 // covered by that try's own catch. decimals() >= 96 makes 10 ** (d - 18) overflow
@@ -205,7 +245,7 @@ contract CertOracle is ICertOracle {
                 // any exponentiation: 36 is far beyond any real aggregator and safely below the
                 // ~78 exponent where the power itself would overflow. Out of range -> the feed is
                 // simply unusable, same as any other _tryFeed() failure.
-                if (d > 36) return (false, 0, 0);
+                if (d > 36) return (false, 0, 0, 0);
                 // CRITICAL B re-audit, third exposure in this same success block: with d bounded
                 // the exponentiation is safe and the d > 18 branch is a division by a non-zero
                 // power, but `uint256(answer) * (10 ** (18 - d))` can still overflow — answer is
@@ -215,17 +255,17 @@ contract CertOracle is ICertOracle {
                 // feed's magnitude; an answer that cannot be normalised is an unusable feed.
                 if (d <= 18) {
                     uint256 scale = 10 ** (18 - d);
-                    if (uint256(answer) > type(uint256).max / scale) return (false, 0, 0);
+                    if (uint256(answer) > type(uint256).max / scale) return (false, 0, 0, 0);
                     px18 = uint256(answer) * scale;
                 } else {
                     px18 = uint256(answer) / (10 ** (d - 18));
                 }
-                return (true, px18, t);
+                return (true, px18, t, r);
             } catch {
-                return (false, 0, 0);
+                return (false, 0, 0, 0);
             }
         } catch {
-            return (false, 0, 0);
+            return (false, 0, 0, 0);
         }
     }
 
@@ -259,7 +299,7 @@ contract CertOracle is ICertOracle {
     }
 
     function _basis() internal view returns (bool known, uint256 bps) {
-        (bool ok, uint256 p,) = _tryFeed();
+        (bool ok, uint256 p,,) = _tryFeed();
         if (!ok || p == 0 || markPx18 == 0) return (false, 0);
         uint256 diff = markPx18 > p ? markPx18 - p : p - markPx18;
         return (true, diff * 10_000 / p);
@@ -280,7 +320,7 @@ contract CertOracle is ICertOracle {
     ///      as the guard doing the real work for several windows during a large sustained
     ///      repricing, which raises the stakes on its liveness rather than lowering them.
     function mintAllowed() external view returns (bool) {
-        (bool ok, uint256 p,) = _tryFeed();
+        (bool ok, uint256 p,,) = _tryFeed();
         if (!ok || p == 0) return false;
         if (markPx18 == 0) return false;
         uint256 diff = markPx18 > p ? markPx18 - p : p - markPx18;
@@ -326,14 +366,16 @@ contract CertOracle is ICertOracle {
     ///      2. OUT OF BAND, unconfirmed: the observation is ARMED (pendingPx18/pendingSince) and
     ///         the reference is left alone. This call cannot revert — it has state to write — so
     ///         it returns having advanced nothing.
-    ///      3. OUT OF BAND, armed, still within deviationBps of the armed price, and
-    ///         `block.timestamp - pendingSince > stalenessSeconds`: CONFIRMED. The reference
-    ///         advances by AT MOST deviationBps toward the live price, and re-arms, so a further
-    ///         step costs another full window.
+    ///      3. OUT OF BAND, armed, still within deviationBps of the armed price, AND both
+    ///         confirmation conditions hold — `block.timestamp - pendingSince >
+    ///         pokeConfirmationSeconds` and `roundId > pendingRoundId`: CONFIRMED. The reference
+    ///         advances by AT MOST deviationBps toward the live price, and re-arms (price, block
+    ///         time and round id together), so a further step costs another full window.
     ///      4. OUT OF BAND, armed and held, window not yet elapsed: reverts
-    ///         CertOracle_ReferenceRateLimited. If the price instead moved out of band relative to
-    ///         the armed price, it has not held, and the candidate is re-armed from scratch — a
-    ///         transient spike therefore expires instead of confirming.
+    ///         CertOracle_ReferenceRateLimited. Window elapsed but the feed is still on the arming
+    ///         round: reverts CertOracle_ReferenceRoundNotAdvanced. If the price instead moved out
+    ///         of band relative to the armed price, it has not held, and the candidate is re-armed
+    ///         from scratch — a transient spike therefore expires instead of confirming.
     ///
     ///      Why a cooldown and not the per-call clamp alone: the clamp alone does not fix this.
     ///      Nothing rate-limits how many times pokeLastGood can be called in one transaction, so a
@@ -344,15 +386,40 @@ contract CertOracle is ICertOracle {
     ///      block; the clamp is what bounds a large move to several windows instead of one.
     ///      Both are kept, and neither needs a key.
     ///
-    ///      Why the window is `stalenessSeconds` (no new constructor parameter — the signature is
-    ///      load-bearing for every deployer and fixture): with a STRICT `>` comparison the
-    ///      confirming observation is provably a different, fresher feed round than the arming
-    ///      one. The armed round satisfied `t_arm <= pendingSince`; the confirming round must be
-    ///      fresh, so `t_conf >= block.timestamp - stalenessSeconds > pendingSince >= t_arm`.
-    ///      "The price held" therefore means the feed independently re-reported it, not that one
-    ///      round was read twice. Operators who want minting to reopen faster after a real
-    ///      repricing tighten stalenessSeconds, which is the same knob that governs how fresh the
-    ///      feed must be to be usable at all.
+    ///      Why round distinctness is proven from `roundId`, and why the window is its OWN
+    ///      immutable (Task 1). This function used to derive distinctness from time: with a strict
+    ///      `>` against `stalenessSeconds`, the armed round satisfied `t_arm <= pendingSince` and
+    ///      the confirming round had to be fresh, so
+    ///      `t_conf >= block.timestamp - stalenessSeconds > pendingSince >= t_arm` and the two
+    ///      observations were provably different rounds. The inference was sound but it WELDED the
+    ///      breaker's rate limit to the feed-freshness bound, and the two have nothing to do with
+    ///      each other. `latestRoundData()` hands us the round identity directly, and the contract
+    ///      was discarding it. So the proof is now the direct one — `roundId > pendingRoundId`,
+    ///      recorded at arming time — and "the price held" means the feed minted a new round
+    ///      reporting that level, which is the actual claim, asserted rather than inferred.
+    ///
+    ///      Freeing the proof from the clock is what lets the two knobs separate, and they are
+    ///      deliberately independent because they answer different questions:
+    ///        * `stalenessSeconds` — "how old may a feed observation be and still be usable at
+    ///          all?" It is a property of the aggregator's heartbeat. TESTNET-PLAN.md §1 sets it
+    ///          to 93_600 (26 h) on mainnet, one hour past Chainlink's 24 h equity heartbeat.
+    ///        * `pokeConfirmationSeconds` — "how long must a dislocation persist before the
+    ///          breaker's reference concedes one clamped step to it?" It is a risk tolerance, and
+    ///          the right value is on the order of an hour, not a day.
+    ///      Conflating them priced every clamped step at a full heartbeat: at 93_600 seconds a 20%
+    ///      repricing needed four steps and kept minting shut for roughly 4.3 days — a breaker
+    ///      that outlasts the event it fired on stops being a safety control and becomes an
+    ///      outage. Tightening `stalenessSeconds` to buy back that latency was the only lever, and
+    ///      it is the wrong lever: it makes the oracle reject feed data it should still accept,
+    ///      trading a liveness problem for a correctness one. Two independent immutables let an
+    ///      operator hold the feed bound where the aggregator's cadence puts it and set the
+    ///      breaker's patience separately.
+    ///
+    ///      Note what did NOT get weaker. Removing the timestamp inequality removed an inference,
+    ///      not a check: distinctness is still required, now directly, and the rate limit is still
+    ///      required, now on its own axis. A poke sequence inside one transaction still cannot
+    ///      confirm anything — `block.timestamp - pendingSince` is 0 for every call after the
+    ///      arming one, which is why `pokeConfirmationSeconds == 0` is refused at construction.
     ///
     ///      Not touched: pxUnguarded() (Law 2's never-reverts guarantee lives there and this
     ///      function is not on its path) and mintAllowed()'s own arithmetic. The breaker is
@@ -363,7 +430,7 @@ contract CertOracle is ICertOracle {
     ///      is the honest reading of a zero-tolerance breaker and it fails closed — whereas before
     ///      this fix, deviationBps == 0 was silently defeated by any poke at all.
     function pokeLastGood() external {
-        (bool ok, uint256 p, uint256 t) = _tryFeed();
+        (bool ok, uint256 p, uint256 t, uint80 rid) = _tryFeed();
         // `p == 0` is part of the same failure class and was previously accepted: _tryFeed can
         // report ok == true with px18 == 0 when a high-decimals feed truncates on normalisation
         // (see test_mintAllowedFalseWhenFeedTruncatesToZero). Writing that into lastGoodPx18 would
@@ -396,9 +463,21 @@ contract CertOracle is ICertOracle {
         if (!held) {
             pendingPx18 = p;
             pendingSince = block.timestamp;
+            pendingRoundId = rid;
             return;
         }
-        if (block.timestamp - pendingSince <= stalenessSeconds) revert CertOracle_ReferenceRateLimited();
+        // Task 1: the RATE LIMIT is evaluated first, for two reasons. It is by far the likelier
+        // failure — a poke arriving before the window has elapsed is the ordinary case, a poke
+        // arriving after it against a feed that has not re-reported is the exception — so the
+        // short-circuit puts the usual answer first and skips the `pendingRoundId` load entirely
+        // on that path. And it keeps the diagnostic in the order an operator reads it: "not yet"
+        // before "and the feed still has not spoken". The two are independent conditions, so the
+        // order is a readability and gas choice only; neither can mask the other.
+        if (block.timestamp - pendingSince <= pokeConfirmationSeconds) revert CertOracle_ReferenceRateLimited();
+        // The distinctness proof, direct rather than inferred from timestamps. `pendingRoundId` is
+        // necessarily the round that armed `cand`, because `held` above required `cand != 0` and
+        // the two are only ever written together.
+        if (rid <= pendingRoundId) revert CertOracle_ReferenceRoundNotAdvanced();
 
         // Confirmed. Advance by at most deviationBps, in the direction of the move.
         uint256 next;
@@ -415,14 +494,22 @@ contract CertOracle is ICertOracle {
         // A zero reference would switch mintAllowed()'s deviation check off entirely.
         lastGoodPx18 = next;
         lastGoodAt = t;
+        // Re-arm from THIS observation: price, block time and round id, written together so the
+        // next step needs both a fresh window and a further new round.
         pendingPx18 = p;
         pendingSince = block.timestamp;
+        pendingRoundId = rid;
     }
 
+    /// @dev The single disarm path. All three pending fields are cleared together — the guard is
+    ///      on `pendingSince` only as a gas short-circuit for the overwhelmingly common
+    ///      nothing-armed case, and `pendingSince != 0` holds exactly when a candidate is armed
+    ///      because the two arming sites in pokeLastGood write all three in one go.
     function _clearPending() internal {
         if (pendingSince != 0) {
             pendingPx18 = 0;
             pendingSince = 0;
+            pendingRoundId = 0;
         }
     }
 }

@@ -50,7 +50,7 @@ abstract contract VaultFixture is Test {
         feed = new MockAggregatorV3(8, 355_86000000);
         lighter = new MockLighter(IERC20(address(usdg)), ASSET_IDX, 4);
         reg = new SolvencyRegistry(attester);
-        oracle = new CertOracle(address(feed), attester, 2, 3600, 500, 100);
+        oracle = new CertOracle(address(feed), attester, 2, 3600, 500, 100, 3600);
         cap = new CapacityOracle(address(reg), gov, 1000, 100, 3000, 300, MAX_ABSOLUTE_CAP);
 
         vault = new CertVault(

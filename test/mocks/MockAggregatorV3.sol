@@ -7,6 +7,12 @@ contract MockAggregatorV3 is IAggregatorV3 {
     uint8 internal _decimals;
     int256 public answer;
     uint256 public updatedAt;
+    /// @dev Task 1: the round the feed is currently reporting. Real aggregators mint a NEW round
+    ///      id for every new answer they publish, and CertOracle's poke confirmation now proves
+    ///      round distinctness from this number directly instead of inferring it from timestamps.
+    ///      Starts at 1 so `roundId > pendingRoundId` is a meaningful comparison from the first
+    ///      observation (0 would make an unarmed sentinel indistinguishable from a real round).
+    uint80 public roundId = 1;
     /// @dev when true, both latestRoundData() and decimals() revert — simulates a paused or
     ///      access-controlled aggregator, e.g. Finding 1's scenario.
     bool public shouldRevert;
@@ -17,9 +23,26 @@ contract MockAggregatorV3 is IAggregatorV3 {
         updatedAt = block.timestamp;
     }
 
+    /// @dev Publishes a NEW round, so the round id advances — this is what a live aggregator does
+    ///      on every update, and it is why the 13 existing call sites need no change: every
+    ///      `set()` in the suite already means "the feed spoke again".
     function set(int256 a, uint256 t) external {
         answer = a;
         updatedAt = t;
+        roundId++;
+    }
+
+    /// @dev Task 1: republish inside the SAME round — a fresher `updatedAt` with no new round id.
+    ///      Models the case the roundId proof exists to refuse: a feed (or a caller re-reading
+    ///      one) whose timestamp advances without the feed having independently re-reported.
+    function setSameRound(int256 a, uint256 t) external {
+        answer = a;
+        updatedAt = t;
+    }
+
+    /// @dev Direct control for tests that need a specific round id (e.g. the equality edge).
+    function setRoundId(uint80 r) external {
+        roundId = r;
     }
 
     function setShouldRevert(bool r) external {
@@ -42,6 +65,6 @@ contract MockAggregatorV3 is IAggregatorV3 {
 
     function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
         if (shouldRevert) revert("MockAggregatorV3: reverted");
-        return (1, answer, updatedAt, updatedAt, 1);
+        return (roundId, answer, updatedAt, updatedAt, roundId);
     }
 }

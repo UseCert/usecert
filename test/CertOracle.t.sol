@@ -17,11 +17,17 @@ contract CertOracleTest is Test {
     uint256 constant PX = 355.86e18;
     uint256 constant STALENESS = 3600;
     uint256 constant DEVIATION_BPS = 500;
+    /// @dev Task 1: pokeLastGood's confirmation window, now its own immutable rather than a reuse
+    ///      of STALENESS. Deliberately set EQUAL to STALENESS in this base fixture so every test
+    ///      written against the old welded-together behaviour keeps measuring exactly what it
+    ///      measured before; the tests that prove the two knobs are independent construct their
+    ///      own oracle with different values.
+    uint256 constant POKE_WINDOW = 3600;
 
     function setUp() public {
         vm.warp(1_800_000_000);
         feed = new MockAggregatorV3(8, 355_86000000); // 8 decimals
-        oracle = new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100);
+        oracle = new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
         vm.prank(attester);
         oracle.setMarkPrice(PX);
     }
@@ -142,7 +148,7 @@ contract CertOracleTest is Test {
     /// first, then flip the SAME feed to the absurd decimals afterward via the mock's setter).
     function test_pxUnguardedSurvivesAbsurdFeedDecimals() public {
         MockAggregatorV3 absurdFeed = new MockAggregatorV3(8, 355_86000000);
-        CertOracle absurdOracle = new CertOracle(address(absurdFeed), attester, 2, 3600, 500, 100);
+        CertOracle absurdOracle = new CertOracle(address(absurdFeed), attester, 2, 3600, 500, 100, POKE_WINDOW);
         (uint256 lastGoodP,) = absurdOracle.pxUnguarded();
         assertEq(lastGoodP, PX); // sane construction established a real last-good price
 
@@ -216,7 +222,7 @@ contract CertOracleTest is Test {
     ///         Same treatment as every other unusable feed: fall back, never panic.
     function test_pxUnguardedSurvivesAnAnswerTooLargeToNormalise() public {
         MockAggregatorV3 hugeFeed = new MockAggregatorV3(8, 355_86000000);
-        CertOracle hugeOracle = new CertOracle(address(hugeFeed), attester, 2, 3600, 500, 100);
+        CertOracle hugeOracle = new CertOracle(address(hugeFeed), attester, 2, 3600, 500, 100, POKE_WINDOW);
         (uint256 lastGoodP,) = hugeOracle.pxUnguarded();
         assertEq(lastGoodP, PX); // sane construction established a real last-good price
 
@@ -275,8 +281,13 @@ contract CertOracleTest is Test {
     }
 
     /// @notice The other half: a move that is genuinely there is absorbed, in bounded steps, once
-    ///         it has held for a full staleness window — and the confirming observation is
-    ///         provably a DIFFERENT feed round than the arming one.
+    ///         it has held for a full confirmation window — and the confirming observation is a
+    ///         DIFFERENT feed round than the arming one.
+    /// @dev Task 1 rewrote the prose in this test, not its assertions. The behaviour it measures is
+    ///      unchanged because the base fixture sets POKE_WINDOW == STALENESS; what changed is WHY
+    ///      each step is refused. Round distinctness used to be inferred from the timestamp
+    ///      inequality and is now proven directly from roundId, so the comments below no longer
+    ///      describe the mechanism they used to.
     function test_H1_referenceAdvancesOnlyAfterTheMoveHeldForAWindow() public {
         _movePrice(PX * 106 / 100);
         uint256 armedAt = block.timestamp;
@@ -287,23 +298,23 @@ contract CertOracleTest is Test {
         assertEq(oracle.pendingSince(), armedAt);
         assertEq(oracle.lastGoodPx18(), PX, "arming must not advance the reference");
 
-        // Exactly stalenessSeconds later the ARMING round is still fresh (the edge is `>`), so
-        // this call could be served by the very same round it armed from. The strict comparison is
-        // what refuses it.
-        vm.warp(armedAt + STALENESS);
+        // Exactly pokeConfirmationSeconds later the window has not ELAPSED — the edge is a strict
+        // `>` — so the rate limit refuses it. (The roundId proof would refuse it too: the feed is
+        // still serving the round that armed the candidate.)
+        vm.warp(armedAt + POKE_WINDOW);
         vm.prank(stranger);
         vm.expectRevert(CertOracle.CertOracle_ReferenceRateLimited.selector);
         oracle.pokeLastGood();
 
-        // One second later the arming round has aged out, so there is nothing to confirm against
-        // until the feed speaks again. This is what makes "the price held" mean the feed
-        // re-reported it rather than one round being read twice.
+        // One second later the window has elapsed, but here POKE_WINDOW == STALENESS, so the
+        // arming round has aged out in the same breath and the feed is now unreadable. The poke
+        // therefore fails earlier, on staleness, before either confirmation condition is reached.
         vm.warp(armedAt + STALENESS + 1);
         vm.prank(stranger);
         vm.expectRevert(CertOracle.CertOracle_StalePrice.selector);
         oracle.pokeLastGood();
 
-        _refreshFeedRound(); // the feed independently re-reports the same level
+        _refreshFeedRound(); // the feed independently re-reports the same level, in a NEW round
         vm.prank(stranger);
         oracle.pokeLastGood();
 
@@ -392,7 +403,7 @@ contract CertOracleTest is Test {
     ///         check when lastGoodPx18 == 0 — and poisoned pxUnguarded()'s fallback with a zero.
     function test_H1_pokeRejectsAPriceThatNormalisesToZero() public {
         MockAggregatorV3 tinyFeed = new MockAggregatorV3(19, 1); // 1 / 10 == 0
-        CertOracle tinyOracle = new CertOracle(address(tinyFeed), attester, 2, STALENESS, DEVIATION_BPS, 100);
+        CertOracle tinyOracle = new CertOracle(address(tinyFeed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
         vm.prank(attester);
         tinyOracle.setMarkPrice(PX);
 
@@ -400,6 +411,229 @@ contract CertOracleTest is Test {
         vm.expectRevert(CertOracle.CertOracle_StalePrice.selector);
         tinyOracle.pokeLastGood();
         assertFalse(tinyOracle.mintAllowed());
+    }
+
+    // =======================================================================================
+    // Task 1. H-1's fix proved that a confirming feed observation was a different, fresher round
+    // than its arming observation by an INFERENCE from timestamps:
+    //   t_conf >= block.timestamp - stalenessSeconds > pendingSince >= t_arm
+    // Sound, but it welded the breaker's rate limit to the feed-freshness bound. At the mainnet
+    // stalenessSeconds of 93_600 (26 h) every clamped step cost 26 hours, so a 20% repricing kept
+    // minting shut for ~4.3 days — a breaker outlasting the event it fired on.
+    //
+    // The round identity was available all along in latestRoundData()'s first member and the
+    // contract discarded it. Distinctness is now ASSERTED (roundId > pendingRoundId) instead of
+    // inferred, which frees the rate limit onto its own immutable, pokeConfirmationSeconds.
+    // Both conditions remain necessary; the tests below pin each one down on its own.
+    // =======================================================================================
+
+    /// @dev TESTNET-PLAN.md §1's mainnet feed bound: 26 h, one hour past Chainlink's 24 h equity
+    ///      heartbeat. The number that made the old welded rule unusable.
+    uint256 internal constant MAINNET_STALENESS = 93_600;
+    /// @dev The breaker's patience, as a risk tolerance rather than a heartbeat.
+    uint256 internal constant HOUR_WINDOW = 3_600;
+
+    /// @dev An oracle whose two time knobs DIFFER — which the base fixture cannot demonstrate,
+    ///      since there POKE_WINDOW == STALENESS. Returns the feed too so the test can drive it.
+    function _deployWithSplitWindows(uint256 staleness, uint256 window)
+        internal
+        returns (CertOracle o, MockAggregatorV3 f)
+    {
+        f = new MockAggregatorV3(8, 355_86000000);
+        o = new CertOracle(address(f), attester, 2, staleness, DEVIATION_BPS, 100, window);
+        vm.prank(attester);
+        o.setMarkPrice(PX);
+    }
+
+    /// @dev _movePrice against an arbitrary pair; publishes a NEW feed round, as a live
+    ///      aggregator does on every update.
+    function _movePriceOn(CertOracle o, MockAggregatorV3 f, uint256 px18) internal {
+        f.set(int256(px18 / 1e10), block.timestamp);
+        vm.prank(attester);
+        o.setMarkPrice(px18);
+    }
+
+    function test_pokeConfirmsOnNewRoundIdAfterWindow() public {
+        _movePrice(PX * 106 / 100);
+        uint80 armingRound = feed.roundId();
+
+        vm.prank(stranger);
+        oracle.pokeLastGood();
+        assertEq(oracle.pendingRoundId(), armingRound, "the arming round id was not recorded");
+        assertEq(oracle.lastGoodPx18(), PX, "arming must not advance the reference");
+
+        vm.warp(block.timestamp + POKE_WINDOW + 1);
+        _refreshFeedRound(); // the same price, in a new round
+        assertEq(feed.roundId(), armingRound + 1, "precondition: the feed minted a new round");
+
+        vm.prank(stranger);
+        oracle.pokeLastGood();
+
+        assertEq(
+            oracle.lastGoodPx18(),
+            PX + PX * DEVIATION_BPS / 10_000,
+            "a new round after a full window must earn one clamped step"
+        );
+        assertEq(oracle.pendingRoundId(), armingRound + 1, "the confirm did not re-arm on the confirming round");
+        assertEq(oracle.pendingSince(), block.timestamp, "the confirm did not restart the window");
+    }
+
+    /// @notice THE DISTINCTNESS PROOF, and the test that replaces the timestamp inequality. With
+    ///         stalenessSeconds far wider than the confirmation window, time alone can no longer
+    ///         prove the confirming observation is a new round — the old inference is simply gone.
+    ///         Only roundId stands between a caller and confirming one round against itself.
+    function test_pokeRejectsSameRoundIdEvenAfterWindow() public {
+        (CertOracle o, MockAggregatorV3 f) = _deployWithSplitWindows(MAINNET_STALENESS, HOUR_WINDOW);
+        _movePriceOn(o, f, PX * 106 / 100);
+        uint80 armingRound = f.roundId();
+
+        vm.prank(stranger);
+        o.pokeLastGood();
+        assertEq(o.pendingRoundId(), armingRound);
+        assertEq(o.lastGoodPx18(), PX);
+
+        // Twice the window, and still comfortably inside stalenessSeconds, so _tryFeed happily
+        // serves the very round that armed the candidate.
+        vm.warp(block.timestamp + 2 * HOUR_WINDOW);
+        assertEq(f.roundId(), armingRound, "precondition: the feed has not re-reported");
+
+        vm.prank(stranger);
+        vm.expectRevert(CertOracle.CertOracle_ReferenceRoundNotAdvanced.selector);
+        o.pokeLastGood();
+        assertEq(o.lastGoodPx18(), PX, "PROPERTY: one round read twice must not confirm itself");
+        assertFalse(o.mintAllowed(), "the breaker reopened on an unconfirmed dislocation");
+
+        // Nor does a fresher TIMESTAMP inside the same round buy a confirmation. This is the exact
+        // observation the old timestamp inference could not distinguish from a real new round.
+        f.setSameRound(f.answer(), block.timestamp);
+        vm.prank(stranger);
+        vm.expectRevert(CertOracle.CertOracle_ReferenceRoundNotAdvanced.selector);
+        o.pokeLastGood();
+        assertEq(o.lastGoodPx18(), PX, "a re-timestamped round confirmed itself");
+
+        // One genuine new round and the identical call goes through, so the two refusals above
+        // were about round identity and nothing else in the state.
+        f.set(f.answer(), block.timestamp);
+        vm.prank(stranger);
+        o.pokeLastGood();
+        assertEq(o.lastGoodPx18(), PX + PX * DEVIATION_BPS / 10_000, "a real new round must confirm");
+    }
+
+    /// @notice Round distinctness is NECESSARY, not sufficient: the rate limit is the other half
+    ///         of H-1 and a brand-new round does not shorten it.
+    function test_pokeRejectsNewRoundIdBeforeWindow() public {
+        _movePrice(PX * 106 / 100);
+        uint256 armedAt = block.timestamp;
+        uint80 armingRound = feed.roundId();
+        vm.prank(stranger);
+        oracle.pokeLastGood();
+
+        vm.warp(armedAt + POKE_WINDOW / 2);
+        _refreshFeedRound();
+        assertGt(feed.roundId(), armingRound, "precondition: the feed did re-report");
+
+        vm.prank(stranger);
+        vm.expectRevert(CertOracle.CertOracle_ReferenceRateLimited.selector);
+        oracle.pokeLastGood();
+        assertEq(oracle.lastGoodPx18(), PX, "a new round inside the window advanced the reference");
+        assertEq(oracle.pendingRoundId(), armingRound, "a refused poke must not re-arm");
+        assertEq(oracle.pendingSince(), armedAt, "a refused poke must not restart the window");
+
+        // The edge itself: at EXACTLY pokeConfirmationSeconds the window has not elapsed, because
+        // the comparison is a strict `>`. A new round here is still refused.
+        vm.warp(armedAt + POKE_WINDOW);
+        _refreshFeedRound();
+        vm.prank(stranger);
+        vm.expectRevert(CertOracle.CertOracle_ReferenceRateLimited.selector);
+        oracle.pokeLastGood();
+        assertEq(oracle.lastGoodPx18(), PX, "the window edge is not strict");
+    }
+
+    /// @notice THE POINT OF THE TASK. The confirmation window and the feed-freshness bound are
+    ///         independent immutables, so a held repricing is absorbed one hour after arming even
+    ///         though the feed may legitimately be 26 hours old. Under the welded rule this same
+    ///         call was refused for another 25 hours.
+    function test_pokeWindowIsIndependentOfStaleness() public {
+        (CertOracle o, MockAggregatorV3 f) = _deployWithSplitWindows(MAINNET_STALENESS, HOUR_WINDOW);
+        assertEq(o.stalenessSeconds(), 93_600, "the mainnet feed bound must be untouched");
+        assertEq(o.pokeConfirmationSeconds(), 3_600, "the breaker's window must be its own knob");
+
+        _movePriceOn(o, f, PX * 106 / 100);
+        uint256 armedAt = block.timestamp;
+        vm.prank(stranger);
+        o.pokeLastGood();
+        assertEq(o.lastGoodPx18(), PX);
+
+        // At exactly one hour: refused, the edge is strict.
+        vm.warp(armedAt + 3_600);
+        f.set(f.answer(), block.timestamp);
+        vm.prank(stranger);
+        vm.expectRevert(CertOracle.CertOracle_ReferenceRateLimited.selector);
+        o.pokeLastGood();
+
+        // One second past the hour: confirmed.
+        vm.warp(armedAt + 3_601);
+        f.set(f.answer(), block.timestamp);
+        vm.prank(stranger);
+        o.pokeLastGood();
+
+        assertEq(block.timestamp - armedAt, 3_601, "the confirm did not land one hour after arming");
+        assertLt(
+            block.timestamp - armedAt,
+            MAINNET_STALENESS,
+            "the confirm was NOT inside one staleness window, so the knobs are still welded"
+        );
+        assertEq(o.lastGoodPx18(), PX + PX * DEVIATION_BPS / 10_000, "the clamped step did not happen");
+        assertTrue(o.mintAllowed(), "a held 6% repricing must reopen minting in an hour, not in 26");
+    }
+
+    /// @notice A zero window would leave the roundId proof as the only gate, and that proof bounds
+    ///         distinctness rather than rate — so every fresh round would buy another step. Refuse
+    ///         it at deploy time rather than discover it live.
+    function test_constructorRejectsZeroPokeWindow() public {
+        MockAggregatorV3 f = new MockAggregatorV3(8, 355_86000000);
+
+        vm.expectRevert(CertOracle.CertOracle_ConfigOutOfBounds.selector);
+        new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, 0);
+
+        // The identical deployment with a one-second window is accepted, so the refusal above is
+        // about the zero and not about anything else in the argument list.
+        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, 1);
+        assertEq(o.pokeConfirmationSeconds(), 1);
+    }
+
+    /// @notice The re-arm-from-scratch behaviour must survive the rewrite: a price that keeps
+    ///         moving never holds, so a transient spike expires instead of confirming — and it is
+    ///         the WINDOW that refuses the follow-up poke, with the roundId proof already
+    ///         satisfied. Both halves stay load-bearing.
+    function test_transientSpikeStillExpires() public {
+        _movePrice(PX * 106 / 100);
+        uint256 firstArm = block.timestamp;
+        vm.prank(stranger);
+        oracle.pokeLastGood();
+        uint80 firstRound = oracle.pendingRoundId();
+        assertEq(oracle.pendingPx18(), PX * 106 / 100);
+
+        // Half a window later the spike has kept going: 660 bps from the ARMED candidate.
+        vm.warp(firstArm + POKE_WINDOW / 2);
+        _movePrice(PX * 113 / 100);
+        vm.prank(stranger);
+        oracle.pokeLastGood();
+
+        assertEq(oracle.lastGoodPx18(), PX, "the reference moved on a price that never held");
+        assertEq(oracle.pendingPx18(), PX * 113 / 100, "the candidate was not replaced");
+        assertEq(oracle.pendingSince(), block.timestamp, "the window did not restart");
+        assertGt(oracle.pendingRoundId(), firstRound, "the round anchor did not move with the candidate");
+
+        // Past the FIRST arming's window, with a brand-new round, so the distinctness proof is
+        // satisfied. The re-armed window is what refuses it.
+        vm.warp(firstArm + POKE_WINDOW + 1);
+        _refreshFeedRound();
+        vm.prank(stranger);
+        vm.expectRevert(CertOracle.CertOracle_ReferenceRateLimited.selector);
+        oracle.pokeLastGood();
+        assertEq(oracle.lastGoodPx18(), PX);
+        assertFalse(oracle.mintAllowed());
     }
 
     // =======================================================================================
@@ -412,7 +646,7 @@ contract CertOracleTest is Test {
     function test_L4_lastGoodAtIsTheFeedRoundTimestampNotBlockTime() public {
         MockAggregatorV3 lagging = new MockAggregatorV3(8, 355_86000000);
         lagging.set(355_86000000, block.timestamp - 100); // fresh, but 100s behind the block
-        CertOracle o = new CertOracle(address(lagging), attester, 2, STALENESS, DEVIATION_BPS, 100);
+        CertOracle o = new CertOracle(address(lagging), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
 
         assertEq(o.lastGoodAt(), block.timestamp - 100, "constructor recorded block time, not the round");
         assertTrue(o.lastGoodAt() != block.timestamp, "the two clocks must be distinguishable here");
@@ -439,7 +673,7 @@ contract CertOracleTest is Test {
         vm.warp(block.timestamp + STALENESS + 1);
 
         vm.expectRevert(CertOracle.CertOracle_StalePrice.selector);
-        new CertOracle(address(dead), attester, 2, STALENESS, DEVIATION_BPS, 100);
+        new CertOracle(address(dead), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
     }
 
     function test_L4_constructorRejectsAFutureTimestampedFeed() public {
@@ -448,7 +682,7 @@ contract CertOracleTest is Test {
 
         // Named error, not the arithmetic panic an unguarded `block.timestamp - t` would give.
         vm.expectRevert(CertOracle.CertOracle_StalePrice.selector);
-        new CertOracle(address(ahead), attester, 2, STALENESS, DEVIATION_BPS, 100);
+        new CertOracle(address(ahead), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
     }
 
     // =======================================================================================
@@ -486,7 +720,7 @@ contract CertOracleTest is Test {
 
     function test_L5_basisIsUnknownBeforeAnyMarkIsAttested() public {
         MockAggregatorV3 f = new MockAggregatorV3(8, 355_86000000);
-        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100);
+        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
 
         assertEq(o.markPx18(), 0);
         assertEq(o.basisBps(), 0);
@@ -498,7 +732,7 @@ contract CertOracleTest is Test {
         // 19 feed decimals with answer = 1 truncates to px18 = 1 / 10 = 0 on normalisation,
         // while _tryFeed() still reports ok = true. mintAllowed() must not divide by that zero.
         MockAggregatorV3 tinyFeed = new MockAggregatorV3(19, 1);
-        CertOracle tinyOracle = new CertOracle(address(tinyFeed), attester, 2, 3600, 500, 100);
+        CertOracle tinyOracle = new CertOracle(address(tinyFeed), attester, 2, 3600, 500, 100, POKE_WINDOW);
         vm.prank(attester);
         tinyOracle.setMarkPrice(PX);
 
@@ -588,9 +822,9 @@ contract CertOracleTest is Test {
     /// @notice L-3: the constructor names a bad dependency instead of failing later somewhere else.
     function test_constructorRejectsZeroDependencies() public {
         vm.expectRevert(CertOracle.CertOracle_ZeroAddress.selector);
-        new CertOracle(address(0), attester, 2, STALENESS, DEVIATION_BPS, 100);
+        new CertOracle(address(0), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
 
         vm.expectRevert(CertOracle.CertOracle_ZeroAddress.selector);
-        new CertOracle(address(feed), address(0), 2, STALENESS, DEVIATION_BPS, 100);
+        new CertOracle(address(feed), address(0), 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
     }
 }

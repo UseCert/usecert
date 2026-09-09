@@ -41,7 +41,7 @@ contract CertFactoryTest is Test {
         lighter = new MockLighter(IERC20(address(usdg)), 3, 4);
         reg = new SolvencyRegistry(attester);
         cap = new CapacityOracle(address(reg), gov, 1000, 100, 3000, 300, 1_000_000_000e18);
-        oracle = new CertOracle(address(feed), attester, 2, 3600, 500, 100);
+        oracle = new CertOracle(address(feed), attester, 2, 3600, 500, 100, 3600);
         factory = new CertFactory(address(lighter), address(reg), address(cap), gov);
     }
 
