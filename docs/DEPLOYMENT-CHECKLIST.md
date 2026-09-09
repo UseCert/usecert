@@ -245,10 +245,33 @@ replaces the other.
 
    **This has no counterpart on the real venue, which registers anyone, and must never be read as
    modelling one.** A mainnet deployment against Lighter itself has no such step and no such
-   mapping. Task 7 supersedes the allowlist with per-account collateral isolation — which makes an
-   open registration *harmless* rather than merely impossible — at which point this row and the
-   mapping should both be deleted rather than kept as defence in depth, because keeping it would
-   leave the simulator permanently diverged from the venue on who may hold an account.
+   mapping.
+
+   **CORRECTED 2026-09-09 — this row and the mapping STAY. Do not delete either.** This paragraph
+   previously said that once Task 7 landed, both "should be deleted rather than kept as defence in
+   depth, because keeping it would leave the simulator permanently diverged from the venue on who
+   may hold an account." Task 7 has landed, and its review overturned that. `src/sim/LighterSim.sol`
+   now carries the decision and its reasoning on the mapping itself; the three reasons are:
+
+   1. **It diverges in the *harder* direction, which is explicitly permitted.** Global Constraint 5
+      forbids the simulator being *easier* than the venue, not stricter. The allowlist refuses
+      registrations the venue would accept and refuses nothing the venue refuses, so a vault
+      certified against it is certified against a strictly more restrictive counterparty than the
+      one it will meet. That answers the deleted paragraph's own objection: the divergence is real
+      and is the safe kind.
+   2. **The residual multi-tenant hazards are liveness, and this is what keeps them out of a
+      stranger's reach.** Per-account isolation closed the *integrity* problem — one account can no
+      longer reach another's collateral, position or settlement. It did not close two shared
+      resources: an order on a market with no mark still trips the whole-batch
+      `LighterSim_MarkPriceUnset` pre-pass, and `MAX_QUEUE` is shared. **Both require a second
+      registered account to be reachable at all.**
+   3. **Removing a live gate inside the change that claims to replace it is how this contract's
+      failure pattern continues.** Three successive rounds on `LighterSim` each shipped a remedy
+      that held on the paths that had been tested and nowhere else.
+
+   So the mapping is now defence in depth rather than the only gate — which is a different
+   statement from "redundant". A mainnet deployment still has no such step, and section 9 still
+   reads it back.
 6b. **`LighterSim.setKeeper(batchKeeper)` — the simulator's `owner`, from an env-supplied address
    (`BATCH_KEEPER`), and read back with a `require()` like every other item on this list.** Task 7
    gated `settleBatch()` to `owner` or `keeper`: a permissionless settler picks the block, and
