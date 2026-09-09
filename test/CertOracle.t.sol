@@ -27,7 +27,7 @@ contract CertOracleTest is Test {
     function setUp() public {
         vm.warp(1_800_000_000);
         feed = new MockAggregatorV3(8, 355_86000000); // 8 decimals
-        oracle = new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
+        oracle = new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false);
         vm.prank(attester);
         oracle.setMarkPrice(PX);
     }
@@ -148,7 +148,7 @@ contract CertOracleTest is Test {
     /// first, then flip the SAME feed to the absurd decimals afterward via the mock's setter).
     function test_pxUnguardedSurvivesAbsurdFeedDecimals() public {
         MockAggregatorV3 absurdFeed = new MockAggregatorV3(8, 355_86000000);
-        CertOracle absurdOracle = new CertOracle(address(absurdFeed), attester, 2, 3600, 500, 100, POKE_WINDOW);
+        CertOracle absurdOracle = new CertOracle(address(absurdFeed), attester, 2, 3600, 500, 100, POKE_WINDOW, false);
         (uint256 lastGoodP,) = absurdOracle.pxUnguarded();
         assertEq(lastGoodP, PX); // sane construction established a real last-good price
 
@@ -222,7 +222,7 @@ contract CertOracleTest is Test {
     ///         Same treatment as every other unusable feed: fall back, never panic.
     function test_pxUnguardedSurvivesAnAnswerTooLargeToNormalise() public {
         MockAggregatorV3 hugeFeed = new MockAggregatorV3(8, 355_86000000);
-        CertOracle hugeOracle = new CertOracle(address(hugeFeed), attester, 2, 3600, 500, 100, POKE_WINDOW);
+        CertOracle hugeOracle = new CertOracle(address(hugeFeed), attester, 2, 3600, 500, 100, POKE_WINDOW, false);
         (uint256 lastGoodP,) = hugeOracle.pxUnguarded();
         assertEq(lastGoodP, PX); // sane construction established a real last-good price
 
@@ -403,7 +403,7 @@ contract CertOracleTest is Test {
     ///         check when lastGoodPx18 == 0 — and poisoned pxUnguarded()'s fallback with a zero.
     function test_H1_pokeRejectsAPriceThatNormalisesToZero() public {
         MockAggregatorV3 tinyFeed = new MockAggregatorV3(19, 1); // 1 / 10 == 0
-        CertOracle tinyOracle = new CertOracle(address(tinyFeed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
+        CertOracle tinyOracle = new CertOracle(address(tinyFeed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false);
         vm.prank(attester);
         tinyOracle.setMarkPrice(PX);
 
@@ -440,7 +440,7 @@ contract CertOracleTest is Test {
         returns (CertOracle o, MockAggregatorV3 f)
     {
         f = new MockAggregatorV3(8, 355_86000000);
-        o = new CertOracle(address(f), attester, 2, staleness, DEVIATION_BPS, 100, window);
+        o = new CertOracle(address(f), attester, 2, staleness, DEVIATION_BPS, 100, window, false);
         vm.prank(attester);
         o.setMarkPrice(PX);
     }
@@ -594,11 +594,11 @@ contract CertOracleTest is Test {
         MockAggregatorV3 f = new MockAggregatorV3(8, 355_86000000);
 
         vm.expectRevert(CertOracle.CertOracle_ConfigOutOfBounds.selector);
-        new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, 0);
+        new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, 0, false);
 
         // The identical deployment with a one-second window is accepted, so the refusal above is
         // about the zero and not about anything else in the argument list.
-        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, 1);
+        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, 1, false);
         assertEq(o.pokeConfirmationSeconds(), 1);
     }
 
@@ -646,7 +646,7 @@ contract CertOracleTest is Test {
     function test_L4_lastGoodAtIsTheFeedRoundTimestampNotBlockTime() public {
         MockAggregatorV3 lagging = new MockAggregatorV3(8, 355_86000000);
         lagging.set(355_86000000, block.timestamp - 100); // fresh, but 100s behind the block
-        CertOracle o = new CertOracle(address(lagging), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
+        CertOracle o = new CertOracle(address(lagging), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false);
 
         assertEq(o.lastGoodAt(), block.timestamp - 100, "constructor recorded block time, not the round");
         assertTrue(o.lastGoodAt() != block.timestamp, "the two clocks must be distinguishable here");
@@ -673,7 +673,7 @@ contract CertOracleTest is Test {
         vm.warp(block.timestamp + STALENESS + 1);
 
         vm.expectRevert(CertOracle.CertOracle_StalePrice.selector);
-        new CertOracle(address(dead), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
+        new CertOracle(address(dead), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false);
     }
 
     function test_L4_constructorRejectsAFutureTimestampedFeed() public {
@@ -682,7 +682,7 @@ contract CertOracleTest is Test {
 
         // Named error, not the arithmetic panic an unguarded `block.timestamp - t` would give.
         vm.expectRevert(CertOracle.CertOracle_StalePrice.selector);
-        new CertOracle(address(ahead), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
+        new CertOracle(address(ahead), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false);
     }
 
     // =======================================================================================
@@ -720,7 +720,7 @@ contract CertOracleTest is Test {
 
     function test_L5_basisIsUnknownBeforeAnyMarkIsAttested() public {
         MockAggregatorV3 f = new MockAggregatorV3(8, 355_86000000);
-        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
+        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false);
 
         assertEq(o.markPx18(), 0);
         assertEq(o.basisBps(), 0);
@@ -732,7 +732,7 @@ contract CertOracleTest is Test {
         // 19 feed decimals with answer = 1 truncates to px18 = 1 / 10 = 0 on normalisation,
         // while _tryFeed() still reports ok = true. mintAllowed() must not divide by that zero.
         MockAggregatorV3 tinyFeed = new MockAggregatorV3(19, 1);
-        CertOracle tinyOracle = new CertOracle(address(tinyFeed), attester, 2, 3600, 500, 100, POKE_WINDOW);
+        CertOracle tinyOracle = new CertOracle(address(tinyFeed), attester, 2, 3600, 500, 100, POKE_WINDOW, false);
         vm.prank(attester);
         tinyOracle.setMarkPrice(PX);
 
@@ -822,9 +822,276 @@ contract CertOracleTest is Test {
     /// @notice L-3: the constructor names a bad dependency instead of failing later somewhere else.
     function test_constructorRejectsZeroDependencies() public {
         vm.expectRevert(CertOracle.CertOracle_ZeroAddress.selector);
-        new CertOracle(address(0), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
+        new CertOracle(address(0), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false);
 
         vm.expectRevert(CertOracle.CertOracle_ZeroAddress.selector);
-        new CertOracle(address(feed), address(0), 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW);
+        new CertOracle(address(feed), address(0), 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false);
+    }
+
+    // =======================================================================================
+    // Task 2: SINGLE-SOURCE mode.
+    //
+    // 28 of the venue's 57 perp markets have NO Chainlink feed — 20.5% of open interest,
+    // including XAU (gold, $12.5M OI), XAG, ANTHROPIC ($4.88M OI on $19.3M daily volume), OPENAI
+    // and SHEIN. Those markets are in scope, so a vault will be deployed where the venue's own
+    // mark, directly or through a venue-sourced adapter, is the only price there is.
+    //
+    // The old contract accepted that deployment SILENTLY. basisBpsChecked() reported
+    // `known = true, bps = 0` — a healthy basis ASSERTED, never computed, because feed and mark
+    // were the same number. Two of mintAllowed()'s three guards degenerated for the same reason.
+    // Only the deviation clamp survived, and that is a rate limit, not a truth check. Nothing in
+    // the contracts, the suite or the checklist would have flagged it, which is worse than a loud
+    // failure: pushing the venue mark moves a venue-sourced feed and markPx18 TOGETHER and holds
+    // the basis at zero, so the degenerate band reads healthiest exactly while it is defeated.
+    // =======================================================================================
+
+    /// @dev The widest deviation a single-source deployment may be built with. Must equal
+    ///      CertOracle.MAX_SINGLE_SOURCE_DEVIATION_BPS; asserted in
+    ///      test_constructorRejectsWideDeviationInSingleSource.
+    uint256 internal constant SS_DEVIATION_BPS = 200;
+
+    /// @dev A single-source oracle with a mark attested at the index, i.e. the exact degenerate
+    ///      configuration the finding is about: feed and mark agreeing because they are the same
+    ///      number, not because two independent sources concur.
+    function _deploySingleSource(uint256 devBps) internal returns (CertOracle o, MockAggregatorV3 f) {
+        f = new MockAggregatorV3(8, 355_86000000);
+        o = new CertOracle(address(f), attester, 2, STALENESS, devBps, 100, POKE_WINDOW, true);
+        vm.prank(attester);
+        o.setMarkPrice(PX);
+    }
+
+    /// @notice THE CORE DEFECT. `known = false` (absent) and `known = true, bps = 0` (healthy) must
+    ///         be distinguishable by a caller. That they were not — that a deployment with no
+    ///         second source reported a perfect basis it had never computed — is the whole finding.
+    /// @dev Both oracles below are in the SAME observable state as far as the returned bps is
+    ///         concerned: mark exactly on the index, both returning 0. The only thing separating
+    ///         "there is nothing to compute" from "I computed it and it is zero" is the bit.
+    function test_singleSourceBasisIsAbsentNotZero() public {
+        (CertOracle ss,) = _deploySingleSource(SS_DEVIATION_BPS);
+        assertTrue(ss.singleSource(), "precondition: single-source mode");
+        assertEq(ss.markPx18(), PX, "precondition: a mark IS attested, so absence is not about that");
+
+        (bool ssKnown, uint256 ssBps) = ss.basisBpsChecked();
+        assertFalse(ssKnown, "PROPERTY: a deployment with no independent second source has NO basis");
+        assertEq(ssBps, 0, "the bps half is meaningless when known is false");
+
+        // The dual-source oracle, in the base fixture, with the mark likewise sitting exactly on
+        // the index: a real, computed, zero basis.
+        (bool dualKnown, uint256 dualBps) = oracle.basisBpsChecked();
+        assertFalse(oracle.singleSource(), "precondition: dual-source mode");
+        assertTrue(dualKnown, "a computable basis must still report known");
+        assertEq(dualBps, 0);
+
+        // And the assertion that names the bug: identical numbers, opposite meanings, and the
+        // caller can tell. Before Task 2 both sides of this returned (true, 0).
+        assertEq(ssBps, dualBps, "the two states return the same number, which is why the bit is needed");
+        assertTrue(ssKnown != dualKnown, "PROPERTY: absent and zero must be DISTINGUISHABLE");
+    }
+
+    /// @notice basisBps() has no bit to carry, so it refuses by name rather than returning a
+    ///         meaningless zero. This is the one deliberate exception to its never-reverts
+    ///         contract; `singleSource` is immutable, so it cannot surprise a caller mid-flight.
+    function test_singleSourceBasisBpsReverts() public {
+        (CertOracle ss,) = _deploySingleSource(SS_DEVIATION_BPS);
+
+        vm.expectRevert(CertOracle.CertOracle_NoIndependentBasis.selector);
+        ss.basisBps();
+
+        // The checked variant stays total — a caller that wants the bit rather than the revert has
+        // one, and it never reverts in either mode.
+        (bool known,) = ss.basisBpsChecked();
+        assertFalse(known);
+
+        // And the dual-source path is untouched: still answers, still never reverts.
+        assertEq(oracle.basisBps(), 0);
+    }
+
+    /// @notice In single-source mode the basis band is skipped ENTIRELY, because it is not a guard:
+    ///         feed and mark are the same number, so it compares a value with itself. A mark 50%
+    ///         away from the index — which shuts minting in dual-source mode — must not shut it
+    ///         here, precisely because the band's verdict carries no information.
+    function test_singleSourceMintAllowedIgnoresBasisBand() public {
+        (CertOracle ss,) = _deploySingleSource(SS_DEVIATION_BPS);
+        assertTrue(ss.mintAllowed(), "precondition: minting open");
+
+        // 5000 bps of "basis" against a 100 bps band.
+        vm.prank(attester);
+        ss.setMarkPrice(PX * 150 / 100);
+        assertTrue(ss.mintAllowed(), "PROPERTY: the band is meaningless here and must not gate minting");
+
+        // The same mark on the dual-source fixture, where the band IS a cross-check between two
+        // independent numbers, does shut minting. Same input, different mode, opposite verdict —
+        // which is the point: the band is dropped where it means nothing and kept where it means
+        // something.
+        vm.prank(attester);
+        oracle.setMarkPrice(PX * 150 / 100);
+        assertFalse(oracle.mintAllowed(), "the dual-source band must still bite");
+
+        // The band's `markPx18 != 0` precondition goes with it: a mark of zero is not a guard
+        // either, and keeping it would hand the attester a mint pause by inaction (Law 6).
+        vm.prank(attester);
+        ss.setMarkPrice(0);
+        assertEq(ss.markPx18(), 0);
+        assertTrue(ss.mintAllowed(), "an unread input must not gate minting in single-source mode");
+    }
+
+    /// @notice The two guards that DO survive must still bite, or the mode is not a smaller guard
+    ///         set, it is no guard set. Staleness first, then the deviation clamp — the only
+    ///         remaining defence, and the reason it is capped at construction.
+    function test_singleSourceStillEnforcesStalenessAndDeviation() public {
+        (CertOracle ss, MockAggregatorV3 f) = _deploySingleSource(SS_DEVIATION_BPS);
+        assertTrue(ss.mintAllowed(), "precondition: minting open");
+
+        // STALENESS still bites.
+        vm.warp(block.timestamp + STALENESS + 1);
+        assertFalse(ss.mintAllowed(), "PROPERTY: staleness must still pause minting");
+
+        // A fresh round at the same price reopens it, so the refusal above was staleness and not
+        // something else that the warp happened to trip.
+        f.set(f.answer(), block.timestamp);
+        assertTrue(ss.mintAllowed(), "a fresh feed must reopen minting");
+
+        // The DEVIATION CLAMP still bites: 300 bps against the 200 bps single-source maximum.
+        // Note the mark is moved with the feed, exactly as a venue-sourced deployment does, which
+        // is what would have held the degenerate basis band at zero.
+        f.set(int256(PX * 103 / 100 / 1e10), block.timestamp);
+        vm.prank(attester);
+        ss.setMarkPrice(PX * 103 / 100);
+        assertFalse(ss.mintAllowed(), "PROPERTY: the deviation clamp must still pause minting");
+
+        // And it is the clamp doing it, not staleness: a move inside 200 bps is accepted.
+        f.set(int256(PX * 101 / 100 / 1e10), block.timestamp);
+        assertTrue(ss.mintAllowed(), "a move inside the clamp must be accepted");
+    }
+
+    /// @notice The clamp is the only defence left, so its width is the whole safety budget. A
+    ///         single-source deployment wider than MAX_SINGLE_SOURCE_DEVIATION_BPS is refused at
+    ///         construction, by name, and the bound is not configurable.
+    function test_constructorRejectsWideDeviationInSingleSource() public {
+        assertEq(oracle.MAX_SINGLE_SOURCE_DEVIATION_BPS(), SS_DEVIATION_BPS, "the bound moved");
+
+        MockAggregatorV3 f = new MockAggregatorV3(8, 355_86000000);
+
+        vm.expectRevert(CertOracle.CertOracle_DeviationTooWideForSingleSource.selector);
+        new CertOracle(address(f), attester, 2, STALENESS, SS_DEVIATION_BPS + 1, 100, POKE_WINDOW, true);
+
+        // The bound is inclusive: exactly 200 deploys.
+        CertOracle atBound =
+            new CertOracle(address(f), attester, 2, STALENESS, SS_DEVIATION_BPS, 100, POKE_WINDOW, true);
+        assertEq(atBound.deviationBps(), SS_DEVIATION_BPS);
+        assertTrue(atBound.singleSource());
+
+        // And the check is conditional on the MODE, not on the number: the identical 201 bps is
+        // accepted for a dual-source deployment, where the basis band still stands behind it.
+        CertOracle dual =
+            new CertOracle(address(f), attester, 2, STALENESS, SS_DEVIATION_BPS + 1, 100, POKE_WINDOW, false);
+        assertEq(dual.deviationBps(), SS_DEVIATION_BPS + 1);
+        assertFalse(dual.singleSource());
+    }
+
+    /// @notice `singleSource == false` must be BIT-IDENTICAL to the behaviour before Task 2. The
+    ///         pre-existing tests passing is necessary but not sufficient — they were written
+    ///         against a contract that had no mode at all — so every one of the three affected
+    ///         entry points is exercised explicitly here, including the `markPx18 == 0` precondition
+    ///         that single-source mode drops and dual-source mode must keep.
+    function test_dualSourceBehaviourUnchanged() public {
+        MockAggregatorV3 f = new MockAggregatorV3(8, 355_86000000);
+        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false);
+        assertFalse(o.singleSource());
+
+        // --- markPx18 == 0: basis unknown, and minting REFUSED. Both are pre-Task-2 behaviour.
+        assertEq(o.markPx18(), 0);
+        (bool known, uint256 bps) = o.basisBpsChecked();
+        assertFalse(known, "an unattested mark must not read as a zero basis");
+        assertEq(bps, 0);
+        assertEq(o.basisBps(), 0, "basisBps must not revert in dual-source mode");
+        assertFalse(o.mintAllowed(), "dual-source mode must still require an attested mark");
+
+        // --- mark on the index: a real, computed, zero basis, and minting open.
+        vm.prank(attester);
+        o.setMarkPrice(PX);
+        (known, bps) = o.basisBpsChecked();
+        assertTrue(known);
+        assertEq(bps, 0);
+        assertEq(o.basisBps(), 0);
+        assertTrue(o.mintAllowed());
+
+        // --- mark inside the band: value reported, minting open.
+        vm.prank(attester);
+        o.setMarkPrice(PX * 1005 / 1000);
+        (known, bps) = o.basisBpsChecked();
+        assertTrue(known);
+        assertEq(bps, 50);
+        assertEq(o.basisBps(), 50);
+        assertTrue(o.mintAllowed());
+
+        // --- mark beyond the band: the band still bites, and it is the BAND, since the feed has
+        // not moved so the deviation clamp cannot be the one refusing.
+        vm.prank(attester);
+        o.setMarkPrice(PX * 103 / 100);
+        (known, bps) = o.basisBpsChecked();
+        assertTrue(known);
+        assertEq(bps, 300);
+        assertEq(o.basisBps(), 300);
+        assertFalse(o.mintAllowed(), "the dual-source basis band must still pause minting");
+
+        // --- unreadable feed: basis unknown, basisBps still total, minting refused.
+        vm.prank(attester);
+        o.setMarkPrice(PX);
+        f.setShouldRevert(true);
+        (known, bps) = o.basisBpsChecked();
+        assertFalse(known);
+        assertEq(bps, 0);
+        assertEq(o.basisBps(), 0, "basisBps must never revert in dual-source mode");
+        assertFalse(o.mintAllowed());
+
+        // --- stale feed: same.
+        f.setShouldRevert(false);
+        vm.warp(block.timestamp + STALENESS + 1);
+        (known,) = o.basisBpsChecked();
+        assertFalse(known);
+        assertEq(o.basisBps(), 0);
+        assertFalse(o.mintAllowed());
+    }
+
+    /// @notice The deviation clamp's REFERENCE is required to exist in single-source mode, because
+    ///         there is nothing behind it. `lastGoodPx18 == 0` skips the deviation check, which is
+    ///         harmless in dual-source mode (the band still stands) and would leave single-source
+    ///         minting with no guard at all beyond "the feed answered". It fails closed instead —
+    ///         and pokeLastGood's bootstrap path repairs it, so a real deployment loses nothing.
+    /// @dev The zero reference is reachable exactly as test_H1_pokeRejectsAPriceThatNormalisesToZero
+    ///      describes: a feed whose answer truncates to zero on normalisation at construction.
+    function test_singleSourceFailsClosedWithoutADeviationReference() public {
+        MockAggregatorV3 ssFeed = new MockAggregatorV3(19, 1); // 1 / 10 == 0 on normalisation
+        CertOracle ss =
+            new CertOracle(address(ssFeed), attester, 2, STALENESS, SS_DEVIATION_BPS, 100, POKE_WINDOW, true);
+        assertEq(ss.lastGoodPx18(), 0, "precondition: construction normalised to a zero reference");
+
+        MockAggregatorV3 dualFeed = new MockAggregatorV3(19, 1);
+        CertOracle dual =
+            new CertOracle(address(dualFeed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false);
+        assertEq(dual.lastGoodPx18(), 0);
+
+        // Both feeds recover to a real, readable price, so `p != 0` while the reference stays 0.
+        ssFeed.setDecimals(8);
+        ssFeed.set(355_86000000, block.timestamp);
+        dualFeed.setDecimals(8);
+        dualFeed.set(355_86000000, block.timestamp);
+        vm.startPrank(attester);
+        ss.setMarkPrice(PX);
+        dual.setMarkPrice(PX);
+        vm.stopPrank();
+
+        assertFalse(ss.mintAllowed(), "PROPERTY: single-source must fail closed with no reference");
+        // UNCHANGED dual-source behaviour, stated rather than implied: there the basis band is
+        // still a real cross-check, so a missing deviation reference does not pause minting and
+        // this task must not make it start doing so.
+        assertTrue(dual.mintAllowed(), "dual-source behaviour changed");
+
+        // Repairable without a key (Law 6): the bootstrap branch of pokeLastGood installs one.
+        vm.prank(stranger);
+        ss.pokeLastGood();
+        assertEq(ss.lastGoodPx18(), PX);
+        assertTrue(ss.mintAllowed(), "a bootstrapped reference must reopen minting");
     }
 }

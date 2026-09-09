@@ -37,6 +37,19 @@ contract CertOracle is ICertOracle {
     error CertOracle_ZeroAddress();
     error CertOracle_NoPendingAttester();
     error CertOracle_RotationNotDue();
+    /// @dev Task 2: `basisBps()` was asked for a basis on a deployment that has no independent
+    ///      second source. There is no number to return. Returning zero is what the old code did
+    ///      and it is precisely the defect: zero is also what a PERFECTLY TRACKING mark returns,
+    ///      so "no basis exists" was indistinguishable from "the basis is healthy". Callers that
+    ///      only want the bit rather than the revert use `basisBpsChecked()`, which reports
+    ///      `known == false` here and never reverts.
+    ///      NOT a Law 2 concern: no src/ contract reads `basisBps()` (verified — the only src/
+    ///      consumer of this oracle is CertVault, which calls px(), pxUnguarded(), mintAllowed()
+    ///      and toTickPrice(), and never the basis), so no redemption path can reach this revert.
+    error CertOracle_NoIndependentBasis();
+    /// @dev Task 2: a single-source deployment configured with a deviation tolerance wider than
+    ///      MAX_SINGLE_SOURCE_DEVIATION_BPS. Refused at construction — see that constant.
+    error CertOracle_DeviationTooWideForSingleSource();
 
     /// @dev M-5 (Law 3): a rotation is a public commitment with a published effective time.
     event AttesterRotationProposed(address indexed attester, uint256 effectiveAt);
@@ -52,6 +65,31 @@ contract CertOracle is ICertOracle {
     ///      sits under a `min` since M-1 and can therefore only tighten capacity). pxUnguarded()
     ///      — Law 2's price — is not attester-writable at all and is not affected by a rotation.
     uint256 public constant ATTESTER_ROTATION_DELAY = 2 days;
+
+    /// @notice The widest `deviationBps` a SINGLE-SOURCE deployment may be constructed with: 200
+    ///         bps (2%).
+    /// @dev Task 2. In dual-source mode three guards stand in front of minting — staleness, the
+    ///      basis band, and the deviation clamp — and the band is the only one of the three that
+    ///      compares two independently sourced numbers, i.e. the only one that checks whether the
+    ///      price is TRUE. In single-source mode that guard is gone by construction, so the
+    ///      deviation clamp is the ONLY remaining defence, and a deviation clamp is a rate limit:
+    ///      it bounds how fast the accepted price may move, never whether the price is right. A
+    ///      rate limit standing alone must therefore be a tight one, because its width is now the
+    ///      entire per-window budget an attacker gets for free.
+    ///
+    ///      Why 200. The measured feed-vs-mark basis across 13 live markets was 11.3-49.3 bps, so
+    ///      2% is roughly 4x the widest honest dislocation observed and does not fire on ordinary
+    ///      venue noise, while a single window concedes far less than the capacity of the thin
+    ///      markets this mode exists for (ANTHROPIC: ~$486k of capacity against $4.88M of open
+    ///      interest, so the mark is movable and the clamp width is the attacker's budget, not a
+    ///      theoretical bound).
+    ///
+    ///      Why a constant and not an immutable. A per-deployment knob here would be set by the
+    ///      same judgement that chose to deploy against an unfeeded market in the first place, and
+    ///      the point of this bound is to constrain that judgement rather than defer to it. It is
+    ///      deliberately not configurable: a deployment that wants a wider clamp must find a
+    ///      second price source instead.
+    uint256 public constant MAX_SINGLE_SOURCE_DEVIATION_BPS = 200;
 
     IAggregatorV3 public immutable feed;
     /// @notice The rotation authority. Immutable, bound to the deployer at construction.
@@ -80,6 +118,33 @@ contract CertOracle is ICertOracle {
     /// @dev Task 1: the breaker's rate limit, and DELIBERATELY NOT `stalenessSeconds`. See
     ///      pokeLastGood for the full argument. Never zero (CertOracle_ConfigOutOfBounds).
     uint256 public immutable pokeConfirmationSeconds;
+    /// @notice True when this deployment declares that `feed` and the venue mark are NOT
+    ///         independent price sources — the market has no Chainlink feed and the venue's own
+    ///         mark is, directly or through a venue-sourced adapter, the only price available.
+    /// @dev Task 2. 28 of the venue's 57 perp markets have no Chainlink feed at all — 20.5% of
+    ///      open interest, including XAU (gold, $12.5M OI, the largest single gap), XAG,
+    ///      ANTHROPIC ($4.88M OI on $19.3M daily volume), OPENAI and SHEIN. Those markets are in
+    ///      scope, so a vault will eventually be deployed where `feed` is venue-derived.
+    ///
+    ///      Before this flag existed such a deployment failed SILENTLY, which is the whole finding:
+    ///        * `basisBpsChecked()` returned `known = true, bps = 0` — it ASSERTED a healthy basis
+    ///          it had never computed, because feed and mark were the same number.
+    ///        * Two of mintAllowed()'s three guards degenerated for the same reason: the basis
+    ///          band compared a number with itself and always passed.
+    ///        * Only the deviation clamp survived, and that is a rate limit, not a truth check.
+    ///      Nothing in the contracts, the suite or the deployment checklist would have flagged it.
+    ///      Moving the venue mark moves a venue-sourced feed and `markPx18` TOGETHER, holding the
+    ///      basis at zero, so the degenerate band is not a theoretical concern: it reads healthiest
+    ///      exactly while it is being defeated.
+    ///
+    ///      The flag does not make single-source safe. It makes it HONEST: the basis is reported
+    ///      absent rather than zero, the band is dropped rather than pretended, and the one
+    ///      remaining guard is bounded at construction (MAX_SINGLE_SOURCE_DEVIATION_BPS).
+    ///      DEPLOYMENT REQUIREMENT (docs/DEPLOYMENT-CHECKLIST.md §2): this is a pre-deploy gate no
+    ///      contract can check for itself. Nothing on-chain can tell whether the configured `feed`
+    ///      is genuinely independent of the venue, so setting it to `false` on a venue-derived feed
+    ///      re-creates the exact silent failure this exists to close.
+    bool public immutable singleSource;
 
     uint256 public markPx18;
     /// @dev The deviation breaker's reference price. Only the constructor and pokeLastGood write
@@ -123,7 +188,8 @@ contract CertOracle is ICertOracle {
         uint256 _stalenessSeconds,
         uint256 _deviationBps,
         uint256 _basisBandBps,
-        uint256 _pokeConfirmationSeconds
+        uint256 _pokeConfirmationSeconds,
+        bool _singleSource
     ) {
         // L-3: no constructor in src/ validated its dependencies, so a mistyped address deployed
         // silently and failed later at an arbitrary call site. A zero feed is the sharpest case —
@@ -150,6 +216,12 @@ contract CertOracle is ICertOracle {
         // real and sufficient reason to refuse zero. Refuse it at deploy time rather than discover
         // it live.
         if (_pokeConfirmationSeconds == 0) revert CertOracle_ConfigOutOfBounds();
+        // Task 2: in single-source mode the deviation clamp is the only guard left standing, so its
+        // width is the whole safety budget. Refuse a configuration that leaves it wide. Checked
+        // only when `_singleSource` is true, so a dual-source deployment's tolerance is untouched.
+        if (_singleSource && _deviationBps > MAX_SINGLE_SOURCE_DEVIATION_BPS) {
+            revert CertOracle_DeviationTooWideForSingleSource();
+        }
         feed = IAggregatorV3(_feed);
         attester = _attester;
         governance = msg.sender;
@@ -158,6 +230,7 @@ contract CertOracle is ICertOracle {
         deviationBps = _deviationBps;
         basisBandBps = _basisBandBps;
         pokeConfirmationSeconds = _pokeConfirmationSeconds;
+        singleSource = _singleSource;
 
         // L-4: the constructor checked positivity but not staleness, so a vault could be deployed
         // against an already-dead feed and start life with a reference price nobody had quoted for
@@ -293,14 +366,27 @@ contract CertOracle is ICertOracle {
     ///      wired to this number renders a dead feed as a perfectly tracking one. The signature is
     ///      kept because it is declared in ICertOracle and asserted by the existing suite; use
     ///      basisBpsChecked() for anything that acts on the value, including display.
+    /// @dev Task 2: this is the ONE exception to "never reverts" — a single-source deployment
+    ///      reverts CertOracle_NoIndependentBasis rather than returning a meaningless zero. The
+    ///      never-reverts guarantee existed to keep a FEED FAILURE from propagating; single-source
+    ///      is not a failure, it is a permanent structural property of the deployment fixed at
+    ///      construction, so a caller cannot be surprised by it mid-flight and can read
+    ///      `singleSource` once to know. Returning zero here would be the L-5 defect restated in a
+    ///      form L-5's own fix cannot see: not "0 might mean unknown" but "0 asserts a healthy
+    ///      basis that was never computed". Callers that need a total function keep
+    ///      basisBpsChecked(), which still never reverts. Verified again for this change: no src/
+    ///      contract calls basisBps(), so no redemption path can reach the revert (Law 2).
     function basisBps() external view returns (uint256) {
+        if (singleSource) revert CertOracle_NoIndependentBasis();
         (, uint256 bps) = _basis();
         return bps;
     }
 
     /// @notice basisBps() with the "is this number meaningful" bit attached.
     /// @return known false when the basis could not be computed at all (unreadable feed, an index
-    ///         that normalises to zero, or no attested mark); the bps value is then meaningless.
+    ///         that normalises to zero, no attested mark, or — Task 2 — a single-source deployment
+    ///         in which no independent second source exists to compute a basis FROM); the bps
+    ///         value is then meaningless.
     /// @return bps  the basis in bps when `known`, else 0.
     /// @dev L-5: chosen over a sentinel return and over a separate basisKnown() view. A sentinel
     ///      would change what the existing basisBps() means to every consumer already reading it,
@@ -316,6 +402,12 @@ contract CertOracle is ICertOracle {
     }
 
     function _basis() internal view returns (bool known, uint256 bps) {
+        // Task 2, and the core of the finding. This branch must come FIRST and must return
+        // `known = false`: with a venue-derived feed, `markPx18` and `p` are the same number, so
+        // the computation below would succeed and report `known = true, bps = 0` — a healthy basis
+        // asserted rather than measured. ABSENT is not ZERO. The two states have to be
+        // distinguishable by a caller, and that they were not is the bug being closed.
+        if (singleSource) return (false, 0);
         (bool ok, uint256 p,,) = _tryFeed();
         if (!ok || p == 0 || markPx18 == 0) return (false, 0);
         uint256 diff = markPx18 > p ? markPx18 - p : p - markPx18;
@@ -336,12 +428,47 @@ contract CertOracle is ICertOracle {
     ///      isolated, so it is scoped separately. Note also that H-1's rate limit leaves this band
     ///      as the guard doing the real work for several windows during a large sustained
     ///      repricing, which raises the stakes on its liveness rather than lowering them.
+    ///
+    /// @dev TASK 2 — THE GUARD SET IS DELIBERATELY SMALLER IN SINGLE-SOURCE MODE, AND SAYING SO IS
+    ///      THE POINT. When `singleSource` is true the basis band is SKIPPED ENTIRELY. It is not a
+    ///      guard in that mode: `feed` is venue-derived, so `markPx18` and the feed price are the
+    ///      same number reported twice, `diff` is structurally ~0, and the band passes always and
+    ///      most convincingly at the moment the venue mark is being pushed — moving the mark moves
+    ///      both inputs together and holds the basis at zero. Leaving the band in place would keep
+    ///      a check that cannot fail, which is strictly worse than removing it: it reads, to
+    ///      anything auditing this function, as a live cross-check.
+    ///
+    ///      What is left is staleness/readability (`_tryFeed`) plus the deviation clamp, and the
+    ///      clamp is a RATE LIMIT, not a truth check — it bounds how fast the accepted price may
+    ///      move and says nothing about whether the price is right. That is why
+    ///      MAX_SINGLE_SOURCE_DEVIATION_BPS caps it at construction, and why the clamp's REFERENCE
+    ///      is required to exist here: `lastGoodPx18 == 0` skips the deviation check in the
+    ///      dual-source branch below (harmless there, the band still stands), but in single-source
+    ///      mode it would leave NO guard at all beyond "the feed answered". So a missing reference
+    ///      fails closed instead. Reachable only when construction itself normalised to zero (see
+    ///      test_H1_pokeRejectsAPriceThatNormalisesToZero) and repairable by pokeLastGood's
+    ///      bootstrap path, so this costs a real deployment nothing.
+    ///
+    ///      Also dropped with the band: its `markPx18 != 0` precondition. That check exists only to
+    ///      make the band computable, and keeping it while ignoring the mark's VALUE would hand the
+    ///      attester a mint pause — by inaction, with no compensating safety benefit, since nothing
+    ///      in this mode consults the mark. A gate an attester can trip by going quiet is a pause
+    ///      path in all but name (Law 6), and it would restate L-5's mistake in the other
+    ///      direction: asserting the mark matters when the contract has stopped reading it.
+    ///
+    ///      Nothing above changes ANY dual-source behaviour: the `singleSource == false` branch is
+    ///      the previous body, in the previous order, with the previous short-circuits.
     function mintAllowed() external view returns (bool) {
         (bool ok, uint256 p,,) = _tryFeed();
         if (!ok || p == 0) return false;
-        if (markPx18 == 0) return false;
-        uint256 diff = markPx18 > p ? markPx18 - p : p - markPx18;
-        if (diff * 10_000 / p > basisBandBps) return false;
+        if (singleSource) {
+            // The deviation clamp is the only remaining defence, so its reference must exist.
+            if (lastGoodPx18 == 0) return false;
+        } else {
+            if (markPx18 == 0) return false;
+            uint256 diff = markPx18 > p ? markPx18 - p : p - markPx18;
+            if (diff * 10_000 / p > basisBandBps) return false;
+        }
         if (lastGoodPx18 != 0) {
             uint256 dev = p > lastGoodPx18 ? p - lastGoodPx18 : lastGoodPx18 - p;
             if (dev * 10_000 / lastGoodPx18 > deviationBps) return false;

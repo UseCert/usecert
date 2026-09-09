@@ -168,7 +168,7 @@ contract ReplayAggregatorTest is Test {
     }
 
     function test_stalenessAndFutureTimestampStatesReproducible() public {
-        CertOracle oracle = new CertOracle(address(agg), attester, 2, 3600, 500, 100, 3600);
+        CertOracle oracle = new CertOracle(address(agg), attester, 2, 3600, 500, 100, 3600, false);
 
         // Staleness: no new round for longer than stalenessSeconds.
         vm.warp(block.timestamp + 3601);
@@ -190,7 +190,7 @@ contract ReplayAggregatorTest is Test {
     }
 
     function test_nonPositiveAnswerReproducible() public {
-        CertOracle oracle = new CertOracle(address(agg), attester, 2, 3600, 500, 100, 3600);
+        CertOracle oracle = new CertOracle(address(agg), attester, 2, 3600, 500, 100, 3600, false);
 
         vm.prank(owner);
         agg.push(0);
@@ -208,7 +208,7 @@ contract ReplayAggregatorTest is Test {
     }
 
     function test_absurdDecimalsMakesFeedUnusableForGuards() public {
-        CertOracle oracle = new CertOracle(address(agg), attester, 2, 3600, 500, 100, 3600);
+        CertOracle oracle = new CertOracle(address(agg), attester, 2, 3600, 500, 100, 3600, false);
         vm.prank(attester);
         oracle.setMarkPrice(INITIAL_PX18);
         assertTrue(oracle.mintAllowed());
@@ -228,7 +228,7 @@ contract ReplayAggregatorTest is Test {
     // ---------------------------------------------------------------------
 
     function test_replaySeriesDrivesOracleGuards() public {
-        CertOracle oracle = new CertOracle(address(agg), attester, 2, 3600, 500, 100, 3600);
+        CertOracle oracle = new CertOracle(address(agg), attester, 2, 3600, 500, 100, 3600, false);
 
         vm.prank(attester);
         oracle.setMarkPrice(INITIAL_PX18);
