@@ -579,6 +579,13 @@ new `test/script/DeployTestnet.t.sol`
    `setBufferThresholds`) → collateral transfer → `bootstrap()` → **`LighterSim` batch advance**
    (Task 6b makes this mandatory) → attester phase (`attest`, `setMarkPrice`) → assert the mint gate
    is actually open.
+3a. **`setDepositorAllowed(vault, true)` on `LighterSim`, BEFORE `bootstrap()`.** Task 5's fix
+   round added an owner-gated registration allowlist to the simulator as the interim that closes
+   the self-registration drain, so **`vault.bootstrap()` reverts `LighterSim_DepositorNotAllowed`
+   until the vault is allowed.** It fails closed, which is right, but it is a deployment step that
+   exists in no earlier document — `docs/DEPLOYMENT-CHECKLIST.md` was off-limits to the task that
+   introduced it. Put it in the script, **and add the corresponding row to the checklist as part of
+   this task.** Without it the deployment stops at step 7 with an error nothing explains.
 4. **`absoluteCap18` must be set by governance or the vault cannot mint at all** — it is zero by
    default and `min()` makes zero mean no capacity. This is the single most common way this
    deployment will appear broken.
