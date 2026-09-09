@@ -11,11 +11,19 @@
  * numbers come from and — more importantly — what happens when there is no number.
  *
  * Every figure that has no on-chain source is `null`, never `0`. That is deliberate and
- * it is type-enforced: `price`, `supply`, `buffer`, `bufferPct`, `delta`, `deltaBps`,
- * `change24h`, `funding8h`, `ageSec`, `hotBuffer`, `bufferCapacity` and `backing` are all
- * nullable, so a component cannot render one without deciding what to show when it is
- * absent. Use `fmtOrDash` from `./format` — a greyed card with invented figures is worse
- * than the mock was, because it looks authoritative.
+ * it is type-enforced: `price`, `supply`, `buffer`, `deltaView`, `capacity`, `change24h`,
+ * `funding8h`, `ageSec`, `hotBuffer`, `bufferCapacity` and `backing` are all nullable, so a
+ * component cannot render one without deciding what to show when it is absent. Use
+ * `fmtOrDash` from `./format` — a greyed card with invented figures is worse than the mock
+ * was, because it looks authoritative.
+ *
+ * DERIVED RATIOS OBEY THE SAME RULE, which stage 2 did not enforce. Nulling the INPUTS is
+ * only half the job: `margin / notional` and `solvency.deltaBps` both had real inputs and
+ * still printed nonsense, because the first divides by a zero the old code clamped to $1 and
+ * the second is a ratio whose 10_000-bps centre was being read as "100% off target". Any
+ * quotient reaching the screen must be `null` where its denominator is zero or absent, and
+ * any on-chain sentinel must be decoded before it is formatted — see `Totals.ratio` and
+ * `DeltaView`.
  *
  * THE FIVE VAULTS. Only uTSLA (market 16) and uSPY (market 26) are deployed on chain
  * 46630. uNVDA, uSPX and uQQQ have no vault, no certificate token and no oracle. They are
@@ -66,7 +74,9 @@ import {
   useLiveVaults,
   useUserBalances,
   useVaultConfigs,
+  type CapacityView,
   type ChainVaultId,
+  type DeltaView,
   type LiveVault,
   type VaultConfigView,
 } from "@/chain/useVaults";
@@ -176,12 +186,23 @@ export interface Vault {
   supply: number | null; // certificate units, 18 dp
   /** Collateral the vault actually holds — `backing.bufferHeld` and nothing else. */
   buffer: number | null; // USD
-  /** `bufferHeld / bufferCapacity18`, as a percent. See the mapping note in the report. */
-  bufferPct: number | null;
-  /** `1 + deltaBps/10_000`. Do NOT render this as a signed drift — see `deltaBps`. */
-  delta: number | null;
-  /** `solvency.deltaBps` in percent. UNSIGNED on-chain: magnitude only, no direction. */
-  deltaBps: number | null;
+  /**
+   * `solvency.deltaBps`, DECODED. `null` when the vault is not routed.
+   *
+   * `bufferPct`, `delta` and `deltaBps` are all gone from this shape on purpose:
+   *
+   *  *  `bufferPct` was `bufferHeld / bufferCapacity18()`, which is pinned near 1% at every
+   *     fill level by construction and reached 100% at none. See `CapacityView`.
+   *  *  `deltaBps` was `solvency.deltaBps / 100` rendered as "% from target". The field is a
+   *     hedge-to-obligation RATIO in bps (`CertVault.sol:1600`) where 10_000 is dead centre,
+   *     so that label inverted it: a perfectly hedged vault read "100.00% from target" and a
+   *     completely unhedged one reads a reassuring "0.00%".
+   *  *  `delta` was `1 + deltaBps/10_000`, which makes an at-target vault 2.0. Nothing
+   *     rendered it, and it is not being kept for something to.
+   */
+  deltaView: DeltaView | null;
+  /** The bounded mint-ceiling indicator. `null` when the vault is not routed. */
+  capacity: CapacityView | null;
 
   /** No on-chain source (accrual is a cumulative claim, not a rate). Always `null`. */
   funding8h: number | null;
@@ -260,8 +281,17 @@ export interface Totals {
   buffer: number;
   /** Attester's cumulative P&L claim. Summed SEPARATELY; never folded into `buffer`. */
   accrualClaimedUnverified: number;
-  ratio: number;
-  delta: number;
+  /**
+   * `margin / notional` as a percent — `null` when the attested notional is ZERO, which is
+   * the live state of both routed vaults. A zero denominator is undefined, not 46,054%.
+   */
+  ratio: number | null;
+  /** Protocol-wide mint-ceiling utilisation. `null` when unknown or the cap is zero. */
+  capacityUsed: number | null;
+  capacityCap: number | null;
+  capacityUtilisationPct: number | null;
+  /** True when any routed vault's cap is exactly zero: that vault refuses every mint. */
+  anyCapacityHalted: boolean;
   /** The worst (largest) attestation age across routed vaults, not an average. */
   worstAgeSec: number;
   anyStale: boolean;
@@ -307,9 +337,8 @@ function emptyFigures(): Omit<Vault, "id" | "name" | "full" | "img" | "imgPlaceh
     change24hUnavailable: true,
     supply: null,
     buffer: null,
-    bufferPct: null,
-    delta: null,
-    deltaBps: null,
+    deltaView: null,
+    capacity: null,
     funding8h: null,
     funding8hUnavailable: true,
     backing: null,

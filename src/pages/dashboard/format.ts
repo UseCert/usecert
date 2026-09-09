@@ -4,6 +4,16 @@
 export const EM_DASH = "—";
 
 /**
+ * What a ratio looks like when its denominator does not exist.
+ *
+ * A bare em-dash is right for a missing INPUT but too quiet for a missing DENOMINATOR: the
+ * reader can see the inputs on the same screen and will assume the app simply failed to divide
+ * them. Saying "no position" instead answers the question the blank raises. Both routed vaults
+ * attest `notional18 == 0`, so this is the live state of every attested ratio on the dashboard.
+ */
+export const NO_POSITION = "n/a — no position";
+
+/**
  * The only way a number should reach the screen.
  *
  * Every figure on the live model is nullable, because plenty of them have no on-chain
@@ -39,6 +49,18 @@ export function fmtCountdown(sec: number): string {
   if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m`;
   if (m > 0) return `${m}m ${String(s).padStart(2, "0")}s`;
   return `${s}s`;
+}
+
+/**
+ * A ratio the app computed itself → a percent string, or a reason it could not be computed.
+ *
+ * The counterpart to `fmtOrDash` for QUOTIENTS. `fmtOrDash` covers a figure that was never
+ * read; this covers a figure that could not be derived because its denominator was zero or
+ * absent — which is the failure stage 2 left open, since nulling the inputs does not null what
+ * is divided by them.
+ */
+export function fmtRatioOrNoPosition(pct: number | null | undefined, decimals = 2): string {
+  return pct === null || pct === undefined ? NO_POSITION : `${fmtNum(pct, decimals)}%`;
 }
 
 export function fmtNum(n: number, decimals = 2): string {

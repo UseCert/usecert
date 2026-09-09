@@ -9,7 +9,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FundingBar, SeriesPoint, Timeframe } from "./store";
-import { fmtCompactUSD, fmtUSD } from "./format";
+import { NO_POSITION, fmtCompactUSD, fmtUSD } from "./format";
 
 /* ------------------------------------------------------------ size hook */
 
@@ -241,8 +241,17 @@ export function SolvencyChart({
           <p className="text-white-60">{hoverTime}</p>
           <p className="text-green-bright">BACKING {fmtUSD(hoverPoint.backing, 0)}</p>
           <p className="text-silver">SUPPLY × PRICE {fmtUSD(hoverPoint.obligation, 0)}</p>
+          {/* Guarded, and the hardcoded "+" is gone with it. `obligation` is
+              `supply × oracle price` and is genuinely 0 whenever supply is 0, which was an
+              unguarded divide producing "DELTA +Infinity%"; and the coverage ratio can fall
+              BELOW 1, in which case a forced "+" mislabels a shortfall as a surplus. */}
           <p className="text-white-60">
-            DELTA +{(((hoverPoint.backing / hoverPoint.obligation) - 1) * 100).toFixed(2)}%
+            DELTA{" "}
+            {hoverPoint.obligation > 0
+              ? `${hoverPoint.backing >= hoverPoint.obligation ? "+" : "−"}${Math.abs(
+                  (hoverPoint.backing / hoverPoint.obligation - 1) * 100,
+                ).toFixed(2)}%`
+              : NO_POSITION}
           </p>
         </div>
       )}

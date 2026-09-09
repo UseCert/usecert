@@ -2,6 +2,8 @@ import { useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
 import { motion } from "framer-motion";
 import { ChevronDown } from "lucide-react";
+import { capacityLegsLabel, type CapacityView, type DeltaView } from "@/chain/useVaults";
+import { EM_DASH, NO_POSITION, fmtNum, fmtUSD } from "./format";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------ primitives */
@@ -407,6 +409,238 @@ export function PriceUnavailable({ className }: { className?: string }) {
       title="oracle.px() reverted: the feed is stale, deviant or badly fed. Minting is paused; redemption still works."
     >
       Price unavailable · minting paused
+    </span>
+  );
+}
+
+/* ------------------------------------------------------ capacity + delta */
+
+/**
+ * The mint-ceiling utilisation bar.
+ *
+ * This is the ONE bounded capacity indicator on these contracts: it mirrors
+ * `CertVault._requireCapacity` (`CertVault.sol:1755-1771`) and therefore hits exactly 100% at
+ * the moment `CertVault_AtCapacity` starts firing.
+ *
+ * It replaces `buffer held / bufferCapacity18()`, which was not an indicator. That ratio is
+ * pinned within rounding of 1% at every fill level, because `bufferCapacity18()` is
+ * `freeCollateral18() × BUFFER_COVERAGE_MULTIPLE` capped by the ledger's own claim
+ * (`CertVault.sol:563-569`) — a notional-exposure CEILING, not headroom — and it RISES as the
+ * vault mints, since `_postMargin` retains `1 − targetMarginBps` of every mint as float
+ * (`CertVault.sol:1925-1931`). It also overstated the real bound by 111×: $10,000,003 against
+ * a binding $90,000 on uTSLA. Pairing it with `hotBuffer()` would have been worse still —
+ * `hotBuffer()` is 6-decimal and `bufferCapacity18()` 18-decimal, so that quotient renders
+ * 0.0000% forever.
+ *
+ * A zero cap gets its own rendering rather than a `0 / 0` percentage: it is a real, reachable
+ * state that stops every mint (see `CapacityHalt`).
+ */
+export function CapacityBar({
+  view,
+  className,
+}: {
+  view: CapacityView;
+  className?: string;
+}) {
+  const { utilisationPct, used, cap, capIsZero, atCapacity } = view;
+
+  if (capIsZero) {
+    return (
+      <div className={cn("relative h-6 w-full border border-warn/40 bg-warn/10", className)}>
+        <span className="absolute inset-0 flex items-center justify-center font-mono text-[10px] uppercase tracking-[0.08em] text-warn">
+          Mint ceiling is 0 — every mint is refused
+        </span>
+      </div>
+    );
+  }
+
+  if (utilisationPct === null || used === null || cap === null) {
+    // Two different absences, and they must not share a message. `used` needs the oracle
+    // price to value the outstanding supply, so a reverted `px()` makes the numerator
+    // unmeasurable — that is a designed oracle state, not a read still in flight.
+    const oracleBlocked = cap !== null && used === null;
+    return (
+      <div
+        className={cn(
+          "relative h-6 w-full border bg-white/5",
+          oracleBlocked ? "border-warn/40" : "hairline-dark",
+          className,
+        )}
+      >
+        <span
+          className={cn(
+            "absolute inset-0 flex items-center justify-center font-mono text-[10px] uppercase tracking-[0.08em]",
+            oracleBlocked ? "text-warn" : "text-white-60",
+          )}
+        >
+          {oracleBlocked
+            ? `Ceiling ${fmtUSD(cap, 2)} · used not measurable while oracle.px() reverts`
+            : "Reading capacityOracle.maxNotional18…"}
+        </span>
+      </div>
+    );
+  }
+
+  // Clamp the BAR, never the figure: utilisation can exceed 100% when an existing position
+  // sits above a cap governance has since lowered, and the label must still say so.
+  const barPct = Math.max(0, Math.min(100, utilisationPct));
+  return (
+    <div
+      className={cn(
+        "relative h-6 w-full border bg-white/5",
+        atCapacity ? "border-warn/40" : "hairline-dark",
+        className,
+      )}
+      title="used / cap, where used = max((totalSupply + pendingMintCerts) × oracle price, attested notional18) and cap = capacityOracle.maxNotional18(vault, bufferCapacity18()). Mirrors CertVault._requireCapacity."
+    >
+      <div
+        className={cn(
+          "h-full transition-all duration-500",
+          atCapacity ? "bg-warn/60" : "bg-green-bright/60",
+        )}
+        style={{ width: `${barPct}%` }}
+      />
+      <span className="absolute inset-0 flex items-center justify-center font-mono text-[10px] uppercase tracking-[0.08em] text-white">
+        {fmtNum(utilisationPct, 2)}% of mint ceiling · {fmtUSD(used, 2)} of {fmtUSD(cap, 2)}
+      </span>
+    </div>
+  );
+}
+
+/** The binding leg, as one line. The actual diagnostic when a mint is refused. */
+export function CapacityLegLine({
+  view,
+  className,
+}: {
+  view: CapacityView;
+  className?: string;
+}) {
+  if (view.bindingLegs.length === 0) return null;
+  return (
+    <p
+      className={cn(
+        "font-mono text-[10px] uppercase leading-[1.7] tracking-[0.06em]",
+        view.capIsZero ? "text-warn" : "text-white-60/70",
+        className,
+      )}
+    >
+      Binding leg{view.bindingLegs.length > 1 ? "s" : ""}: {capacityLegsLabel(view.bindingLegs)}.
+    </p>
+  );
+}
+
+/**
+ * Why minting is refused when nothing on screen looks wrong — the silent halt.
+ *
+ * `BufferBook.capacity18` returns 0 whenever `balance18 <= 0` (`BufferBook.sol:183-187`). That
+ * forces `bufferCapacity18()` to 0 (`CertVault.sol:563-569`), which forces
+ * `CapacityOracle.maxNotional18` to 0 (`CapacityOracle.sol:97`), and `_requireCapacity` then
+ * reverts `CertVault_AtCapacity` for EVERY mint — a $100 mint into a vault sitting on $100,000
+ * of tUSDG, with a healthy oracle, `mintAllowed() == true` and a fresh attestation. Nothing
+ * else on the page moves when this fires, so it has to be said out loud.
+ *
+ * Renders nothing unless the cap is actually zero.
+ */
+export function CapacityHalt({
+  view,
+  bufferHeld,
+  className,
+}: {
+  view: CapacityView;
+  /** `solvency.buffer18` — shown beside the ledger to make the gap between them explicit. */
+  bufferHeld?: number | null;
+  className?: string;
+}) {
+  if (!view.capIsZero) return null;
+
+  const ledger = view.bufferLedger;
+  return (
+    <div className={cn("border border-warn/40 bg-[#12120d] p-4", className)}>
+      <p className="font-mono text-[11px] uppercase tracking-[0.06em] text-warn">
+        Minting halted · mint ceiling is zero
+      </p>
+      <p className="mt-1 font-mono text-[11px] leading-[1.6] text-white-60">
+        capacityOracle.maxNotional18 is 0, so _requireCapacity refuses every mint regardless of
+        the collateral this vault holds. Redemption is unaffected: no redemption path reads
+        capacity, and forceExit is gated on nothing.
+        {view.bindingLegs.length > 0 ? ` Cause: ${capacityLegsLabel(view.bindingLegs)}.` : ""}
+      </p>
+      {view.bindingLeg === "buffer-ledger-nonpositive" && (
+        <p className="mt-2 font-mono text-[10px] uppercase leading-[1.7] tracking-[0.06em] text-white-60/70">
+          BufferBook.balance18 is {ledger === null ? EM_DASH : fmtUSD(ledger, 2)}
+          {bufferHeld !== null && bufferHeld !== undefined
+            ? ` while the vault still holds ${fmtUSD(bufferHeld, 2)} of collateral`
+            : ""}
+          . The ledger is an accrual claim, not the balance — at or below zero it zeroes the
+          ceiling on its own.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * `solvency.deltaBps`, rendered as the three things it can actually be.
+ *
+ * The field is a hedge-to-obligation RATIO in basis points — `notional18 × 10_000 / required`
+ * (`CertVault.sol:1600`) — so 10_000 bps is dead centre and 0 is completely unhedged. Stage 2
+ * printed the raw bps as "% from target", which inverts it in the worst possible direction:
+ * a perfectly hedged vault read "100.00% from target" and the live state right now — an
+ * attested notional of $0 against a real obligation, i.e. NO hedge at all — reads a reassuring
+ * "0.00%". Two of the three states are sentinels for a zero denominator and are not numbers at
+ * all (`CertVault.sol:1491-1508`, `CertVault.sol:1587-1600`).
+ */
+export function HedgeRatio({
+  view,
+  className,
+}: {
+  view: DeltaView | null;
+  className?: string;
+}) {
+  if (view === null) {
+    return <span className={cn("text-white-60", className)}>{EM_DASH}</span>;
+  }
+
+  if (view.kind === "no-obligation") {
+    return (
+      <span
+        className={cn("text-white-60", className)}
+        title="required == 0 and the attested notional is 0: nothing outstanding and nothing hedged. The contract publishes 10_000 bps here as a sentinel so rebalance() reverts CertVault_InBand — it is not a measurement of a position, because there is no position."
+      >
+        {NO_POSITION}
+      </span>
+    );
+  }
+
+  if (view.kind === "unbounded") {
+    return (
+      <span
+        className={cn("text-warn", className)}
+        title="DELTA_UNBOUNDED_BPS (type(uint256).max): a live attested position against a zero obligation. The hedge-to-obligation ratio has no denominator, and this is the worst state the vault can be in — pure unhedged directional risk."
+      >
+        unbounded · position vs zero obligation
+      </span>
+    );
+  }
+
+  // Under-hedged is the dangerous side, so it is the side that gets the warn colour.
+  const tone =
+    Math.abs(view.driftPct) <= 1
+      ? "text-white"
+      : view.driftPct < 0
+        ? "text-warn"
+        : "text-silver";
+  return (
+    <span
+      className={cn(tone, className)}
+      title="notional18 × 10_000 / (supply × oracle price), from solvency(). 100% is at target; below 100% is under-hedged, above is over-hedged."
+    >
+      {fmtNum(view.hedgeRatioPct, 2)}% of target
+      <span className="text-white-60">
+        {" "}
+        ({view.driftPct >= 0 ? "+" : "−"}
+        {fmtNum(Math.abs(view.driftPct), 2)} pts)
+      </span>
     </span>
   );
 }

@@ -9,7 +9,7 @@ export const Route = createFileRoute("/vaults/")({
       {
         name: "description",
         content:
-          "Browse UseCert vaults: uTSLA, uNVDA, uSPX, uQQQ and uAAPL certificates, each backed by on-chain perp positions and USDC margin.",
+          "Browse UseCert vaults: uTSLA, uNVDA, uSPX, uQQQ and uAAPL certificates, each backed by on-chain perp positions and tUSDG margin.",
       },
       { property: "og:title", content: "UseCert Vaults" },
       {

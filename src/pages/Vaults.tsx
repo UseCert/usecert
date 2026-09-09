@@ -63,7 +63,7 @@ export default function Vaults() {
               transition={{ delay: 0.5, duration: 0.7, ease: EASE }}
             >
               Per-asset vaults, factory-deployed on Robinhood Chain. Each one mints a certificate backed by exactly
-              one token's worth of perp exposure plus USDC margin.
+              one token's worth of perp exposure plus tUSDG margin.
             </motion.p>
           </div>
 

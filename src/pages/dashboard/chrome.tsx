@@ -35,13 +35,23 @@ export function TopBar() {
   } = useDashboard();
   // No data is not "healthy" and it is not "degraded" either — it is unknown, and the
   // chip says so rather than asserting either one.
-  const status: "unknown" | "healthy" | "degraded" = isError
+  //
+  // `totals.ratio` is now `null` when the attested notional is zero, which is the live state
+  // of both mirrors. That is a FOURTH state and it gets its own label: the old expression was
+  // `totals.ratio >= 100`, and against the previous unguarded ratio — margin over a
+  // denominator clamped to $1 — a vault with no attested position at all sailed past 100% and
+  // published "Attested backing holds". Nothing was attested. It cannot hold.
+  const status: "unknown" | "no-position" | "healthy" | "degraded" = isError
     ? "degraded"
     : totals === null
       ? "unknown"
-      : totals.ratio >= 100 && !totals.anyStale && !totals.anyPriceUnavailable
-        ? "healthy"
-        : "degraded";
+      : totals.anyStale || totals.anyPriceUnavailable
+        ? "degraded"
+        : totals.ratio === null
+          ? "no-position"
+          : totals.ratio >= 100
+            ? "healthy"
+            : "degraded";
   return (
     <header className="fixed left-0 right-0 top-0 z-40 h-16 border-b hairline-dark bg-abyss/85 backdrop-blur-[12px]">
       <div className="relative grid h-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 md:px-6">
@@ -69,7 +79,9 @@ export function TopBar() {
               ? "Attested backing holds"
               : status === "degraded"
                 ? "Degraded · check age and oracle"
-                : "Reading chain…"}
+                : status === "no-position"
+                  ? "No attested position"
+                  : "Reading chain…"}
           </span>
           {/* Margin/notional, both attester-relayed, with the age of that attestation. A
               backing figure with no age is the claim this project spent the most effort
@@ -77,9 +89,11 @@ export function TopBar() {
           <span className="hidden truncate font-mono text-[10px] uppercase tracking-[0.08em] text-white-60 xl:block">
             {totals === null
               ? "Margin / notional —"
-              : `Margin / notional ${totals.ratio.toFixed(2)}% (attested) · proven ${Math.round(
-                  totals.worstAgeSec,
-                )}s ago${totals.anyStale ? ` · stale >${maxAttestationAgeSec}s` : ""}`}
+              : `Margin / notional ${
+                  totals.ratio === null ? "n/a (attested notional $0)" : `${totals.ratio.toFixed(2)}% (attested)`
+                } · proven ${Math.round(totals.worstAgeSec)}s ago${
+                  totals.anyStale ? ` · stale >${maxAttestationAgeSec}s` : ""
+                }`}
           </span>
         </div>
 

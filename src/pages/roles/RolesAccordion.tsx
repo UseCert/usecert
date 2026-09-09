@@ -19,7 +19,7 @@ const ROWS: RoleRow[] = [
     title: "Holder",
     meta: "The missing primitive",
     body: [
-      "Mint certificates and hold them. That is the whole job. Your uTSLA sits in your wallet, tracks the stock 24/7, and redeems to USDC at oracle price whenever you want out. No funding tabs, no liquidation price, nothing to manage.",
+      "Mint certificates and hold them. That is the whole job. Your uTSLA sits in your wallet, tracks the stock 24/7, and redeems to tUSDG at oracle price whenever you want out. No funding tabs, no liquidation price, nothing to manage.",
       "Reward: stock exposure that just sits there. The asset Robinhood Chain was missing, finally holdable.",
     ],
     image: "/roles-holder.jpg",

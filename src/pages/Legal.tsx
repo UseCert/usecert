@@ -11,7 +11,7 @@ interface LegalSection {
 }
 
 const PROTOCOL_DISCLAIMER =
-  "Certificates are synthetic instruments backed by on chain perp positions and USDC margin. No dividends, no shareholder rights. Not available where synthetic equity exposure is restricted. UseCert is infrastructure, not investment advice.";
+  "Certificates are synthetic instruments backed by on chain perp positions and tUSDG margin. No dividends, no shareholder rights. Not available where synthetic equity exposure is restricted. UseCert is infrastructure, not investment advice.";
 
 const CONTACT_LINE =
   "For any questions about this document, reach the team on X (x.com/usecert) or Telegram (t.me/usecert).";
@@ -71,13 +71,13 @@ const DOCS: Record<LegalDoc, { title: string; updated: string; sections: LegalSe
       {
         heading: "1. The service",
         paragraphs: [
-          "These Terms of Service govern your use of the UseCert interface and website. UseCert provides access to holdable stock certificates: synthetic price exposure backed by perp positions and USDC margin on Robinhood Chain. The interface is a read and transaction layer over public smart contracts; the contracts themselves run autonomously on chain.",
+          "These Terms of Service govern your use of the UseCert interface and website. UseCert provides access to holdable stock certificates: synthetic price exposure backed by perp positions and tUSDG margin on Robinhood Chain. The interface is a read and transaction layer over public smart contracts; the contracts themselves run autonomously on chain.",
         ],
       },
       {
         heading: "2. Certificates are not shares",
         paragraphs: [
-          "Certificates are synthetic instruments. They are backed by on chain perp positions and USDC margin, not by custody of shares. Certificates carry no dividends, no voting rights, and no shareholder rights of any kind, and grant no claim on any issuer, exchange, or company referenced by an underlying market.",
+          "Certificates are synthetic instruments. They are backed by on chain perp positions and tUSDG margin, not by custody of shares. Certificates carry no dividends, no voting rights, and no shareholder rights of any kind, and grant no claim on any issuer, exchange, or company referenced by an underlying market.",
         ],
       },
       {

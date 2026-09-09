@@ -42,7 +42,7 @@ export const VAULTS: VaultData[] = [
     name: "uTSLA",
     tagline: "Tesla, as a holdable certificate. Mint it, LP it, lend it, redeem it.",
     intro:
-      "The uTSLA vault holds a fully backed long on the Tesla equity perp on Robinhood Chain and mints certificates against it, one token's worth of exposure plus USDC margin behind every certificate in circulation.",
+      "The uTSLA vault holds a fully backed long on the Tesla equity perp on Robinhood Chain and mints certificates against it, one token's worth of exposure plus tUSDG margin behind every certificate in circulation.",
     image: "/vault-utsla.jpg",
     tags: "Single Stock, Mint + Redeem",
     category: "stock",
@@ -66,7 +66,7 @@ export const VAULTS: VaultData[] = [
       { value: 0, caption: "Conditions that can refuse a redemption — forceExit is gated on nothing. Above the instant cap redemption is queued, not refused." },
     ],
     resultsCopy:
-      "Deposit USDC, receive uTSLA at oracle price in the same transaction. Burn uTSLA, receive USDC back the same way. The vault's solvency math is proven on-chain at every attestation and published with the age of that proof, so none of this requires trusting us.",
+      "Deposit tUSDG, receive uTSLA at oracle price in the same transaction. Burn uTSLA, receive tUSDG back the same way. The vault's solvency math is proven on-chain at every attestation and published with the age of that proof, so none of this requires trusting us.",
     quote: {
       text: "I stopped checking funding rates the day I minted. It tracks Tesla, it sits in my wallet, and I can leave whenever I want. That did not exist before.",
       name: "",
@@ -79,7 +79,7 @@ export const VAULTS: VaultData[] = [
     name: "uNVDA",
     tagline: "Nvidia, as a holdable certificate. Mint it, LP it, lend it, redeem it.",
     intro:
-      "The uNVDA vault holds a fully backed long on the Nvidia equity perp on Robinhood Chain and mints certificates against it, one token's worth of exposure plus USDC margin behind every certificate in circulation.",
+      "The uNVDA vault holds a fully backed long on the Nvidia equity perp on Robinhood Chain and mints certificates against it, one token's worth of exposure plus tUSDG margin behind every certificate in circulation.",
     image: "/vault-unvda.jpg",
     tags: "Single Stock, Mint + Redeem",
     category: "stock",
@@ -103,7 +103,7 @@ export const VAULTS: VaultData[] = [
       { value: 0, caption: "Conditions that can refuse a redemption — forceExit is gated on nothing. Above the instant cap redemption is queued, not refused." },
     ],
     resultsCopy:
-      "Deposit USDC, receive uNVDA at oracle price in the same transaction. Burn uNVDA, receive USDC back the same way. The vault's solvency math is proven on-chain at every attestation and published with the age of that proof, so none of this requires trusting us.",
+      "Deposit tUSDG, receive uNVDA at oracle price in the same transaction. Burn uNVDA, receive tUSDG back the same way. The vault's solvency math is proven on-chain at every attestation and published with the age of that proof, so none of this requires trusting us.",
     quote: {
       text: "It is the first AI-shaped asset on chain that behaves like an asset. We listed uNVDA as collateral the same week the vault opened.",
       name: "",
@@ -116,7 +116,7 @@ export const VAULTS: VaultData[] = [
     name: "uSPX",
     tagline: "The index, as a holdable certificate. Mint it, LP it, lend it, redeem it.",
     intro:
-      "The uSPX vault will hold a fully backed long on the S&P 500 index perp on Robinhood Chain and mint certificates against it, one token's worth of exposure plus USDC margin behind every certificate in circulation.",
+      "The uSPX vault will hold a fully backed long on the S&P 500 index perp on Robinhood Chain and mint certificates against it, one token's worth of exposure plus tUSDG margin behind every certificate in circulation.",
     image: "/vault-uspx.jpg",
     tags: "Index, Roadmap C2",
     category: "index",
@@ -140,7 +140,7 @@ export const VAULTS: VaultData[] = [
       { value: 0, caption: "Conditions that can refuse a redemption — forceExit is gated on nothing. Above the instant cap redemption is queued, not refused." },
     ],
     resultsCopy:
-      "Deposit USDC, receive uSPX at oracle price in the same transaction. Burn uSPX, receive USDC back the same way. Solvency math will be proven on-chain at every attestation from deployment, published with the age of each proof, so none of this requires trusting us.",
+      "Deposit tUSDG, receive uSPX at oracle price in the same transaction. Burn uSPX, receive tUSDG back the same way. Solvency math will be proven on-chain at every attestation from deployment, published with the age of each proof, so none of this requires trusting us.",
     quote: {
       text: "A holdable index certificate makes basis trades boring, which is exactly what this market needs. Mint, redeem, keep the peg tight.",
       name: "",
@@ -154,7 +154,7 @@ export const VAULTS: VaultData[] = [
     name: "uQQQ",
     tagline: "The Nasdaq, as a holdable certificate. Mint it, LP it, lend it, redeem it.",
     intro:
-      "The uQQQ vault will hold a fully backed long on the Nasdaq 100 index perp on Robinhood Chain and mint certificates against it, one token's worth of exposure plus USDC margin behind every certificate in circulation.",
+      "The uQQQ vault will hold a fully backed long on the Nasdaq 100 index perp on Robinhood Chain and mint certificates against it, one token's worth of exposure plus tUSDG margin behind every certificate in circulation.",
     image: "/vault-uqqq.jpg",
     tags: "Index, Roadmap C2",
     category: "index",
@@ -178,7 +178,7 @@ export const VAULTS: VaultData[] = [
       { value: 0, caption: "Conditions that can refuse a redemption — forceExit is gated on nothing. Above the instant cap redemption is queued, not refused." },
     ],
     resultsCopy:
-      "Deposit USDC, receive uQQQ at oracle price in the same transaction. Burn uQQQ, receive USDC back the same way. Solvency math will be proven on-chain at every attestation from deployment, published with the age of each proof, so none of this requires trusting us.",
+      "Deposit tUSDG, receive uQQQ at oracle price in the same transaction. Burn uQQQ, receive tUSDG back the same way. Solvency math will be proven on-chain at every attestation from deployment, published with the age of each proof, so none of this requires trusting us.",
     quote: {
       text: "The whole desk runs tech beta through perps today. A certificate turns that trade into inventory we can actually hold.",
       name: "",
@@ -192,7 +192,7 @@ export const VAULTS: VaultData[] = [
     name: "uAAPL",
     tagline: "Apple, as a holdable certificate. Mint it, LP it, lend it, redeem it.",
     intro:
-      "The uAAPL vault will hold a fully backed long on the Apple equity perp on Robinhood Chain and mint certificates against it, one token's worth of exposure plus USDC margin behind every certificate in circulation.",
+      "The uAAPL vault will hold a fully backed long on the Apple equity perp on Robinhood Chain and mint certificates against it, one token's worth of exposure plus tUSDG margin behind every certificate in circulation.",
     image: "/vault-uaapl.jpg",
     tags: "Single Stock, Roadmap C2",
     category: "stock",
@@ -216,7 +216,7 @@ export const VAULTS: VaultData[] = [
       { value: 0, caption: "Conditions that can refuse a redemption — forceExit is gated on nothing. Above the instant cap redemption is queued, not refused." },
     ],
     resultsCopy:
-      "Deposit USDC, receive uAAPL at oracle price in the same transaction. Burn uAAPL, receive USDC back the same way. Solvency math will be proven on-chain at every attestation from deployment, published with the age of each proof, so none of this requires trusting us.",
+      "Deposit tUSDG, receive uAAPL at oracle price in the same transaction. Burn uAAPL, receive tUSDG back the same way. Solvency math will be proven on-chain at every attestation from deployment, published with the age of each proof, so none of this requires trusting us.",
     quote: {
       text: "AAPL is the asset every newcomer asks for first. Giving them a certificate instead of a perp is the right front door.",
       name: "",

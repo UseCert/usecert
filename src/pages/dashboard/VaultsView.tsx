@@ -1,8 +1,12 @@
 import { isChainVaultId, isRouted, STATUS_HINT, STATUS_LABEL, useDashboard } from "./store";
 import {
   AgeLine,
+  CapacityBar,
+  CapacityHalt,
+  CapacityLegLine,
   EmptyState,
   Flash,
+  HedgeRatio,
   MicroLabel,
   Panel,
   PriceUnavailable,
@@ -21,7 +25,7 @@ function MiniStat({
   tag,
 }: {
   label: string;
-  value: string;
+  value: React.ReactNode;
   accent?: boolean;
   tag?: React.ReactNode;
 }) {
@@ -39,22 +43,6 @@ function MiniStat({
       >
         {value}
       </p>
-    </div>
-  );
-}
-
-/** Buffer held against the vault's own capacity figure, both read on-chain. */
-function CapacityBar({ pct }: { pct: number }) {
-  const clamped = Math.max(0, Math.min(100, pct));
-  return (
-    <div className="relative h-6 w-full border hairline-dark bg-white/5">
-      <div
-        className="h-full bg-green-bright/60 transition-all duration-500"
-        style={{ width: `${clamped}%` }}
-      />
-      <span className="absolute inset-0 flex items-center justify-center font-mono text-[10px] uppercase tracking-[0.08em] text-white">
-        buffer held / bufferCapacity18 = {clamped.toFixed(1)}%
-      </span>
     </div>
   );
 }
@@ -205,10 +193,11 @@ export default function VaultsView() {
                 value={fmtOrDash(vault.buffer, (n) => fmtCompactUSD(n))}
                 accent
               />
-              {/* deltaBps is unsigned on-chain: magnitude only, no direction. */}
+              {/* A hedge-to-obligation RATIO where 100% is at target — not a drift, and not
+                  a number at all in either sentinel state. See `HedgeRatio`. */}
               <MiniStat
-                label="Delta drift from 1.0"
-                value={fmtOrDash(vault.deltaBps, (n) => `${n.toFixed(2)}%`)}
+                label="Hedge / obligation"
+                value={<HedgeRatio view={vault.deltaView} className="text-[14px]" />}
               />
               <MiniStat
                 label="Accrual claimed"
@@ -265,31 +254,79 @@ export default function VaultsView() {
             </Stagger>
           </div>
 
-          {/* Buffer against capacity — both figures read on-chain */}
+          {/* Mint capacity — the bound _requireCapacity actually enforces, plus the three
+              legs it is the minimum of, so a refused mint has a named cause. */}
           <Stagger index={4}>
             <Panel className="mt-3 p-5 md:p-6">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <MicroLabel>Buffer vs Capacity</MicroLabel>
+                <MicroLabel>Mint Capacity</MicroLabel>
                 <MicroLabel className="text-[10px]">
-                  bufferCapacity18 · headroom for new mints
+                  capacityOracle.maxNotional18 · the bound that refuses a mint
                 </MicroLabel>
               </div>
               <div className="mt-4">
-                {vault.bufferPct !== null ? (
-                  <CapacityBar pct={vault.bufferPct} />
+                {vault.capacity !== null ? (
+                  <CapacityBar view={vault.capacity} />
                 ) : (
                   <p className="font-mono text-[12px] text-white-60">{EM_DASH}</p>
                 )}
               </div>
-              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+              {vault.capacity !== null && (
+                <>
+                  <CapacityLegLine className="mt-2" view={vault.capacity} />
+                  <CapacityHalt
+                    className="mt-4"
+                    view={vault.capacity}
+                    bufferHeld={vault.buffer}
+                  />
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <MiniStat
+                      label="Used · obligation measure"
+                      value={fmtOrDash(vault.capacity.used, (n) => fmtUSD(n, 2))}
+                    />
+                    <MiniStat
+                      label="Cap · binding mint ceiling"
+                      value={fmtOrDash(vault.capacity.cap, (n) => fmtUSD(n, 2))}
+                      accent
+                    />
+                  </div>
+                  <p className="mt-4 font-mono text-[10px] uppercase tracking-[0.08em] text-white-60">
+                    The three legs · maxNotional18 is the smallest of them
+                  </p>
+                  <div className="mt-2 grid gap-3 sm:grid-cols-3">
+                    <MiniStat
+                      label="Venue depth · OI × depthBps"
+                      value={fmtOrDash(vault.capacity.legs.depth, (n) => fmtUSD(n, 2))}
+                    />
+                    <MiniStat
+                      label="Governance absoluteCap18"
+                      value={fmtOrDash(vault.capacity.legs.absoluteCap, (n) => fmtUSD(n, 2))}
+                    />
+                    <MiniStat
+                      label="bufferCapacity18 · own-collateral leg"
+                      value={fmtOrDash(vault.capacity.legs.buffer, (n) => fmtUSD(n, 2))}
+                    />
+                  </div>
+                </>
+              )}
+
+              <div className="mt-6 grid gap-3 sm:grid-cols-3">
                 <MiniStat
-                  label="Buffer held"
+                  label="Buffer held (ERC-20)"
                   value={fmtOrDash(vault.buffer, (n) => fmtUSD(n, 2))}
                   accent
                 />
+                {/* The SAME number as "Accrual claimed" in the stat grid above: _solvency
+                    sets accrual18 = buffer.balance18(address(this)) (CertVault.sol:1570).
+                    Repeated here under its BufferBook name because this is the value that
+                    zeroes the mint ceiling, not because it is a second figure. */}
                 <MiniStat
-                  label="Buffer capacity"
-                  value={fmtOrDash(vault.bufferCapacity, (n) => fmtUSD(n, 2))}
+                  label="Accrual ledger · BufferBook.balance18"
+                  value={fmtOrDash(
+                    vault.capacity ? vault.capacity.bufferLedger : null,
+                    (n) => fmtUSD(n, 2),
+                  )}
+                  tag={<UnverifiedTag />}
                 />
                 <MiniStat
                   label="Hot buffer (instant redeem float)"
@@ -297,14 +334,28 @@ export default function VaultsView() {
                 />
               </div>
               <p className="mt-3 font-mono text-[10px] leading-[1.7] uppercase tracking-[0.06em] text-white-60/70">
-                The percentage is literally buffer held over bufferCapacity18 — it is not a "percent of
-                target" health gauge, and no threshold behaviour (insurance draw, mint slow, fee on) is
-                deployed on these contracts. Read the two absolute figures, not the bar.
+                The three figures above are NOT summed and must not be. seedBuffer writes the same
+                dollars to the ERC-20 balance and to the accrual ledger (CertVault.sol:595-598), so
+                buffer held and the ledger both read about $100,000 per mirror for one $100,000
+                seeding; adding them would double-count it. Hot buffer is the same collateral as
+                buffer held, read in 6 decimals rather than 18. And the accrual ledger is the same
+                number as "Accrual claimed" above — solvency() publishes BufferBook.balance18 as
+                accrual18 (CertVault.sol:1570) — shown here under its BufferBook name because it is
+                the value that can zero the mint ceiling.
+              </p>
+              <p className="mt-3 font-mono text-[10px] leading-[1.7] uppercase tracking-[0.06em] text-white-60/70">
+                bufferCapacity18 is not headroom and not a total capacity. It is
+                freeCollateral18() × 100 capped by the ledger's own claim
+                (CertVault.sol:563-569) — a notional-exposure ceiling that RISES as the vault mints,
+                because _postMargin retains the non-margin share of every mint as float
+                (CertVault.sol:1925-1931). The bar above is used over maxNotional18 instead, which
+                reaches 100% exactly when CertVault_AtCapacity starts firing. No threshold behaviour
+                (insurance draw, mint slow, fee on) is deployed on these contracts.
               </p>
               <p className="mt-4 font-mono text-[10px] leading-[1.7] uppercase tracking-[0.06em] text-white-60">
-                A thin hot buffer does not block redemption: the instant path declines with
-                CertVault_UseQueuedRedeem and the redemption is routed through the queue instead.
-                forceExit is never gated on any of these figures.
+                None of this gates redemption. No redemption path reads capacity or the buffer at
+                all: a thin hot buffer makes the instant path decline with CertVault_UseQueuedRedeem
+                and routes the redemption through the queue, and forceExit is gated on nothing.
               </p>
             </Panel>
           </Stagger>

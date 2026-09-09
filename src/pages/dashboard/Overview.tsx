@@ -6,6 +6,7 @@ import {
   EmptyState,
   Flash,
   GhostWord,
+  HedgeRatio,
   MicroLabel,
   Panel,
   PulseDot,
@@ -14,17 +15,68 @@ import {
   ViewHeader,
 } from "./ui";
 import { useCountUp } from "./hooks";
-import { EM_DASH, fmtCompactUSD, fmtNum, fmtOrDash, fmtUSD } from "./format";
+import { EM_DASH, NO_POSITION, fmtCompactUSD, fmtNum, fmtOrDash, fmtUSD } from "./format";
 import { TickerStrip, BackingComposition, FundingMonitor, NetworkStrip, PegMonitor } from "./OverviewExtras";
+import { capacityLegsLabel, type CapacityView } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
 
-function BufferMiniBar({ pct }: { pct: number }) {
-  return (
-    <span className="relative inline-block h-[6px] w-[60px] bg-white/10 align-middle">
+/**
+ * Mint-ceiling utilisation for one row of the vault table.
+ *
+ * The bar this replaced was `bufferHeld / bufferCapacity18()`, which rendered
+ * "$100K · 1% of capacity18" on both mirrors — a constant. `bufferCapacity18()` is a
+ * notional-exposure ceiling of `freeCollateral18() × 100` capped by the ledger's claim
+ * (`CertVault.sol:563-569`), so the quotient is pinned within rounding of 1/100 at every fill
+ * level, RISES as the vault mints (`CertVault.sol:1925-1931`), and reached 100% at no fill
+ * level at all. This one is `used / cap` from `_requireCapacity` (`CertVault.sol:1755-1771`)
+ * and hits 100% exactly when `CertVault_AtCapacity` fires.
+ */
+function CapacityCell({ view }: { view: CapacityView }) {
+  if (view.capIsZero) {
+    return (
       <span
-        className="absolute left-0 top-0 h-full bg-green-bright transition-all duration-500"
-        style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
-      />
+        className="text-warn"
+        title={
+          view.bindingLegs.length > 0
+            ? `Mint ceiling is 0 — every mint is refused. Cause: ${capacityLegsLabel(view.bindingLegs)}.`
+            : "Mint ceiling is 0 — every mint is refused."
+        }
+      >
+        halted · cap 0
+      </span>
+    );
+  }
+  if (view.utilisationPct === null || view.cap === null || view.used === null) {
+    // `used` needs the oracle price to value the outstanding supply, so a reverted `px()`
+    // is a different absence from a read still in flight and says so.
+    return (
+      <span className={view.cap !== null ? "text-warn" : "text-white-60"}>
+        {view.cap !== null ? "used not measurable · px() reverts" : "reading…"}
+      </span>
+    );
+  }
+  return (
+    <span
+      className="flex items-center justify-end gap-2"
+      title={
+        `used ${fmtUSD(view.used, 2)} of cap ${fmtUSD(view.cap, 2)}. ` +
+        `used = max((totalSupply + pendingMintCerts) × oracle price, attested notional18); ` +
+        `cap = capacityOracle.maxNotional18(vault, bufferCapacity18()).` +
+        (view.bindingLegs.length > 0 ? ` Binding: ${capacityLegsLabel(view.bindingLegs)}.` : "")
+      }
+    >
+      <span className="relative hidden h-[6px] w-[52px] shrink-0 bg-white/10 align-middle lg:inline-block">
+        <span
+          className={cn(
+            "absolute left-0 top-0 h-full transition-all duration-500",
+            view.atCapacity ? "bg-warn" : "bg-green-bright",
+          )}
+          style={{ width: `${Math.max(0, Math.min(100, view.utilisationPct))}%` }}
+        />
+      </span>
+      <span className={cn("tabular-nums", view.atCapacity ? "text-warn" : "text-white-60")}>
+        {fmtNum(view.utilisationPct, 2)}% of {fmtCompactUSD(view.cap)}
+      </span>
     </span>
   );
 }
@@ -42,6 +94,7 @@ function StatCard({
   value,
   format,
   note,
+  fallback,
   register = "primary",
 }: {
   index: number;
@@ -49,6 +102,11 @@ function StatCard({
   value: number | null;
   format: (n: number) => string;
   note: React.ReactNode;
+  /**
+   * What to print instead of the em-dash when the figure is absent for a KNOWN reason —
+   * a ratio whose denominator is zero, say, where a bare dash reads as a load failure.
+   */
+  fallback?: string;
   /** `claim` renders in a different visual register: it is not a measured balance. */
   register?: "primary" | "claim";
 }) {
@@ -73,12 +131,15 @@ function StatCard({
         </div>
         <p
           className={cn(
-            "font-mono text-[34px] leading-none tracking-[-0.04em] md:text-[40px]",
+            "font-mono leading-none tracking-[-0.04em]",
+            value === null && fallback
+              ? "text-[20px] md:text-[22px]"
+              : "text-[34px] md:text-[40px]",
             register === "claim" ? "text-silver" : "text-white",
           )}
         >
           {value === null ? (
-            <span className="text-white-60/60">{EM_DASH}</span>
+            <span className="text-white-60/60">{fallback ?? EM_DASH}</span>
           ) : (
             <Flash value={animated} format={format} />
           )}
@@ -208,12 +269,23 @@ export default function Overview() {
             />
           }
         />
+        {/* The denominator is the ATTESTED notional, which is currently 0 on both mirrors.
+            `totals.ratio` is null in that state rather than clamped to a $1 denominator, so
+            this card shows the reason instead of publishing the margin as a percentage of
+            nothing — it read "46,054.10%" before the guard. */}
         <StatCard
           index={1}
           caption="Margin / Notional (attested)"
           value={totals ? totals.ratio : null}
           format={(n) => `${n.toFixed(2)}%`}
-          note={<span className="text-white-60">both halves are attester-relayed figures</span>}
+          fallback={totals && totals.ratio === null ? NO_POSITION : undefined}
+          note={
+            <span className="text-white-60">
+              {totals && totals.ratio === null
+                ? "attested notional is $0 — the ratio has no denominator"
+                : "both halves are attester-relayed figures"}
+            </span>
+          }
         />
         <StatCard
           index={2}
@@ -311,7 +383,7 @@ export default function Overview() {
               All vaults <ArrowUpRight size={13} />
             </button>
           </div>
-          <table className="w-full min-w-[900px] font-mono text-[12px]">
+          <table className="w-full min-w-[1020px] font-mono text-[12px]">
             <thead>
               <tr className="border-b hairline-dark text-left text-[10px] uppercase tracking-[0.08em] text-white-60">
                 <th className="px-5 py-3 font-medium">Vault</th>
@@ -320,8 +392,19 @@ export default function Overview() {
                 <th className="px-3 py-3 text-right font-medium">Supply</th>
                 <th className="hidden px-3 py-3 text-right font-medium lg:table-cell">Notional (att.)</th>
                 <th className="hidden px-3 py-3 text-right font-medium xl:table-cell">Margin (att.)</th>
-                <th className="hidden px-3 py-3 font-medium md:table-cell">Buffer held</th>
-                <th className="px-3 py-3 text-right font-medium">Delta drift</th>
+                <th className="hidden px-3 py-3 text-right font-medium md:table-cell">Buffer held</th>
+                <th
+                  className="hidden px-3 py-3 text-right font-medium md:table-cell"
+                  title="used / capacityOracle.maxNotional18 — the bound _requireCapacity actually enforces."
+                >
+                  Mint ceiling used
+                </th>
+                <th
+                  className="px-3 py-3 text-right font-medium"
+                  title="solvency.deltaBps as a hedge-to-obligation ratio: 100% is at target."
+                >
+                  Hedge / obligation
+                </th>
                 <th className="hidden px-3 py-3 text-right font-medium lg:table-cell">Proven</th>
                 <th className="w-8" />
               </tr>
@@ -395,27 +478,32 @@ export default function Overview() {
                       format={(n) => fmtCompactUSD(n)}
                       className="hidden text-silver xl:table-cell"
                     />
-                    <td className="hidden px-3 py-3.5 md:table-cell">
+                    {/* Buffer held, as an absolute and nothing else. The "% of capacity18"
+                        that used to sit here was a constant — see `CapacityCell`. */}
+                    <td className="hidden px-3 py-3.5 text-right tabular-nums text-white-60 md:table-cell">
                       {routed && v.buffer !== null ? (
-                        <span className="flex items-center gap-2">
-                          {v.bufferPct !== null && <BufferMiniBar pct={v.bufferPct} />}
-                          {/* Ratio of the held balance to bufferCapacity18 — NOT a
-                              "percent of target": see INTEGRATION-STAGE2.md. */}
-                          <span
-                            className="tabular-nums text-white-60"
-                            title="Buffer held (ERC-20 balance) over bufferCapacity18, both read on-chain."
-                          >
-                            {fmtCompactUSD(v.buffer)}
-                            {v.bufferPct !== null ? ` · ${v.bufferPct.toFixed(0)}% of capacity18` : ""}
-                          </span>
+                        <span title="solvency.buffer18 — the vault's own ERC-20 collateral balance.">
+                          {fmtCompactUSD(v.buffer)}
                         </span>
                       ) : (
                         EM_DASH
                       )}
                     </td>
-                    {/* deltaBps is UNSIGNED on-chain: magnitude only, never a direction. */}
-                    <td className="px-3 py-3.5 text-right tabular-nums text-white">
-                      {routed ? fmtOrDash(v.deltaBps, (n) => `${n.toFixed(2)}% from target`) : EM_DASH}
+                    <td className="hidden px-3 py-3.5 text-right md:table-cell">
+                      {routed && v.capacity !== null ? (
+                        <CapacityCell view={v.capacity} />
+                      ) : (
+                        <span className="text-white-60">{EM_DASH}</span>
+                      )}
+                    </td>
+                    {/* A hedge-to-obligation RATIO, not a drift: 100% is at target. Two of
+                        its three states are zero-denominator sentinels. See `HedgeRatio`. */}
+                    <td className="px-3 py-3.5 text-right tabular-nums">
+                      {routed ? (
+                        <HedgeRatio view={v.deltaView} />
+                      ) : (
+                        <span className="text-white-60">{EM_DASH}</span>
+                      )}
                     </td>
                     <td className="hidden px-3 py-3.5 text-right lg:table-cell">
                       {routed ? (

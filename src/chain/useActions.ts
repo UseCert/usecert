@@ -123,7 +123,8 @@ const REVERT_COPY: Record<string, { message: string; kind: RevertKind }> = {
 
   /* ---- states the user can act on -------------------------------------- */
   CertVault_AtCapacity: {
-    message: "This vault is at capacity. No new mints until capacity frees up.",
+    message:
+      "This vault is at its mint ceiling. The ceiling is capacityOracle.maxNotional18 — the smallest of venue depth (openInterest18 × depthBps), the governance absoluteCap18 and bufferCapacity18 — and it is zero outright when the attestation is stale, the attested open interest is zero, or the BufferBook accrual ledger has gone to zero or below. The vault page shows which of those is binding right now. Redemption is unaffected.",
     kind: "user",
   },
   CertVault_MintPaused: {

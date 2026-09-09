@@ -39,6 +39,8 @@ import { useReadContracts } from "wagmi";
 import type { Abi, ContractFunctionName } from "viem";
 
 import {
+  BufferBookABI,
+  CapacityOracleABI,
   CertOracleABI,
   CertVaultABI,
   CertificateABI,
@@ -77,6 +79,27 @@ export const CHAIN_VAULT_IDS: readonly ChainVaultId[] = ["utsla", "uspy"];
 
 /** Past this age the vault reports zero capacity and minting is off. */
 export const MAX_ATTESTATION_AGE_SEC = 300;
+
+/**
+ * `deltaBps === 10_000` means the hedge-to-obligation ratio is EXACTLY 1.0 — at target.
+ *
+ * This is the single easiest number on these contracts to render backwards, and stage 3 did:
+ * `deltaBps` is a RATIO in basis points (`a.notional18 * 10_000 / required`,
+ * `CertVault.sol:1600`), not a drift. 10_000 is dead centre; 0 means the obligation is
+ * completely UNHEDGED. Printing the raw bps as "% from target" turns the healthiest reading
+ * into "100% off" and the worst reading into a reassuring "0.00%".
+ */
+export const DELTA_TARGET_BPS = 10_000n;
+
+/**
+ * `CertVault.DELTA_UNBOUNDED_BPS` — `type(uint256).max` (`CertVault.sol:1508`).
+ *
+ * Published when `required == 0` (no supply, or px 0) while the attested notional is NOT zero:
+ * a live directional position against a zero obligation. It is a SENTINEL for "this ratio's
+ * denominator is zero", chosen precisely so a reader can tell it from a measurement
+ * (`CertVault.sol:1494-1508`). It must never reach a `toFixed()`.
+ */
+export const DELTA_UNBOUNDED_BPS = (1n << 256n) - 1n;
 
 export interface MirrorMeta {
   id: ChainVaultId;
@@ -156,6 +179,140 @@ export interface BackingBreakdown {
   provenAtBatch: number;
 }
 
+/**
+ * Which of `CapacityOracle.maxNotional18`'s legs is the one actually holding minting back.
+ *
+ * `maxNotional18` (`CapacityOracle.sol:89-98`) is
+ * `min(openInterest18 * depthBps / 10_000, absoluteCap18[asset], bufferCapacity18)` with two
+ * early returns to zero ahead of it. Every value below is named after the term it comes from,
+ * because "at capacity" with no leg named is the least actionable message this app can print.
+ */
+export type CapacityLeg =
+  /** `registry.ageSec(asset) > maxAttestationAgeSec` → 0 (`CapacityOracle.sol:90`). */
+  | "stale-attestation"
+  /** `openInterest18 == 0` → 0 (`CapacityOracle.sol:92-93`). */
+  | "no-open-interest"
+  /**
+   * `BufferBook.capacity18` returns 0 whenever `balance18 <= 0` (`BufferBook.sol:183-187`),
+   * which forces `bufferCapacity18()` to 0 and `maxNotional18` with it. THE SILENT HALT: the
+   * vault can be sitting on six figures of collateral and still refuse every mint.
+   */
+  | "buffer-ledger-nonpositive"
+  /**
+   * `freeCollateral18() == 0` → the own-capital term of `bufferCapacity18()` is 0
+   * (`CertVault.sol:563-569`, `CertVault.sol:529-533`). The float is fully committed to
+   * outstanding redemption obligations.
+   */
+  | "no-free-collateral"
+  /** `openInterest18 * depthBps / 10_000` is the smallest term — venue depth. */
+  | "depth"
+  /** `absoluteCap18[asset]` is the smallest term — the governance cap. */
+  | "absolute-cap"
+  /** `bufferCapacity18()` is the smallest term — the vault's own collateral. */
+  | "buffer";
+
+/**
+ * The one BOUNDED capacity indicator: how much of the mint ceiling is used.
+ *
+ * Mirrors `CertVault._requireCapacity` (`CertVault.sol:1755-1771`) exactly, so it reaches 1.0
+ * at the same moment `CertVault_AtCapacity` fires and cannot be read as anything else.
+ *
+ * This replaced `bufferHeld / bufferCapacity18()`, which was not an indicator at all.
+ * `bufferCapacity18()` is a NOTIONAL-EXPOSURE CEILING (`freeCollateral18() * 100` capped by the
+ * ledger's own claim, `CertVault.sol:563-569`), so that ratio is pinned within rounding of
+ * `1/BUFFER_COVERAGE_MULTIPLE = 1%` at every fill level by construction, RISES as the vault
+ * mints (`_postMargin` retains `1 - targetMarginBps` of every mint as float,
+ * `CertVault.sol:1925-1931`), and is the loosest of the three legs anyway — it read
+ * $10,000,003 against a binding $90,000 on uTSLA. It carried no information and reached 100%
+ * at no fill level at all.
+ */
+export interface CapacityView {
+  /**
+   * `max((totalSupply + pendingMintCerts) * px / 1e18, registry.latest().notional18)`, the
+   * `current` term of `_requireCapacity` (`CertVault.sol:1763-1767`). `null` only while the
+   * first read is in flight.
+   */
+  used: number | null;
+  used18: bigint | null;
+  /**
+   * `capacityOracle.maxNotional18(vault, vault.bufferCapacity18())` — read on-chain, not
+   * re-derived, so it cannot drift from the value the contract gates on. `null` until the
+   * dependent read lands (it needs `bufferCapacity18()` as an argument, so it cannot share the
+   * first batch).
+   */
+  cap: number | null;
+  cap18: bigint | null;
+  /** `used / cap` as a percent. `null` when `cap` is unknown OR zero — zero is a real state. */
+  utilisationPct: number | null;
+  /**
+   * `cap18 === 0n`: EVERY mint reverts `CertVault_AtCapacity`, whatever the collateral held and
+   * whatever `oracle.mintAllowed()` says. `false` while `cap18` is still unknown — an unknown
+   * cap must never present as a halt.
+   */
+  capIsZero: boolean;
+  /** `used >= cap` with a non-zero cap: the next mint of any size reverts. */
+  atCapacity: boolean;
+  /**
+   * EVERY term sitting at the binding value, not just one.
+   *
+   * Both live mirrors are ties: uTSLA's depth leg is `900,000 × 1000bps = $90,000` and its
+   * `absoluteCap18` is $90,000 exactly; uSPY's are both $5,000,000. Naming one of them and
+   * calling the other slack would be wrong — raising either alone moves the ceiling nowhere.
+   * Empty until `cap18` is known.
+   */
+  bindingLegs: CapacityLeg[];
+  /** The first binding leg, for the single-name callers. `null` until `cap18` is known. */
+  bindingLeg: CapacityLeg | null;
+  /** The three legs of the min(), in dollars. `null` where the input has not been read. */
+  legs: { depth: number | null; absoluteCap: number | null; buffer: number | null };
+  /**
+   * `BufferBook.balance18(vault)` — the accrual ledger, SIGNED. At or below zero,
+   * `BufferBook.capacity18` returns 0 (`BufferBook.sol:183-187`) and minting stops dead. This
+   * is the number that explains that halt.
+   *
+   * It is the SAME QUANTITY as `backing.accrualClaimedUnverified`: `_solvency` sets
+   * `s.accrual18 = buffer.balance18(address(this))` (`CertVault.sol:1570`), so the two agree by
+   * construction — read here from `BufferBook` directly because it is the capacity input, and
+   * there because it is the published solvency field. Read live they match to the wei
+   * ($100,000.034292 on uTSLA). Two names for one number, never two numbers.
+   *
+   * NEVER added to `backing.bufferHeld`: `seedBuffer` writes the same dollars to the vault's
+   * ERC-20 balance AND to this ledger (`CertVault.sol:595-598`), so a sum double-counts the
+   * $100,000 seeding that makes both read about $100,000 per mirror.
+   */
+  bufferLedger: number | null;
+  bufferLedger18: bigint | null;
+  /** `freeCollateral18()` — the own-capital input to `bufferCapacity18()`. */
+  freeCollateral: number | null;
+}
+
+/**
+ * `solvency.deltaBps`, decoded into the three states the contract can actually publish.
+ *
+ * A bare number cannot represent this field honestly: two of its three states are sentinels
+ * for a division by zero, not measurements (`CertVault.sol:1587-1600`).
+ */
+export type DeltaView =
+  /**
+   * `a.notional18 * 10_000 / required` with a non-zero obligation. `hedgeRatioPct` is 100 when
+   * the attested position exactly covers the obligation; `driftPct` is SIGNED — negative is
+   * under-hedged, positive over-hedged. The direction IS recoverable, contrary to what stage 2
+   * asserted on screen: it is the side of 10_000 the ratio falls on.
+   */
+  | { kind: "measured"; hedgeRatioPct: number; driftPct: number }
+  /**
+   * `required == 0` and the attested notional is 0 too: nothing outstanding and nothing hedged.
+   * The contract publishes 10_000 here so `rebalance()` reverts `CertVault_InBand`
+   * (`CertVault.sol:1597`). It is a sentinel, not a reading of a position — there is no
+   * position — so it must render as "no position", never as "at target" and never as "100%".
+   */
+  | { kind: "no-obligation" }
+  /**
+   * `DELTA_UNBOUNDED_BPS`: a live attested position against a ZERO obligation. The worst state
+   * the vault can be in — pure unhedged directional risk (`CertVault.sol:1491-1508`).
+   */
+  | { kind: "unbounded" };
+
 export interface LiveVault extends Omit<Vault, "id" | "price"> {
   id: ChainVaultId;
 
@@ -175,9 +332,6 @@ export interface LiveVault extends Omit<Vault, "id" | "price"> {
    */
   supply: number;
   buffer: number;
-  bufferPct: number;
-  /** `1 + deltaBps/10_000`. Render magnitude only — see `deltaBps`. */
-  delta: number;
   change24h: number;
   funding8h: number;
 
@@ -224,10 +378,19 @@ export interface LiveVault extends Omit<Vault, "id" | "price"> {
   /* ------------------------------------------------------------------ capacity */
   /** `vault.hotBuffer()`, 6 dp → display number. The instant-redeem float. */
   hotBuffer: number;
-  /** `vault.bufferCapacity18()`, 18 dp → display number. Headroom for new mints. */
+  /**
+   * `vault.bufferCapacity18()`, 18 dp → display number.
+   *
+   * NOT headroom, NOT total buffer capacity and NOT the value that blocks a mint: it is one
+   * of three legs of a notional-exposure ceiling (`CertVault.sol:563-569`) and the loosest of
+   * them. Kept because it is the argument `maxNotional18` takes and worth publishing as such;
+   * use `capacity.utilisationPct` for anything a reader is meant to act on.
+   */
   bufferCapacity: number;
-  /** `solvency.deltaBps` in percent. Unsigned: the DIRECTION of the drift is not published. */
-  deltaBps: number;
+  /** The bounded mint-ceiling indicator, mirroring `_requireCapacity`. */
+  capacity: CapacityView;
+  /** `solvency.deltaBps`, decoded. See `DeltaView` — a bare percent cannot say this. */
+  deltaView: DeltaView;
 
   /* ------------------------------------------------------------------ honesty */
   /**
@@ -251,6 +414,7 @@ export interface LiveVault extends Omit<Vault, "id" | "price"> {
     margin18: bigint;
     buffer18: bigint;
     accrual18: bigint;
+    /** RAW bps. 10_000 = at target; `DELTA_UNBOUNDED_BPS` is a sentinel. Decode, do not divide. */
     deltaBps: bigint;
     ageSec: bigint;
     provenAtBatch: bigint;
@@ -258,6 +422,20 @@ export interface LiveVault extends Omit<Vault, "id" | "price"> {
     hotBuffer6: bigint;
     bufferCapacity18: bigint;
     basisBps: bigint | null;
+    /** `vault.pendingMintCerts()` — certificates reserved by unsettled mint requests. */
+    pendingMintCerts18: bigint;
+    /** `registry.latest(vault).openInterest18` — the depth leg's input. */
+    openInterest18: bigint;
+    /** `capacityOracle.depthBps()`. Shared across mirrors. */
+    depthBps: bigint | null;
+    /** `capacityOracle.absoluteCap18(vault)`. */
+    absoluteCap18: bigint | null;
+    /** `bufferBook.balance18(vault)`, SIGNED. */
+    bufferLedger18: bigint | null;
+    /** `vault.freeCollateral18()`. */
+    freeCollateral18: bigint | null;
+    /** `capacityOracle.maxNotional18(vault, bufferCapacity18)`. `null` until the 2nd read lands. */
+    maxNotional18: bigint | null;
   };
 }
 
@@ -309,7 +487,7 @@ type ReadResult =
   | { status: "failure"; result?: undefined; error?: unknown };
 
 /** Number of calls issued per mirror, in the order built by `vaultCalls`. */
-const CALLS_PER_MIRROR = 8;
+const CALLS_PER_MIRROR = 13;
 
 function vaultCalls(mirror: Mirror): ContractCall[] {
   // Order matters: `useLiveVaults` decodes by index against CALLS_PER_MIRROR.
@@ -324,8 +502,34 @@ function vaultCalls(mirror: Mirror): ContractCall[] {
     call(mirror.certOracle, CertOracleABI, "basisBpsChecked"),
     call(mirror.certificate, CertificateABI, "totalSupply"),
     call(SHARED.solvencyRegistry, SolvencyRegistryABI, "ageSec", [mirror.vault]),
+    // ---- the capacity legs. `_requireCapacity` values `totalSupply + pendingMintCerts`,
+    // not `totalSupply` alone (CertVault.sol:1763), so the reservation held by unsettled
+    // mint requests has to be read or the utilisation understates itself.
+    call(mirror.vault, CertVaultABI, "pendingMintCerts"),
+    // openInterest18 feeds the depth leg; the same attestation also gives the notional18
+    // floor that `_requireCapacity` takes the max against (CertVault.sol:1765).
+    call(SHARED.solvencyRegistry, SolvencyRegistryABI, "latest", [mirror.vault]),
+    call(SHARED.capacityOracle, CapacityOracleABI, "absoluteCap18", [mirror.vault]),
+    // BufferBook is keyed by the VAULT address: CertVault passes address(this) into both
+    // buffer.capacity18 and buffer.accrue (CertVault.sol:566, 597).
+    call(mirror.bufferBook, BufferBookABI, "balance18", [mirror.vault]),
+    // The own-capital input to bufferCapacity18() (CertVault.sol:564). Read so a zero
+    // ceiling can be attributed to an empty float rather than to the ledger.
+    call(mirror.vault, CertVaultABI, "freeCollateral18"),
   ];
 }
+
+/**
+ * Calls that are one-per-deployment rather than one-per-mirror, appended AFTER every
+ * mirror's block so `CALLS_PER_MIRROR` indexing stays valid.
+ */
+const SHARED_CALL_BASE = MIRRORS.length * CALLS_PER_MIRROR;
+const SHARED_CALLS: ContractCall[] = [
+  call(SHARED.capacityOracle, CapacityOracleABI, "depthBps"),
+];
+
+/** Stable empty array: a fresh `[]` each render would re-key wagmi's query every time. */
+const NO_CALLS: ContractCall[] = [];
 
 function asBigint(entry: ReadResult | undefined): bigint | null {
   if (!entry || entry.status !== "success") return null;
@@ -408,6 +612,188 @@ function asBasis(entry: ReadResult | undefined): { known: boolean; bps: bigint |
   return { known, bps: known ? bps : null };
 }
 
+/**
+ * `SolvencyRegistry.latest(asset)` → `openInterest18`, the input to the depth leg.
+ *
+ * viem decodes a named-tuple output as an object; the positional fallback mirrors
+ * `asSolvency`'s, for the same reason. `null` rather than `0n` on a failed decode, because a
+ * zero open interest is itself a hard mint stop (`CapacityOracle.sol:92-93`) and must not be
+ * manufactured by a decode miss.
+ */
+function asOpenInterest18(entry: ReadResult | undefined): bigint | null {
+  if (!entry || entry.status !== "success") return null;
+  const raw = entry.result;
+  if (!raw || typeof raw !== "object") return null;
+  const value = Array.isArray(raw)
+    ? (raw as unknown[])[2]
+    : (raw as Record<string, unknown>).openInterest18;
+  return typeof value === "bigint" ? value : null;
+}
+
+/** The smaller of two, ignoring `null`. `null` only when both are unknown. */
+function minKnown(a: bigint | null, b: bigint | null): bigint | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return a < b ? a : b;
+}
+
+/**
+ * Decode `solvency.deltaBps` into the state it actually represents.
+ *
+ * The two sentinel branches are distinguishable without re-deriving `required`, which is what
+ * makes this safe: `_solvency`'s measured branch is `a.notional18 * 10_000 / required`
+ * (`CertVault.sol:1600`), so a zero attested notional there yields 0 and can NEVER yield
+ * 10_000. `deltaBps === 10_000` with `notional18 === 0` is therefore the sentinel branch and
+ * nothing else — no dependence on `px`, which matters because `_solvency` prices off
+ * `pxUnguarded()` and so still computes `required` when `px()` itself reverts
+ * (`CertVault.sol:1539`).
+ */
+function decodeDelta(deltaBps: bigint, notional18: bigint): DeltaView {
+  if (deltaBps === DELTA_UNBOUNDED_BPS) return { kind: "unbounded" };
+  if (deltaBps === DELTA_TARGET_BPS && notional18 === 0n) return { kind: "no-obligation" };
+  return {
+    kind: "measured",
+    hedgeRatioPct: fromBps(deltaBps),
+    driftPct: fromBps(deltaBps) - 100,
+  };
+}
+
+/**
+ * Assemble the bounded capacity indicator for one mirror.
+ *
+ * `cap18` is the value read from `CapacityOracle.maxNotional18` — never re-derived here. The
+ * legs are read too, but only to NAME which term binds; a wrong label is cosmetic, whereas a
+ * re-derived ceiling that drifts from the contract's own would be a lie about admission
+ * control. That matters concretely: `CapacityOracle.maxAttestationAgeSec` is an immutable with
+ * no getter in the generated ABI, so the staleness early return cannot be reproduced faithfully
+ * off-chain at all.
+ */
+function buildCapacity(input: {
+  supply18: bigint;
+  pendingMintCerts18: bigint;
+  px18: bigint | null;
+  attestedNotional18: bigint;
+  cap18: bigint | null;
+  openInterest18: bigint | null;
+  depthBps: bigint | null;
+  absoluteCap18: bigint | null;
+  bufferCapacity18: bigint;
+  bufferLedger18: bigint | null;
+  freeCollateral18: bigint | null;
+  ageSec: number;
+}): CapacityView {
+  const {
+    supply18,
+    pendingMintCerts18,
+    px18,
+    attestedNotional18,
+    cap18,
+    openInterest18,
+    depthBps,
+    absoluteCap18,
+    bufferCapacity18,
+    bufferLedger18,
+    freeCollateral18,
+    ageSec,
+  } = input;
+
+  // `current` from _requireCapacity (CertVault.sol:1763-1767): the obligation measure valued
+  // at the live price, floored by the attested notional. The attested floor is kept for the
+  // reason the contract keeps it — it is the only term that sees a position the vault's own
+  // books have lost track of.
+  const own18 = px18 !== null ? ((supply18 + pendingMintCerts18) * px18) / ONE_18 : null;
+  const used18 =
+    own18 === null ? null : own18 > attestedNotional18 ? own18 : attestedNotional18;
+
+  const byDepth18 =
+    openInterest18 !== null && depthBps !== null ? (openInterest18 * depthBps) / BPS_ONE : null;
+
+  // The min() legs, in the oracle's own order (CapacityOracle.sol:94-97).
+  const tightest = minKnown(minKnown(byDepth18, absoluteCap18), bufferCapacity18);
+
+  const bindingLegs: CapacityLeg[] = [];
+
+  if (cap18 !== null) {
+    if (ageSec > MAX_ATTESTATION_AGE_SEC) {
+      bindingLegs.push("stale-attestation");
+    } else if (openInterest18 === 0n) {
+      bindingLegs.push("no-open-interest");
+    } else if (bufferLedger18 !== null && bufferLedger18 <= 0n) {
+      // BufferBook.sol:183-187 — the silent halt. Checked before the generic buffer leg so
+      // the message can name the ledger rather than the collateral.
+      bindingLegs.push("buffer-ledger-nonpositive");
+    } else if (bufferCapacity18 === 0n) {
+      bindingLegs.push(freeCollateral18 === 0n ? "no-free-collateral" : "buffer");
+    } else if (tightest !== null) {
+      if (byDepth18 !== null && byDepth18 === tightest) bindingLegs.push("depth");
+      if (absoluteCap18 !== null && absoluteCap18 === tightest) bindingLegs.push("absolute-cap");
+      if (bufferCapacity18 === tightest) bindingLegs.push("buffer");
+    }
+  }
+
+  const capIsZero = cap18 !== null && cap18 === 0n;
+  const utilisationPct =
+    used18 !== null && cap18 !== null && cap18 > 0n
+      ? // Kept in bigint to the last step: an 18-decimal ratio through a double loses the
+        // low digits, and this number decides whether a warning shows.
+        Number((used18 * 1_000_000n) / cap18) / 10_000
+      : null;
+
+  return {
+    used: used18 === null ? null : fromPrice18(used18),
+    used18,
+    cap: cap18 === null ? null : fromPrice18(cap18),
+    cap18,
+    utilisationPct,
+    capIsZero,
+    atCapacity: used18 !== null && cap18 !== null && cap18 > 0n && used18 >= cap18,
+    bindingLegs,
+    bindingLeg: bindingLegs[0] ?? null,
+    legs: {
+      depth: byDepth18 === null ? null : fromPrice18(byDepth18),
+      absoluteCap: absoluteCap18 === null ? null : fromPrice18(absoluteCap18),
+      buffer: fromPrice18(bufferCapacity18),
+    },
+    bufferLedger: bufferLedger18 === null ? null : fromPrice18(bufferLedger18),
+    bufferLedger18,
+    freeCollateral: freeCollateral18 === null ? null : fromPrice18(freeCollateral18),
+  };
+}
+
+/**
+ * Human sentence for the set of binding legs, so every consumer says the same thing.
+ *
+ * Joined rather than reduced to one name because ties are the live case on both mirrors, and
+ * "bound by the governance cap" alone would invite someone to raise the cap and see nothing
+ * move.
+ */
+export function capacityLegsLabel(legs: CapacityLeg[]): string {
+  if (legs.length === 0) return "";
+  if (legs.length === 1) return capacityLegLabel(legs[0]);
+  const parts = legs.map(capacityLegLabel);
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]} — tied, so raising either alone moves nothing`;
+}
+
+/** Human sentence for a binding leg, so every consumer says the same thing. */
+export function capacityLegLabel(leg: CapacityLeg): string {
+  switch (leg) {
+    case "stale-attestation":
+      return `the attestation is older than ${MAX_ATTESTATION_AGE_SEC}s, so CapacityOracle returns a cap of zero`;
+    case "no-open-interest":
+      return "the attested venue open interest is zero, so the depth leg is zero";
+    case "buffer-ledger-nonpositive":
+      return "the BufferBook accrual ledger is at or below zero, which forces the whole ceiling to zero";
+    case "no-free-collateral":
+      return "freeCollateral18() is zero — the float is fully committed to outstanding redemption obligations";
+    case "depth":
+      return "venue depth: openInterest18 × depthBps";
+    case "absolute-cap":
+      return "the governance absoluteCap18 for this vault";
+    case "buffer":
+      return "bufferCapacity18() — the vault's own collateral leg";
+  }
+}
+
 /* ──────────────────────────────────────────────────────────────────────── hooks */
 
 export interface UseLiveVaultsResult {
@@ -430,18 +816,57 @@ export interface UseLiveVaultsResult {
  * need to read, not a batch failure.
  */
 export function useLiveVaults(options?: { refetchIntervalMs?: number }): UseLiveVaultsResult {
-  const contracts = useMemo(() => MIRRORS.flatMap((m) => vaultCalls(m)), []);
+  const refetchInterval = options?.refetchIntervalMs ?? 15_000;
+  const contracts = useMemo(
+    () => [...MIRRORS.flatMap((m) => vaultCalls(m)), ...SHARED_CALLS],
+    [],
+  );
 
   const query = useReadContracts({
     contracts,
     query: {
-      refetchInterval: options?.refetchIntervalMs ?? 15_000,
+      refetchInterval,
       // A revert on px() is information; keep the rest of the batch.
       retry: 1,
     },
   });
 
   const results = (query.data ?? []) as ReadResult[];
+
+  /**
+   * `maxNotional18(asset, bufferCapacity18)` takes the buffer ceiling as an ARGUMENT
+   * (`CapacityOracle.sol:89`), so it cannot ride in the batch that reads that ceiling. It gets
+   * its own dependent batch rather than being re-derived off-chain, because this is the number
+   * `_requireCapacity` actually gates on and a re-derivation cannot see the oracle's own
+   * `maxAttestationAgeSec` immutable at all (no getter in the generated ABI).
+   *
+   * The cost is that `cap` trails `bufferCapacity18` by one round trip. That is acceptable and
+   * bounded: both batches share `refetchInterval`, and the consequence of a one-tick-old cap on
+   * a utilisation bar is a stale percentage, not a wrong action — the mint path reads capacity
+   * on-chain again inside the transaction.
+   */
+  const bufferCaps = useMemo(
+    () => MIRRORS.map((_, i) => asBigint(results[i * CALLS_PER_MIRROR + 2])),
+    [results],
+  );
+
+  const capacityContracts = useMemo<ContractCall[]>(() => {
+    // All-or-nothing so decoding stays index-aligned with MIRRORS.
+    if (!bufferCaps.every((b) => b !== null)) return NO_CALLS;
+    return MIRRORS.map((m, i) =>
+      call(SHARED.capacityOracle, CapacityOracleABI, "maxNotional18", [
+        m.vault,
+        bufferCaps[i] as bigint,
+      ]),
+    );
+  }, [bufferCaps]);
+
+  const capacityQuery = useReadContracts({
+    contracts: capacityContracts,
+    query: { enabled: capacityContracts.length > 0, refetchInterval, retry: 1 },
+  });
+
+  const capacityResults = (capacityQuery.data ?? []) as ReadResult[];
 
   const vaults = useMemo<LiveVault[]>(() => {
     if (results.length === 0) return [];
@@ -457,6 +882,13 @@ export function useLiveVaults(options?: { refetchIntervalMs?: number }): UseLive
       const basis = asBasis(results[base + 5]);
       const supply18 = asBigint(results[base + 6]) ?? solvency.supply;
       const registryAgeSec = asBigint(results[base + 7]);
+      const pendingMintCerts18 = asBigint(results[base + 8]) ?? 0n;
+      const openInterest18 = asOpenInterest18(results[base + 9]);
+      const absoluteCap18 = asBigint(results[base + 10]);
+      const bufferLedger18 = asBigint(results[base + 11]);
+      const freeCollateral18 = asBigint(results[base + 12]);
+      const depthBps = asBigint(results[SHARED_CALL_BASE]);
+      const maxNotional18 = asBigint(capacityResults[i]);
 
       // ageSec is never optional. Prefer the registry's answer; fall back to the vault's
       // own, which the struct always carries alongside the backing.
@@ -477,7 +909,22 @@ export function useLiveVaults(options?: { refetchIntervalMs?: number }): UseLive
       };
 
       const bufferHeld = fromPrice18(solvency.buffer18);
-      const capacity = fromPrice18(bufferCapacity18);
+      const bufferCapacity = fromPrice18(bufferCapacity18);
+
+      const capacity = buildCapacity({
+        supply18,
+        pendingMintCerts18,
+        px18,
+        attestedNotional18: solvency.notional18,
+        cap18: maxNotional18,
+        openInterest18,
+        depthBps,
+        absoluteCap18,
+        bufferCapacity18,
+        bufferLedger18,
+        freeCollateral18,
+        ageSec,
+      });
 
       const vault: LiveVault = {
         id: meta.id,
@@ -507,14 +954,11 @@ export function useLiveVaults(options?: { refetchIntervalMs?: number }): UseLive
         // `Vault.buffer` in the store means "USD in the buffer". That is buffer18 — the
         // ERC-20 balance the vault holds — and nothing else.
         buffer: bufferHeld,
-        // Percent of capacity, which is the closest on-chain analogue of the store's
-        // "percent of target". Stage 2 should confirm the label matches this meaning.
-        bufferPct: capacity > 0 ? clampPct((bufferHeld / capacity) * 100) : 0,
 
-        // deltaBps is unsigned, so this reports the MAGNITUDE of the drift from delta 1.0
-        // and not its direction. `deltaBps` is exposed raw so stage 2 can say so.
-        delta: 1 + Number(solvency.deltaBps) / Number(BPS_ONE),
-        deltaBps: fromBps(solvency.deltaBps),
+        // `bufferPct` is gone, not renamed. It was `bufferHeld / bufferCapacity18()`, a
+        // constant near 1% at every fill level by construction (see `CapacityView`), and
+        // deleting the field is the only way to be sure no component renders it again.
+        deltaView: decodeDelta(solvency.deltaBps, solvency.notional18),
 
         backing: {
           bufferHeld,
@@ -533,7 +977,8 @@ export function useLiveVaults(options?: { refetchIntervalMs?: number }): UseLive
         basisBps: basis.bps !== null ? fromBps(basis.bps) : null,
 
         hotBuffer: fromCollateral(hotBuffer6),
-        bufferCapacity: capacity,
+        bufferCapacity,
+        capacity,
 
         // One real point, no invented curve. Empty bars.
         solvency: [nowPoint],
@@ -553,11 +998,18 @@ export function useLiveVaults(options?: { refetchIntervalMs?: number }): UseLive
           hotBuffer6,
           bufferCapacity18,
           basisBps: basis.bps,
+          pendingMintCerts18,
+          openInterest18: openInterest18 ?? 0n,
+          depthBps,
+          absoluteCap18,
+          bufferLedger18,
+          freeCollateral18,
+          maxNotional18,
         },
       };
       return vault;
     });
-  }, [results]);
+  }, [results, capacityResults]);
 
   return {
     vaults,
@@ -566,7 +1018,10 @@ export function useLiveVaults(options?: { refetchIntervalMs?: number }): UseLive
     isError: query.isError,
     error: (query.error as Error | null) ?? null,
     dataUpdatedAt: query.dataUpdatedAt,
-    refetch: () => void query.refetch(),
+    refetch: () => {
+      void query.refetch();
+      void capacityQuery.refetch();
+    },
   };
 }
 
@@ -712,8 +1167,24 @@ export function aggregateTotals(vaults: LiveVault[]): {
   margin: number;
   buffer: number;
   accrualClaimedUnverified: number;
-  ratio: number;
-  delta: number;
+  /**
+   * `margin / notional` as a percent, or `null` when the attested notional is ZERO.
+   *
+   * It used to be `(margin / Math.max(1, notional)) * 100`, which does not guard the divide —
+   * it replaces a zero denominator with ONE DOLLAR. Both routed vaults currently attest
+   * `notional18 == 0`, so that clamp published the attested margin as a percentage: $460.54 of
+   * margin rendered as "46,054.10%" of a position that does not exist. A ratio with no
+   * denominator is undefined and must be an em-dash, not an artefact.
+   */
+  ratio: number | null;
+  /** Sum of `capacity.used` across mirrors, `null` if any is unknown. */
+  capacityUsed: number | null;
+  /** Sum of `capacity.cap` across mirrors, `null` if any is unknown. */
+  capacityCap: number | null;
+  /** Protocol-wide `used / cap` as a percent. `null` when either side is unknown or the cap is 0. */
+  capacityUtilisationPct: number | null;
+  /** True when ANY routed vault has a cap of exactly zero: that vault refuses every mint. */
+  anyCapacityHalted: boolean;
   /** The worst (largest) attestation age across mirrors. Publish this, not an average. */
   worstAgeSec: number;
   anyStale: boolean;
@@ -727,18 +1198,39 @@ export function aggregateTotals(vaults: LiveVault[]): {
     (s, v) => s + v.backing.accrualClaimedUnverified,
     0,
   );
-  const delta = live.length ? live.reduce((s, v) => s + v.delta, 0) / live.length : 1;
+
+  // `null` propagates: a partial sum across mirrors would understate the total and read as a
+  // measurement. Both are still in the exact 18-decimal domain at this point.
+  const used18 = sum18(live.map((v) => v.capacity.used18));
+  const cap18 = sum18(live.map((v) => v.capacity.cap18));
+
   return {
     notional,
     margin,
     buffer,
     accrualClaimedUnverified,
-    ratio: (margin / Math.max(1, notional)) * 100,
-    delta,
+    ratio: notional > 0 ? (margin / notional) * 100 : null,
+    capacityUsed: used18 === null ? null : fromPrice18(used18),
+    capacityCap: cap18 === null ? null : fromPrice18(cap18),
+    capacityUtilisationPct:
+      used18 !== null && cap18 !== null && cap18 > 0n
+        ? Number((used18 * 1_000_000n) / cap18) / 10_000
+        : null,
+    anyCapacityHalted: live.some((v) => v.capacity.capIsZero),
     worstAgeSec: live.reduce((s, v) => Math.max(s, v.ageSec), 0),
     anyStale: live.some((v) => v.attestationStale),
     anyPriceUnavailable: live.some((v) => v.priceUnavailable),
   };
+}
+
+/** Sum 18-decimal bigints, returning `null` if any term is unknown. */
+function sum18(values: (bigint | null)[]): bigint | null {
+  let total = 0n;
+  for (const v of values) {
+    if (v === null) return null;
+    total += v;
+  }
+  return total;
 }
 
 /** Addresses for a mirror, for the write hooks and for explorer links. */
@@ -746,7 +1238,8 @@ export function vaultAddresses(id: ChainVaultId): Mirror {
   return mirrorFor(id);
 }
 
-function clampPct(n: number): number {
-  if (!Number.isFinite(n)) return 0;
-  return Math.min(100, Math.max(0, n));
-}
+/* `clampPct` is gone with `bufferPct`. It clamped a ratio into [0, 100] for a bar, which is
+ * the right thing to do to a BAR and the wrong thing to do to a FIGURE: capacity utilisation
+ * can legitimately exceed 100% (`_requireCapacity` compares `current > max`, so an existing
+ * position can sit above a cap that governance has since lowered) and clamping it would hide
+ * exactly that. Clamp at the point of drawing the bar instead — see `CapacityBar`. */

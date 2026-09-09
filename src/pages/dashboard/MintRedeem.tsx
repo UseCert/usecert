@@ -5,6 +5,7 @@ import { isChainVaultId, useDashboard } from "./store";
 import type { MintPreset, VaultId } from "./store";
 import {
   AgeLine,
+  CapacityHalt,
   Dropdown,
   MicroLabel,
   Panel,
@@ -25,7 +26,7 @@ import {
   type DecodedRevert,
   type SizeRoute,
 } from "@/chain/useActions";
-import type { ChainVaultId } from "@/chain/useVaults";
+import { capacityLegsLabel, type ChainVaultId } from "@/chain/useVaults";
 import {
   ONE_18,
   feeAmount18,
@@ -466,7 +467,19 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
   /* --------------------------------------------------------------- gating */
 
   const unit = tab === "mint" ? collateralSymbol : meta.name;
-  const mintBlocked = tab === "mint" && (!mintAllowed || priceUnavailable);
+
+  /**
+   * The SILENT mint halt.
+   *
+   * `capacityOracle.maxNotional18` returning 0 refuses every mint through
+   * `_requireCapacity` (`CertVault.sol:1770`) while leaving `oracle.mintAllowed()` true, the
+   * price healthy and the attestation fresh. Nothing else on this form moves, so it is gated
+   * and explained explicitly. `capIsZero` is false while the cap is still being read — an
+   * unknown cap must never present as a halt.
+   */
+  const capacity = lv?.capacity ?? null;
+  const capacityHalted = Boolean(capacity?.capIsZero);
+  const mintBlocked = tab === "mint" && (!mintAllowed || priceUnavailable || capacityHalted);
   const submitDisabled =
     !connected ||
     wrongNetwork ||
@@ -585,7 +598,14 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
               </p>
             </div>
 
-            {mintBlocked && (
+            {/* The capacity halt is its OWN card, not a line inside the oracle card: it fires
+                with a healthy oracle and mintAllowed() == true, so folding it into "minting
+                paused because the oracle is unhealthy" would misattribute it. */}
+            {tab === "mint" && capacity !== null && (
+              <CapacityHalt className="mt-4" view={capacity} bufferHeld={vault.buffer} />
+            )}
+
+            {mintBlocked && (!mintAllowed || priceUnavailable) && (
               <div className="mt-4 border border-warn/40 bg-[#12120d] p-4">
                 <p className="font-mono text-[11px] uppercase tracking-[0.06em] text-warn">
                   {priceUnavailable ? "Price unavailable · minting paused" : "Minting paused"}
@@ -600,6 +620,23 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
                   Redemption is unaffected and still works.
                 </p>
               </div>
+            )}
+
+            {/* Headroom before CertVault_AtCapacity, so an over-cap amount is visible before
+                the wallet rather than after a revert. */}
+            {tab === "mint" && capacity !== null && !capacity.capIsZero && (
+              <p className="mt-3 font-mono text-[10px] uppercase leading-[1.7] tracking-[0.06em] text-white-60/70">
+                {capacity.utilisationPct === null || capacity.cap === null || capacity.used === null
+                  ? "Reading capacityOracle.maxNotional18 for this vault's mint ceiling…"
+                  : `Mint ceiling ${fmtUSD(capacity.cap, 0)} · ${fmtNum(
+                      capacity.utilisationPct,
+                      2,
+                    )}% used · ${fmtUSD(Math.max(0, capacity.cap - capacity.used), 0)} of notional headroom${
+                      capacity.bindingLegs.length > 0
+                        ? ` · bound by ${capacityLegsLabel(capacity.bindingLegs)}`
+                        : ""
+                    }`}
+              </p>
             )}
 
             {tab === "mint" && (

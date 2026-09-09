@@ -9,8 +9,8 @@ export const HOW_IT_WORKS_ROWS: AccordionRow[] = [
     title: "Mint",
     meta: "Delta: 1.0",
     body: [
-      "Deposit USDC into a per-asset vault. The vault opens an equivalent long on the corresponding equity perp on Robinhood Chain, and your certificate mints to your wallet at oracle price. uTSLA in, uTSLA out, at the stock's price, any hour of any day.",
-      "The delta target is 1.0 at all times. Every certificate in circulation is backed by exactly one token's worth of perp exposure plus USDC margin, and the backing math is proven on-chain at every attestation (~60s), with the age of the proof published.",
+      "Deposit tUSDG into a per-asset vault. The vault opens an equivalent long on the corresponding equity perp on Robinhood Chain, and your certificate mints to your wallet at oracle price. uTSLA in, uTSLA out, at the stock's price, any hour of any day.",
+      "The delta target is 1.0 at all times. Every certificate in circulation is backed by exactly one token's worth of perp exposure plus tUSDG margin, and the backing math is proven on-chain at every attestation (~60s), with the age of the proof published.",
     ],
     image: "/hiw-mint.jpg",
     imageAlt: "Steel vault door with locking wheel",
@@ -49,7 +49,7 @@ export const HOW_IT_WORKS_ROWS: AccordionRow[] = [
     title: "Honest Boundaries",
     meta: "Risk: named plainly",
     body: [
-      "Certificates are synthetic: price exposure backed by perp positions and USDC margin, not custody of shares. No dividends, no shareholder rights, no claim on an issuer.",
+      "Certificates are synthetic: price exposure backed by perp positions and tUSDG margin, not custody of shares. No dividends, no shareholder rights, no claim on an issuer.",
       "Risks are named plainly: sustained negative funding (buffered, then fee'd, never hidden), market and operator dependency, and oracle or liquidation tail risk in extreme gaps. UseCert is infrastructure, not investment advice.",
     ],
     image: "/hiw-boundaries.jpg",
@@ -72,7 +72,7 @@ export default function HowItWorks() {
             transition={{ duration: 0.8, ease: EASE }}
           >
             The perps are the engine. UseCert is the asset. Every certificate is backed by exactly one token's worth
-            of perp exposure plus USDC margin.
+            of perp exposure plus tUSDG margin.
           </motion.p>
         </div>
         <motion.div
