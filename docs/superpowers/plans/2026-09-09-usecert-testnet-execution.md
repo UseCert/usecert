@@ -700,6 +700,25 @@ new `docs/TESTNET-RUNBOOK.md`
 Without these the testnet vault stops minting within ~15 minutes of deployment, because
 `maxAttestationAgeSec = 300` starves `maxNotional18` to zero and a static aggregator goes stale.
 
+### Added after integration — `settleBatch` is now GATED, so the keeper must be registered
+
+Task 7 gated `settleBatch` to the owner or an owner-settable keeper (plan item 2 of that task, added
+because a permissionless settler picks the block and therefore the mark at which someone else's
+queued order fills). That is correct, and it means **an unregistered keeper simply reverts
+`LighterSim_OnlyOwnerOrKeeper()`** — which is how it was found: Task 10's end-to-end
+mint-and-force-exit test failed on exactly that after the two tasks were merged together.
+
+So the keeper address is now part of the deployment, not just part of the ops setup:
+
+- The deployment script must call the simulator's keeper setter for the address that will run
+  `BatchAdvancer`, and **read it back** like every other §9 item.
+- That address must be recorded in `deployments/<chainId>.json`, because the keeper process and the
+  deployment have to agree on it and nothing on-chain will tell you they disagree — the symptom is
+  every `settleBatch` reverting, which looks identical to a dead keeper.
+- The runbook's troubleshooting table needs the row: *"every `settleBatch` reverts
+  `LighterSim_OnlyOwnerOrKeeper` → the keeper address in the address book is not the one the keeper
+  process is signing with."*
+
 1. **`BatchAdvancer`** — calls `LighterSim.settleBatch()` on an interval. The seventh worker the
    design spec never needed, because on mainnet Lighter advances its own batches.
 2. **`Attester`** — calls `SolvencyRegistry.attest(asset, batchId, notional18, margin18,
