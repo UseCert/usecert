@@ -953,6 +953,193 @@ contract LighterSimTest is Test {
         assertEq(sim.positionBaseOf(sIdx, MARKET), 0, "the order filled in non-strict mode");
     }
 
+    // ---------------------------------------------------------------------------------------
+    // FIX ROUND 1 (Task 7 review, Important). The initial-margin gate must read POST-realisation
+    // cash.
+    //
+    // Task 7 moved the gate ABOVE `_applyFill`, which was necessary — a `continue` after a write
+    // would half-apply a fill — but it also changed the check's INPUT. The gate began reading
+    // `marginBalanceOf` BEFORE `_applyFill`, i.e. before `_realisePortion` debits the loss on
+    // whatever leg the fill closes. On a side-flipping order that both closes a losing leg AND
+    // grows the position, the gate therefore passed on cash the account was about to lose.
+    //
+    // REPRODUCED BEFORE THE FIX, at this fixture's own parameters (sizeDecimals 4, 6-decimal
+    // collateral, requiredMarginBps 5000):
+    //
+    //   1. deposit 1000.01 USDG; at mark 100e18 open a short of 100_000 ticks
+    //      -> notional 1000e18, required 500e18 <= cash 1000.01e18, fills, entry 100e18
+    //   2. the operator moves the mark to 200e18 -> unrealised loss 1000 USDG, equity 0.01 USDG
+    //   3. bid 200_001 -> resulting +100_001, |res| > |prev| so the gate runs.
+    //      notional 2000.02e18, required 1000.01e18, PRE-fill cash18 1000.01e18 -> PASSED
+    //   4. `_applyFill` then flipped the position, realising -1000 USDG -> cash 0.01 USDG holding
+    //      a $2000 notional long.
+    //
+    // Not a value-theft path: `_realisePortion` floors the loss at zero cash, `equity()` floors at
+    // zero, and `_fundPending()` is a no-op on `LighterSim`. But it made the SIMULATOR EASIER THAN
+    // THE VENUE, which is the one direction Global Constraint 5 forbids, and it is a relaxation the
+    // pre-Task-7 ordering did not have: reading the balance after `_applyFill` is exactly what the
+    // old code did, and step 3 reverted `InsufficientMargin` under it.
+    //
+    // THE FIX keeps the gate above `_applyFill` — no write-then-`continue` is reintroduced — and
+    // instead computes the post-realisation cash WITHOUT writing it, through
+    // `_cashAfterFillRealisation`. That helper and `_applyFill` now share one closed-leg decision
+    // (`_closedPortion`) and one PnL computation (`_realisedPnlOn` / `_creditDebit`), so the
+    // prediction cannot drift from the fill it predicts.
+    // ---------------------------------------------------------------------------------------
+
+    /// @notice The relaxation itself: a side-flipping order that closes a losing leg while growing
+    ///         the position is refused on the cash it will actually have, not on the cash it is
+    ///         about to lose.
+    /// @dev Asserts the account's cash AND position afterwards, not merely that a rejection
+    ///      happened — a gate that rejected for the wrong reason, or that rejected after mutating
+    ///      the books, would pass a revert-only assertion.
+    function test_initialMarginGateReadsCashAfterTheClosedLegIsRealised() public {
+        sim.setMarkPrice(MARKET, 100e18);
+        sim.deposit(address(this), ASSET_IDX, 0, 1_000_010_000); // 1000.01 USDG
+        uint48 idx = sim.addressToAccountIndex(address(this));
+
+        // Step 1: the short fills. required 500e18 <= 1000.01e18.
+        sim.createOrder(idx, MARKET, 100_000, 10_000, 1, 1);
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(idx, MARKET), -100_000, "the short did not fill");
+        assertEq(sim.entryPriceOf(idx, MARKET), 100e18, "entry not recorded at the mark");
+        assertEq(sim.marginBalanceOf(idx), 1_000_010_000, "cash moved on an opening fill");
+
+        // Step 2: the mark doubles against the short. 1000 USDG of unrealised loss.
+        sim.setMarkPrice(MARKET, 200e18);
+        assertEq(sim.unrealisedPnl(idx), -1_000_000_000, "the loss is not 1000 USDG");
+        assertEq(sim.equity(idx), 10_000, "equity is not 0.01 USDG");
+
+        // Step 3: the flip. |resulting| 100_001 > |previous| 100_000, so the gate runs; notional
+        // 2000.02e18, required 1000.01e18. PRE-realisation cash18 is exactly 1000.01e18 and would
+        // pass; POST-realisation cash18 is 0.01e18 and must not.
+        sim.createOrder(idx, MARKET, 200_001, 10_000, 0, 1);
+        vm.expectEmit(true, true, true, true, address(sim));
+        // orderId 0: the first `settleBatch` drained and deleted the queue, so the flip is the
+        // only order in the second window.
+        emit LighterCore.OrderRejected(idx, MARKET, 0, LighterCore.InsufficientMargin.selector);
+        sim.settleBatch();
+
+        // Step 4, as it must now be: nothing was applied. The gate rejected without mutating.
+        assertEq(sim.positionBaseOf(idx, MARKET), -100_000, "the flip was applied anyway");
+        assertEq(sim.entryPriceOf(idx, MARKET), 100e18, "the entry-price book moved on a rejection");
+        assertEq(sim.marginBalanceOf(idx), 1_000_010_000, "cash moved on a rejection");
+        assertEq(sim.queueLength(), 0, "the rejected order stayed in the queue");
+        assertEq(sim.queuedOrdersOf(idx), 0, "the rejected order still counts against its account");
+    }
+
+    /// @notice The same scenario in `strictMode`: still a revert, on the same threshold. The fix
+    ///         changed the gate's INPUT, not either of its two behaviours.
+    function test_strictModeRevertsOnTheFlipThatOutrunsPostRealisationCash() public {
+        sim.setStrictMode(true);
+        sim.setMarkPrice(MARKET, 100e18);
+        sim.deposit(address(this), ASSET_IDX, 0, 1_000_010_000);
+        uint48 idx = sim.addressToAccountIndex(address(this));
+
+        sim.createOrder(idx, MARKET, 100_000, 10_000, 1, 1);
+        sim.settleBatch();
+        sim.setMarkPrice(MARKET, 200e18);
+
+        sim.createOrder(idx, MARKET, 200_001, 10_000, 0, 1);
+        vm.expectRevert(LighterCore.InsufficientMargin.selector);
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(idx, MARKET), -100_000, "the revert did not unwind the flip");
+    }
+
+    /// @notice The fix must not overcorrect. When the closed leg is in PROFIT, the realised gain is
+    ///         cash the account genuinely has by the time the fill lands, so the flip must still
+    ///         pass — the real venue would allow it, and a simulator that refused would be a
+    ///         DIFFERENT deviation from the same constraint.
+    /// @dev Same shape as the test above with the mark moved the other way, which is what makes it
+    ///      a control rather than a second copy: it exercises `_creditDebit`'s credit branch, the
+    ///      one a loss-only fix would leave unproven.
+    function test_aProfitableClosedLegIsCreditedBeforeTheGateRuns() public {
+        sim.setMarkPrice(MARKET, 200e18);
+        sim.deposit(address(this), ASSET_IDX, 0, 1_000_010_000);
+        uint48 idx = sim.addressToAccountIndex(address(this));
+
+        // Short 100_000 at 200e18: notional 2000e18, required 1000e18 <= 1000.01e18.
+        sim.createOrder(idx, MARKET, 100_000, 10_000, 1, 1);
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(idx, MARKET), -100_000);
+        assertEq(sim.entryPriceOf(idx, MARKET), 200e18);
+
+        // The mark halves in the short's favour: 1000 USDG of unrealised GAIN.
+        sim.setMarkPrice(MARKET, 100e18);
+        assertEq(sim.unrealisedPnl(idx), 1_000_000_000, "the gain is not 1000 USDG");
+
+        // Flip to +100_001 at 100e18. notional 1000.01e18, required 500.005e18. Pre-realisation
+        // cash18 is 1000.01e18 (passes) and post-realisation is 2000.01e18 (also passes) — but the
+        // point is that the fix READS THE LARGER FIGURE, so a stricter-than-venue variant of this
+        // gate would be caught by the next case, not this one.
+        sim.createOrder(idx, MARKET, 200_001, 10_000, 0, 1);
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(idx, MARKET), 100_001, "the profitable flip was refused");
+        assertEq(sim.marginBalanceOf(idx), 2_000_010_000, "the closed leg's gain was not realised");
+        assertEq(sim.entryPriceOf(idx, MARKET), 100e18, "the new leg's entry is not the fill price");
+    }
+
+    /// @notice The case that separates "reads post-realisation cash" from "reads pre-fill cash":
+    ///         a flip the account can ONLY afford once the closing leg's gain is credited.
+    /// @dev This is the control that a pre-fill-cash gate fails. Required margin here exceeds the
+    ///      pre-fill balance and is covered only by the realised gain, so a gate reading pre-fill
+    ///      cash rejects a fill the real venue allows — the mirror-image deviation, and proof the
+    ///      fix is the venue's ordering rather than merely a stricter number.
+    function test_aFlipAffordableOnlyOnTheRealisedGainStillFills() public {
+        sim.setMarkPrice(MARKET, 200e18);
+        sim.deposit(address(this), ASSET_IDX, 0, 1_000_000_000); // 1000 USDG exactly
+        uint48 idx = sim.addressToAccountIndex(address(this));
+
+        // Short 100_000 at 200e18: notional 2000e18, required 1000e18 == cash. Fills.
+        sim.createOrder(idx, MARKET, 100_000, 10_000, 1, 1);
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(idx, MARKET), -100_000);
+
+        // Mark halves: 1000 USDG realisable gain on the short.
+        sim.setMarkPrice(MARKET, 100e18);
+
+        // Flip to +300_000 at 100e18: notional 3000e18, required 1500e18. Pre-fill cash is
+        // 1000e18 -> a pre-fill gate REJECTS. Post-realisation cash is 2000e18 -> fills.
+        sim.createOrder(idx, MARKET, 400_000, 10_000, 0, 1);
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(idx, MARKET), 300_000, "the gain-funded flip was refused");
+        assertEq(sim.marginBalanceOf(idx), 2_000_000_000, "the gain was not realised into cash");
+    }
+
+    /// @notice MINOR 1's mechanism, verified rather than asserted. A zero mark on one market does
+    ///         NOT corrupt another market's entry-price book, so the `LighterSim_MarkPriceUnset`
+    ///         pre-pass being whole-batch is NOT justified by cross-market corruption.
+    /// @dev Run on `MockLighter`, which has no pre-pass, so the markless order actually settles and
+    ///      the damage can be measured. `_applyFill` reads `markPrice[m]` for the ORDER'S OWN
+    ///      market and `entryPriceOf` is keyed `[account][market]`, so the corruption is confined
+    ///      to the unmarked market. See `LighterSim.settleBatch`'s comment for the reason that
+    ///      actually justifies the whole-batch refusal (rejection CONSUMES the order).
+    function test_aZeroMarkCorruptsOnlyItsOwnMarketsEntryBook() public {
+        mockL.setMarkPrice(MARKET, 100e18); // MARKET priced, MARKET_B deliberately not
+        mockL.deposit(address(this), ASSET_IDX, 0, 100_000e6);
+        uint48 idx = mockL.addressToAccountIndex(address(this));
+
+        mockL.createOrder(idx, MARKET, 100, 10_000, 0, 1);
+        mockL.createOrder(idx, MARKET_B, 100, 5_000, 0, 1);
+        mockL.settleBatch();
+
+        // Both legs filled. The priced market's entry book is INTACT; only the markless one is
+        // dead, exactly as `entryPriceOf[account][market]` being per-market predicts.
+        assertEq(mockL.positionBaseOf(idx, MARKET), 100, "the priced leg did not fill");
+        assertEq(mockL.entryPriceOf(idx, MARKET), 100e18, "the priced market's entry was corrupted");
+        assertEq(mockL.positionBaseOf(idx, MARKET_B), 100, "the markless leg did not fill");
+        assertEq(mockL.entryPriceOf(idx, MARKET_B), 0, "the markless market recorded an entry");
+
+        // Now price both and read the ONE aggregate view that sums across markets. MARKET
+        // contributes 100 * (150e18 - 100e18) / 1e4 = 5e17 -> 500_000 collateral units. MARKET_B
+        // holds an identical +100 at a 50e18 mark but contributes ZERO, because `_pnl18`
+        // early-returns on `entry == 0` forever. The total being exactly MARKET's own figure is
+        // the measurement: the corruption did not cross the market boundary.
+        mockL.setMarkPrice(MARKET, 150e18);
+        mockL.setMarkPrice(MARKET_B, 50e18);
+        assertEq(mockL.unrealisedPnl(idx), 500_000, "a zero mark on MARKET_B moved MARKET's PnL");
+    }
+
     function test_setStrictModeIsOwnerOnlyAndEvented() public {
         vm.prank(stranger);
         vm.expectRevert(LighterSim.LighterSim_OnlyOwner.selector);

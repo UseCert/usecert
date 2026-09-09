@@ -452,4 +452,36 @@ contract BackingInvariantTest is VaultFixture {
         handler.rebalance();
         assertEq(handler.rebalanceAlreadyThisBatchCount(), 1);
     }
+
+    /// @notice FIX ROUND 1 (Task 7 review, Minor 2): the handler's settlement-rejection counter can
+    ///         actually leave zero.
+    ///
+    /// @dev The counter used to catch a whole-batch `InsufficientMargin` revert. Task 7 replaced
+    ///      that with a per-order `OrderRejected` and left `strictMode` false by default, which
+    ///      this fixture never changes — so the old branch had become unreachable and the counter
+    ///      permanently zero, silently. Nothing asserted on it, so nothing went red: exactly the
+    ///      "stays green through the change it guards" failure this suite exists to prevent. The
+    ///      counter now watches `OrderRejected`, and this test is what stops it dying again the
+    ///      next time settlement's refusal mechanism changes shape.
+    function test_settleBatchOrderRejectedIsReachable() public {
+        handler.mintInstant(5_000e6);
+        assertEq(handler.settleBatchOrderRejectedCount(), 0);
+        handler.settleBatch();
+        assertEq(handler.settleBatchOrderRejectedCount(), 0, "a properly funded hedge was rejected");
+        assertGt(lighter.positionBase(MARKET), 0, "no position was opened to build on");
+
+        // The venue raises its own initial-margin requirement past anything the vault has posted,
+        // so the NEXT position increase cannot be margined. That is the real shape of this
+        // rejection — `requiredMarginBps` is a venue parameter, not something the vault controls —
+        // and it is why fix round 1 of Task 7 could only make the gate an operator hatch that
+        // raises, never lowers.
+        lighter.setRequiredMarginBps(1_000_000);
+        handler.mintInstant(5_000e6);
+        handler.settleBatch();
+        assertGt(handler.settleBatchOrderRejectedCount(), 0, "OrderRejected never fired");
+
+        // And it is a rejection, not a jam: the queue is clear and settlement still works.
+        assertEq(lighter.queueLength(), 0, "the rejected order stayed in the queue");
+        assertEq(handler.lawTwoViolations(), 0, "a venue-side rejection was counted as a Law 2 breach");
+    }
 }
