@@ -379,14 +379,42 @@ contract LighterSim is LighterCore {
     ///      loop it guards, and a markless order sitting beyond the window no longer refuses a
     ///      window it is not part of.
     ///
-    ///      STILL WHOLE-BATCH within that window, and that is deliberate. An unset mark is an
-    ///      OPERATOR misconfiguration, not an account's action, so unlike `InsufficientMargin` it
-    ///      is not something to attribute to one order and skip: at a zero mark the entry-price
-    ///      book is corrupted for every order in the window, which is the silent state the guard
-    ///      exists for. The residual liveness cost — one markless order refuses its window until
-    ///      the owner sets the mark or drops the order — is what `ownerCancelAccountOrders` and the
-    ///      registration allowlist are the answer to, and it is recorded as a known residual in
-    ///      this task's report rather than left implied.
+    ///      STILL WHOLE-BATCH within that window, and that is deliberate — but NOT for the reason
+    ///      this comment used to give.
+    ///
+    ///      THE REASON IT USED TO GIVE WAS FALSE, and fix round 1 (Task 7 review, Minor 1)
+    ///      disproved it. It claimed that "at a zero mark the entry-price book is corrupted for
+    ///      every order in the window", so no order could safely be skipped individually. It is
+    ///      not: `_applyFill` reads `markPrice[m]` for the ORDER'S OWN market and `entryPriceOf`
+    ///      is keyed `[account][market]`, so a zero mark on market X cannot reach market Y's
+    ///      entry. `test_aZeroMarkCorruptsOnlyItsOwnMarketsEntryBook` measures exactly that on
+    ///      `MockLighter`, which has no pre-pass and therefore lets the markless order settle:
+    ///      the priced market keeps its entry and a live PnL layer while only the unmarked
+    ///      market's book goes dead. Skipping just the offending order would corrupt nothing.
+    ///
+    ///      THE REASON THAT ACTUALLY HOLDS is that rejection CONSUMES the order. `settleBatch`
+    ///      decrements `queuedOrdersOf` and drops the order from the queue whether it fills or is
+    ///      rejected — deliberately, because a rejection that left the order behind would be a jam
+    ///      by another name. So per-order rejection of a markless order would SILENTLY DESTROY THE
+    ///      VAULT'S HEDGE ORDER on a deployment where the operator forgot one `setMarkPrice`,
+    ///      instead of blocking loudly until the mark is set. Whole-batch is the fail-closed
+    ///      direction: an unset mark is an OPERATOR misconfiguration, not an account's action, so
+    ///      unlike `InsufficientMargin` it is not something to attribute to one order and discard.
+    ///
+    ///      AN INCIDENTAL BENEFIT, worth recording because nothing else states it: because the
+    ///      pre-pass refuses any order on an unmarked market, `_trackMarket` — whose only caller is
+    ///      `LighterCore.settleBatch`, downstream of this guard — can only ever grow `_markets` to
+    ///      the set of MARKED markets. That keeps `equity()`'s and `_realiseGain`'s O(`_markets`)
+    ///      loops, both on `withdraw`'s path, as small as the operator's own configuration.
+    ///      `MockLighter` has no such guard, so there an attacker could enqueue orders across the
+    ///      whole 0..254 market range and push `_markets` toward 255, making every `withdraw` cost
+    ///      multiple megagas. That is a test front end and not deployed, but it is the reason this
+    ///      guard's placement is load-bearing beyond its stated purpose.
+    ///
+    ///      The residual liveness cost — one markless order refuses its window until the owner sets
+    ///      the mark or drops the order — is what `ownerCancelAccountOrders` and the registration
+    ///      allowlist are the answer to, and it is recorded as a known residual in this task's
+    ///      report rather than left implied.
     function settleBatch() public virtual override {
         if (msg.sender != owner && msg.sender != keeper) revert LighterSim_OnlyOwnerOrKeeper();
         uint256 n = _queue.length;

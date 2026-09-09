@@ -426,7 +426,32 @@ abstract contract LighterCore is ILighter {
             if (absResulting > absPrevious) {
                 uint256 notional18 = absResulting * markPrice[o.marketIndex] / (10 ** sizeDecimals);
                 uint256 requiredMargin18 = notional18 * requiredMarginBps / 10_000;
-                uint256 cash = marginBalanceOf[o.account];
+                // FIX ROUND 1 (Task 7 review, Important). POST-REALISATION cash, computed WITHOUT
+                // writing it.
+                //
+                // Task 7 moved this gate above `_applyFill` — necessary, because a `continue`
+                // after a write would half-apply a fill — but that also changed the check's
+                // INPUT. Reading `marginBalanceOf` here reads cash BEFORE `_realisePortion`
+                // debits the loss on whatever leg the fill closes, so a side-flipping order that
+                // both closes a losing leg and GROWS the position passed the gate on cash it was
+                // about to lose. Measured at this repo's own suite parameters: a 1000.01 USDG
+                // account, short 100_000 ticks at an entry of 100e18, mark moved to 200e18, then
+                // a bid of 200_001 — required 1000.01e18 against a pre-fill cash18 of exactly
+                // 1000.01e18, so it filled, and `_applyFill` then realised -1000 USDG leaving
+                // 0.01 USDG of cash behind a 2000.02e18 notional long. The pre-Task-7 code read
+                // the balance AFTER `_applyFill` and reverted `InsufficientMargin` on it.
+                //
+                // Not a value-theft path — the loss floors at zero cash, `equity()` floors at
+                // zero, and `_fundPending()` is a no-op on `LighterSim` — but it made the
+                // simulator EASIER than the venue, which is the one direction Global Constraint 5
+                // forbids, on the deployment path that exists today.
+                //
+                // The gate still rejects without having mutated anything: `_cashAfterFillRealisation`
+                // is a `view`, and it shares `_closedPortion`, `_realisedPnlOn` and `_creditDebit`
+                // with `_applyFill`, so the figure it predicts is the figure the fill will produce.
+                // Getting this wrong in the other direction is a deviation too, so the suite pins
+                // both — see `test_aFlipAffordableOnlyOnTheRealisedGainStillFills`.
+                uint256 cash = _cashAfterFillRealisation(o.account, o.marketIndex, previous, resulting);
                 uint256 cash18 = _collateralDecimals <= 18
                     ? cash * (10 ** (18 - _collateralDecimals))
                     : cash / (10 ** (_collateralDecimals - 18));
@@ -593,10 +618,16 @@ abstract contract LighterCore is ILighter {
 
     /// @dev Book-keeps `accountIndex`'s entryPrice across one fill, realising PnL on whatever the
     ///      fill closes. Called with positionBaseOf[accountIndex][m] still holding `prev`.
+    ///
+    /// @dev FIX ROUND 1 (Task 7 review, Important). WHICH leg a fill closes is now decided in one
+    ///      place, `_closedPortion`, because `settleBatch`'s initial-margin gate has to predict the
+    ///      same answer this function acts on. The branch structure and every entry-price write
+    ///      below are unchanged — only the three `_realisePortion` arguments now come from the
+    ///      shared helper instead of being recomputed per branch.
     function _applyFill(uint48 accountIndex, uint16 m, int256 prev, int256 res) internal {
         uint256 fillPx = markPrice[m];
         if (res == 0) {
-            _realisePortion(accountIndex, m, prev, fillPx);
+            _realisePortion(accountIndex, m, _closedPortion(prev, res), fillPx);
             entryPriceOf[accountIndex][m] = 0;
             return;
         }
@@ -615,29 +646,85 @@ abstract contract LighterCore is ILighter {
                 (absPrev * entryPriceOf[accountIndex][m] + (absRes - absPrev) * fillPx) / absRes;
         } else if (sameSign) {
             // Partial close: realise the closed slice, leave the entry of the remainder alone.
-            uint256 closed = absPrev - absRes;
-            _realisePortion(accountIndex, m, prev > 0 ? int256(closed) : -int256(closed), fillPx);
+            _realisePortion(accountIndex, m, _closedPortion(prev, res), fillPx);
         } else {
             // Flipped side: the whole old position closed, the remainder is a new entry.
-            _realisePortion(accountIndex, m, prev, fillPx);
+            _realisePortion(accountIndex, m, _closedPortion(prev, res), fillPx);
             entryPriceOf[accountIndex][m] = fillPx;
         }
+    }
+
+    /// @dev How much of `prev` (signed, base ticks) a fill to `res` CLOSES, and therefore realises.
+    ///
+    /// @dev FIX ROUND 1 (Task 7 review, Important). The single source of truth for that decision,
+    ///      shared by `_applyFill` — which acts on it — and by `_cashAfterFillRealisation`, which
+    ///      predicts it for `settleBatch`'s initial-margin gate. Two copies of this branch table
+    ///      would be free to drift, and a gate that predicted a different closed leg than the fill
+    ///      applies is the same class of defect as the one this round fixes. `_applyFill` keeps its
+    ///      own branch structure for the ENTRY-PRICE writes, which differ per branch; only the
+    ///      realised portion is centralised here.
+    ///
+    ///      Cases, matching `_applyFill` exactly: nothing closes when there was no position, or
+    ///      when a same-sign fill grows it (the entry is re-weighted instead); a fill to zero and a
+    ///      side flip both close the whole of `prev`; a same-sign shrink closes the difference.
+    function _closedPortion(int256 prev, int256 res) internal pure returns (int256) {
+        if (prev == 0) return 0;
+        if (res == 0) return prev;
+        if ((prev > 0) != (res > 0)) return prev; // flipped side
+        uint256 absPrev = prev >= 0 ? uint256(prev) : uint256(-prev);
+        uint256 absRes = res >= 0 ? uint256(res) : uint256(-res);
+        if (absRes >= absPrev) return 0; // grew, or unchanged in size
+        uint256 closed = absPrev - absRes;
+        return prev > 0 ? int256(closed) : -int256(closed);
+    }
+
+    /// @dev The signed PnL, in collateral units, that realising `portion` of `accountIndex`'s
+    ///      market `m` at `fillPx` produces. A `view`: the arithmetic half of `_realisePortion`,
+    ///      split out so the margin gate can ask the question without answering it.
+    function _realisedPnlOn(uint48 accountIndex, uint16 m, int256 portion, uint256 fillPx)
+        internal
+        view
+        returns (int256)
+    {
+        int256 entry = int256(entryPriceOf[accountIndex][m]);
+        if (entry == 0 || portion == 0) return 0;
+        int256 pnl18 = portion * (int256(fillPx) - entry) / int256(10 ** uint256(sizeDecimals));
+        return _toCollateral(pnl18);
+    }
+
+    /// @dev Apply `pnl` to a cash balance. A loss FLOORS AT ZERO rather than underflowing, which is
+    ///      the venue's own behaviour — an account cannot be pushed into debt here — and is the
+    ///      reason the relaxation this round fixes could not move value even while it existed.
+    function _creditDebit(uint256 cash, int256 pnl) internal pure returns (uint256) {
+        if (pnl > 0) return cash + uint256(pnl);
+        if (pnl == 0) return cash;
+        uint256 loss = uint256(-pnl);
+        return loss >= cash ? 0 : cash - loss;
+    }
+
+    /// @dev What `accountIndex`'s cash margin WILL be once `_applyFill(accountIndex, m, prev, res)`
+    ///      has realised whatever that fill closes — computed without writing anything, so
+    ///      `settleBatch` can gate on it and still `continue` with the books untouched.
+    ///      Reads the same pre-fill `entryPriceOf`/`marginBalanceOf`/`markPrice[m]` that
+    ///      `_applyFill` will read, through the same three helpers, so the two agree by
+    ///      construction rather than by comment.
+    function _cashAfterFillRealisation(uint48 accountIndex, uint16 m, int256 prev, int256 res)
+        internal
+        view
+        returns (uint256)
+    {
+        return _creditDebit(
+            marginBalanceOf[accountIndex],
+            _realisedPnlOn(accountIndex, m, _closedPortion(prev, res), markPrice[m])
+        );
     }
 
     /// @dev Realise `portion` (signed, base ticks) of `accountIndex`'s market `m` at `fillPx` into
     ///      that account's own cash margin.
     function _realisePortion(uint48 accountIndex, uint16 m, int256 portion, uint256 fillPx) internal {
-        int256 entry = int256(entryPriceOf[accountIndex][m]);
-        if (entry == 0 || portion == 0) return;
-        int256 pnl18 = portion * (int256(fillPx) - entry) / int256(10 ** uint256(sizeDecimals));
-        int256 pnl = _toCollateral(pnl18);
-        if (pnl > 0) {
-            marginBalanceOf[accountIndex] += uint256(pnl);
-        } else if (pnl < 0) {
-            uint256 loss = uint256(-pnl);
-            uint256 cash = marginBalanceOf[accountIndex];
-            marginBalanceOf[accountIndex] = loss >= cash ? 0 : cash - loss;
-        }
+        int256 pnl = _realisedPnlOn(accountIndex, m, portion, fillPx);
+        if (pnl == 0) return;
+        marginBalanceOf[accountIndex] = _creditDebit(marginBalanceOf[accountIndex], pnl);
     }
 
     /// @dev Convert `need` collateral units of `accountIndex`'s unrealised gain into that account's
