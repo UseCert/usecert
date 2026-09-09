@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {LighterCore} from "../../src/sim/LighterCore.sol";
 import {LighterSim} from "../../src/sim/LighterSim.sol";
 import {MockLighter} from "../mocks/MockLighter.sol";
@@ -612,8 +613,12 @@ contract LighterSimTest is Test {
     ///      Task 7 added two more: `setStrictMode` and `setKeeper`. `settleBatch` is now gated too,
     ///      but it is not a knob and its refusal is `LighterSim_OnlyOwnerOrKeeper`, so it is
     ///      asserted separately in `test_settleBatchIsGatedToOwnerOrKeeper`.
+    ///
+    ///      Task 8 added one: `setDepositTickSize`. Growing this array is the whole obligation the
+    ///      note above describes, and it is the reason the array is a fixed-size one — a new knob
+    ///      that is not enumerated here does not compile silently, it does not compile at all.
     function test_theOperatorKnobsThatDoExistAreAllGated() public {
-        bytes[8] memory knobs = [
+        bytes[9] memory knobs = [
             abi.encodeWithSignature("setMarkPrice(uint16,uint256)", MARKET, uint256(100e18)),
             abi.encodeWithSignature("setRequiredMarginBps(uint256)", uint256(9_000)),
             abi.encodeWithSignature("setDepositCapTicks(uint256)", uint256(1_000)),
@@ -623,7 +628,11 @@ contract LighterSimTest is Test {
             // Task 7 added these two. The enumeration is only as good as its completeness, which is
             // this test's whole point.
             abi.encodeWithSignature("setStrictMode(bool)", true),
-            abi.encodeWithSignature("setKeeper(address)", depositorA)
+            abi.encodeWithSignature("setKeeper(address)", depositorA),
+            // Task 8, item 2 added this one. A non-zero argument, because zero is separately
+            // refused with `LighterCore_TickSizeIsZero` and would make the owner half of the
+            // assertion below fail for a reason that has nothing to do with gating.
+            abi.encodeWithSignature("setDepositTickSize(uint256)", uint256(1e6))
         ];
         for (uint256 i = 0; i < knobs.length; ++i) {
             vm.prank(stranger);
@@ -906,8 +915,15 @@ contract LighterSimTest is Test {
         vm.stopPrank();
 
         // No revert, and the refusal is on the record naming the order and the reason.
+        //
+        // TASK 8 changed the third argument's MEANING, not just its type. It was the refused
+        // order's slot in the queue (1: second of two); it is now `Order.id`, monotonic from 1, so
+        // the poison pill is order 2 — the honest hedge was enqueued first and is order 1. The
+        // queue slot was never an identifier, because `_cancelOrdersOf` compacts the array in
+        // place. The fourth argument is the batch that refused it: this is the first `settleBatch`
+        // on this simulator, so batch 1.
         vm.expectEmit(true, true, true, true, address(sim));
-        emit LighterCore.OrderRejected(sIdx, MARKET, 1, LighterCore.InsufficientMargin.selector);
+        emit LighterCore.OrderRejected(sIdx, MARKET, 2, 1, LighterCore.InsufficientMargin.selector);
         sim.settleBatch();
 
         assertEq(sim.positionBaseOf(aIdx, MARKET), 100, "the honest hedge did not fill");
@@ -1015,9 +1031,11 @@ contract LighterSimTest is Test {
         // pass; POST-realisation cash18 is 0.01e18 and must not.
         sim.createOrder(idx, MARKET, 200_001, 10_000, 0, 1);
         vm.expectEmit(true, true, true, true, address(sim));
-        // orderId 0: the first `settleBatch` drained and deleted the queue, so the flip is the
-        // only order in the second window.
-        emit LighterCore.OrderRejected(idx, MARKET, 0, LighterCore.InsufficientMargin.selector);
+        // Task 8's `OrderRejected` names the monotonic `Order.id`, not the queue index: the flip is
+        // the second order this test creates, so id 2 — even though the first `settleBatch` drained
+        // and deleted the queue, leaving it at queue index 0. That is the whole point of the id.
+        // `batchId` 2: this is the venue's second settlement.
+        emit LighterCore.OrderRejected(idx, MARKET, 2, 2, LighterCore.InsufficientMargin.selector);
         sim.settleBatch();
 
         // Step 4, as it must now be: nothing was applied. The gate rejected without mutating.
@@ -1480,6 +1498,308 @@ contract LighterSimTest is Test {
     }
 
     // ---------------------------------------------------------------------------------------
+    // TASK 8, ITEM 1: the lifecycle is observable from logs.
+    //
+    // REPRODUCED BEFORE THESE TESTS WERE WRITTEN. A throwaway probe ran the whole
+    // deposit -> createOrder -> settleBatch -> fill -> withdraw -> drain sequence against the
+    // deployable artefact under `vm.recordLogs` and counted the logs whose emitter was the
+    // simulator: TWO logs in total across the lifecycle, both ERC-20 `Transfer`s from the
+    // collateral token, and ZERO from the venue. The same probe against this tree counts seven
+    // venue events. An indexer could previously see that tokens moved and nothing about which
+    // account they were credited to, which order was submitted, whether it filled or was refused,
+    // or at what price — on a venue whose margin, positions and entry prices Task 7 had just made
+    // PER-ACCOUNT, so there was no way to attribute a single figure to a tenant.
+    // ---------------------------------------------------------------------------------------
+
+    /// @notice **THE OBSERVABILITY ACCEPTANCE TEST.** Every state transition in a mint's venue leg
+    ///         announces itself, in order, with the account in a topic.
+    ///
+    /// @dev `vm.expectEmit` with all four checks on, in sequence, across deposit -> order -> batch
+    ///      -> fill -> withdraw -> drain. Foundry matches expectations in order, so this pins the
+    ///      SEQUENCE as well as the contents: a consumer replaying these logs reconstructs the
+    ///      account map, the position book, the fill price and the pending balance without reading
+    ///      storage once.
+    function test_eventsEmittedForFullMintLifecycle() public {
+        sim.setMarkPrice(MARKET, 100e18);
+
+        // ---- deposit: the registration resolves, then the credit lands.
+        // Account indices start at 3 on the real venue and this simulator matches it.
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.AccountRegistered(address(this), 3);
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.Deposited(address(this), 3, ASSET_IDX, 1_000e6, 1_000e6, 1_000e6);
+        sim.deposit(address(this), ASSET_IDX, 0, 1_000e6);
+
+        uint48 idx = sim.addressToAccountIndex(address(this));
+        assertEq(idx, 3, "the announced account index is not the one recorded");
+
+        // ---- createOrder: enqueued, NOT filled. Order id 1, queue slot 0.
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.OrderEnqueued(idx, MARKET, 1, 100, 10_000, 0, 1, 0);
+        sim.createOrder(idx, MARKET, 100, 10_000, 0, 1);
+        assertEq(sim.positionBaseOf(idx, MARKET), 0, "filled in the calling transaction");
+
+        // ---- settleBatch: the fill carries the price and the filled size, then the batch closes.
+        // sizeDelta is +100 and resultingBase is 100: flat to long 100 ticks at a mark of 100e18.
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.OrderFilled(idx, MARKET, 1, 1, 100e18, 100, 100);
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.BatchSettled(1, 0, 1, 1, 0, true);
+        sim.settleBatch();
+        assertEq(sim.batchesSettled(), 1, "the settlement clock did not advance");
+
+        // ---- withdraw: a CREDIT to pending, not a payment, and inside the account's equity so
+        // there is no shortfall to announce.
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.WithdrawalEnqueued(address(this), idx, ASSET_IDX, 400e6, 400e6, 400e6);
+        sim.withdraw(idx, ASSET_IDX, 0, 400e6);
+
+        // ---- withdrawPendingBalance: the one point at which collateral leaves the venue.
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.WithdrawalFulfilled(address(this), idx, ASSET_IDX, 400e6, 0);
+        sim.withdrawPendingBalance(address(this), ASSET_IDX, 400e6);
+    }
+
+    /// @notice A batch id is on every fill and every rejection, it advances on EVERY call — an
+    ///         empty one included — and it is the figure Task 12's attester relays.
+    ///
+    /// @dev `SolvencyRegistry.attest` refuses a batch id that is not strictly newer than the last,
+    ///      so a counter that stalled on an empty settlement would stall attestation and starve
+    ///      `maxNotional18` to zero. An empty batch is also the keeper's heartbeat, which is what
+    ///      the runbook's "minting stopped after ~5 minutes" row is diagnosed with.
+    function test_batchIdAdvancesOnEverySettlementIncludingEmptyOnes() public {
+        assertEq(sim.batchesSettled(), 0, "the clock did not start at zero");
+
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.BatchSettled(1, 0, 0, 0, 0, true);
+        sim.settleBatch();
+        assertEq(sim.batchesSettled(), 1);
+
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.BatchSettled(2, 0, 0, 0, 0, true);
+        sim.settleBatch();
+        assertEq(sim.batchesSettled(), 2, "an empty batch did not tick the clock");
+
+        // And a batch that actually settles carries the same id into its fill.
+        sim.setMarkPrice(MARKET, 100e18);
+        sim.deposit(address(this), ASSET_IDX, 0, 1_000e6);
+        uint48 idx = sim.addressToAccountIndex(address(this));
+        sim.createOrder(idx, MARKET, 100, 10_000, 0, 1);
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.OrderFilled(idx, MARKET, 1, 3, 100e18, 100, 100);
+        sim.settleBatch();
+    }
+
+    /// @notice A rejection names the order by its MONOTONIC id, not by a queue slot, so it can be
+    ///         joined to the `OrderEnqueued` that submitted it.
+    ///
+    /// @dev THIS IS THE PROPERTY THE PRE-TASK-8 EVENT DID NOT HAVE, and it is not cosmetic.
+    ///      `OrderRejected`'s `orderId` used to be the refused order's index in `_queue`, and
+    ///      `_cancelOrdersOf` compacts that array IN PLACE — so a cancellation renumbers every
+    ///      surviving order and an operator would attribute the rejection to whatever now sits in
+    ///      that slot. Here order 1 is cancelled before settlement, which slides order 2 down into
+    ///      slot 0; the rejection must still say 2.
+    function test_orderRejectionNamesTheOrderNotTheQueueSlot() public {
+        _fundTwoDepositors();
+        sim.setMarkPrice(MARKET, 100e18);
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+
+        // A's order is enqueued first and gets id 1 in slot 0.
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 100, 10_000, 0, 1);
+
+        // The poison pill is order 2 in slot 1.
+        sim.setDepositorAllowed(stranger, true);
+        usdgSim.mint(stranger, 1e6);
+        vm.startPrank(stranger);
+        usdgSim.approve(address(sim), type(uint256).max);
+        sim.deposit(stranger, ASSET_IDX, 0, 1e6);
+        uint48 sIdx = sim.addressToAccountIndex(stranger);
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.OrderEnqueued(sIdx, MARKET, 2, type(uint48).max, 10_000, 0, 1, 1);
+        sim.createOrder(sIdx, MARKET, type(uint48).max, 10_000, 0, 1);
+        vm.stopPrank();
+
+        // A cancels, which compacts order 2 down into slot 0. Under the old event the rejection
+        // below would have reported orderId 0 — a slot that had held A's honest hedge.
+        vm.prank(depositorA);
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.OrdersCancelled(aIdx, 1, 1);
+        sim.cancelAllOrders(aIdx);
+
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.OrderRejected(sIdx, MARKET, 2, 1, LighterCore.InsufficientMargin.selector);
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.BatchSettled(1, 0, 1, 0, 1, true);
+        sim.settleBatch();
+    }
+
+    /// @notice **A withdrawal the venue underpays is announced, and that is the whole point.**
+    ///
+    /// @dev `withdraw` must NOT revert on insufficiency — the real venue credits what it can and
+    ///      STRANDS the rest, and `CertVault._queueExit` is built around that. The consequence is
+    ///      that on-chain, "the venue paid nothing" looks exactly like "the venue paid in full".
+    ///      An operator watching a testnet has to be able to see the difference, and a stranded
+    ///      shortfall is the one state solvency exists to detect.
+    function test_withdrawalUnderpaymentIsAnnouncedRatherThanSilent() public {
+        _fundTwoDepositors();
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+
+        // Ask for 900_000 against an equity of 600_000: the venue credits 600_000 and strands
+        // 300_000, without reverting.
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.WithdrawalEnqueued(depositorA, aIdx, ASSET_IDX, 900_000e6, 600_000e6, 600_000e6);
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.WithdrawalSilentlyRejected(depositorA, aIdx, ASSET_IDX, 900_000e6, 600_000e6, 300_000e6);
+        vm.prank(depositorA);
+        sim.withdraw(aIdx, ASSET_IDX, 0, 900_000e6);
+
+        assertEq(sim.getPendingBalance(depositorA, ASSET_IDX), 600_000e6, "credited the wrong amount");
+        assertEq(sim.equity(aIdx), 0, "the account was left with equity it should have drawn");
+    }
+
+    /// @notice A withdrawal paid in full emits NO shortfall event, so the filter means something.
+    function test_aFullyPaidWithdrawalEmitsNoShortfall() public {
+        _fundTwoDepositors();
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+
+        vm.recordLogs();
+        vm.prank(depositorA);
+        sim.withdraw(aIdx, ASSET_IDX, 0, 100_000e6);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 shortfall = keccak256("WithdrawalSilentlyRejected(address,uint48,uint16,uint64,uint256,uint256)");
+        for (uint256 i = 0; i < logs.length; ++i) {
+            assertNotEq(logs[i].topics[0], shortfall, "a fully-paid withdrawal reported a shortfall");
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // TASK 8, ITEM 2: the venue's three deposit gates.
+    //
+    // `deposit` used to validate the AMOUNT for being non-zero and nothing else. The real venue's
+    // per-asset config refuses on all three of tick multiple, global cap and asset index, and
+    // `docs/DEPLOYMENT-CHECKLIST.md` carries a row saying minting pauses cleanly when the cap
+    // binds — a row nothing in this repo could produce the state for.
+    //
+    // All three are enforced on `LighterCore`, so `MockLighter` inherits them and the whole suite
+    // runs against the venue's real deposit gates rather than a looser set.
+    // ---------------------------------------------------------------------------------------
+
+    /// @notice A deposit that is not an exact multiple of `tickSize` is refused, and the refusal
+    ///         names both the amount and the tick.
+    ///
+    /// @dev The tick DEFAULTS TO 1, at which every amount is a multiple and this check is
+    ///      satisfied vacuously. That default is deliberate and is documented on
+    ///      `LighterCore.depositTickSize`: the venue's real value is design-spec open item O-2,
+    ///      never read because the asset endpoints are 403-gated, and the C1 plan forbids
+    ///      hardcoding an unverified value. So this test sets a real tick to prove the MECHANISM
+    ///      is live rather than dead code waiting for a number.
+    function test_depositRejectsNonTickMultiple() public {
+        // At the default tick, an arbitrary amount is fine — which is what makes the vault's
+        // `netCollateral * targetMarginBps / 10_000` margin post depositable at all.
+        sim.deposit(address(this), ASSET_IDX, 0, 3_202_740_000);
+        assertEq(sim.depositTickSize(), 1, "the default tick is not the identity");
+
+        // A coarse tick: deposits must now land on 1 USDG boundaries.
+        sim.setDepositTickSize(1e6);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(LighterCore.LighterCore_DepositNotTickMultiple.selector, 1_500_001, 1e6)
+        );
+        sim.deposit(address(this), ASSET_IDX, 0, 1_500_001);
+
+        // A real vault margin post is exactly the shape that is now refused, which is the
+        // liveness consequence a coarse tick has and why the default is not a guess.
+        vm.expectRevert(
+            abi.encodeWithSelector(LighterCore.LighterCore_DepositNotTickMultiple.selector, 3_202_740_000, 1e6)
+        );
+        sim.deposit(address(this), ASSET_IDX, 0, 3_202_740_000);
+
+        // An exact multiple still goes through, so the gate is a gate and not a brick.
+        sim.deposit(address(this), ASSET_IDX, 0, 1_500e6);
+        assertEq(sim.marginBalanceOf(sim.addressToAccountIndex(address(this))), 3_202_740_000 + 1_500e6);
+    }
+
+    /// @notice A deposit above the global cap is refused on the way IN, not only on the way out.
+    ///
+    /// @dev `withdraw` has validated `baseAmount <= depositCapTicks` since the mock was written;
+    ///      `deposit` never did, so the "global deposit cap rejects a deposit outright" behaviour
+    ///      the design spec describes — and the checklist row that depends on it — had no
+    ///      counterpart in the simulator at all.
+    function test_depositRejectsAboveCap() public {
+        sim.setDepositCapTicks(1_000e6); // 1_000 USDG at the default tick of 1
+
+        vm.expectRevert(LighterCore.AboveDepositCap.selector);
+        sim.deposit(address(this), ASSET_IDX, 0, 1_000e6 + 1);
+
+        // The cap itself is inclusive: at the ceiling, not above it.
+        sim.deposit(address(this), ASSET_IDX, 0, 1_000e6);
+        assertEq(sim.marginBalanceOf(sim.addressToAccountIndex(address(this))), 1_000e6);
+
+        // And the cap is measured in TICKS, so a coarser tick raises the amount it permits.
+        sim.setDepositTickSize(1e6);
+        sim.setDepositCapTicks(2); // two ticks of 1 USDG
+        vm.expectRevert(LighterCore.AboveDepositCap.selector);
+        sim.deposit(address(this), ASSET_IDX, 0, 3e6);
+        sim.deposit(address(this), ASSET_IDX, 0, 2e6);
+    }
+
+    /// @notice A deposit naming an asset index this venue does not hold is refused.
+    ///
+    /// @dev The argument used to be UNNAMED and therefore ignored, which is Global Constraint 5's
+    ///      exact shape: a vault deployed with the wrong USDG index would deposit successfully
+    ///      against this simulator and revert against the real venue. `CertVault.cfg` is immutable,
+    ///      so that misconfiguration has no on-chain recovery — the vault must be redeployed, and
+    ///      a redeployed vault mints a new certificate token.
+    function test_depositRejectsUnknownAsset() public {
+        assertEq(sim.collateralAssetIndex(), ASSET_IDX, "fixture drifted from the venue's index");
+
+        vm.expectRevert(
+            abi.encodeWithSelector(LighterCore.LighterCore_UnknownAssetIndex.selector, uint16(4), ASSET_IDX)
+        );
+        sim.deposit(address(this), 4, 0, 1_000e6);
+
+        // Zero is the plausible mistake — an unset config field — and it is refused too.
+        vm.expectRevert(
+            abi.encodeWithSelector(LighterCore.LighterCore_UnknownAssetIndex.selector, uint16(0), ASSET_IDX)
+        );
+        sim.deposit(address(this), 0, 0, 1_000e6);
+
+        sim.deposit(address(this), ASSET_IDX, 0, 1_000e6);
+    }
+
+    /// @notice The zero-amount refusal still comes FIRST, so `test/sim/DrainPoC.t.sol`'s
+    ///         free-registration closure keeps reading back the selector it pins.
+    /// @dev A zero amount satisfies all three new gates vacuously — zero is a multiple of any tick
+    ///      and under any cap — so ordering any of them ahead of it would silently change the
+    ///      reported reason for a state that was already refused. Pinned here because the ordering
+    ///      is a decision, and because the test that depends on it is one this task must not edit.
+    function test_zeroDepositStillReportsItsOwnReason() public {
+        sim.setDepositTickSize(1e6);
+        sim.setDepositCapTicks(0);
+        vm.expectRevert(LighterCore.LighterCore_ZeroDepositAmount.selector);
+        sim.deposit(address(this), ASSET_IDX, 0, 0);
+    }
+
+    /// @notice The new knob is owner-gated, evented, and refuses the one value that would brick it.
+    /// @dev Zero would make every deposit revert on a division by zero — a panic with no name in
+    ///      it, which an operator cannot tell from a bug in the vault.
+    function test_setDepositTickSizeIsOwnerOnlyAndRefusesZero() public {
+        vm.prank(stranger);
+        vm.expectRevert(LighterSim.LighterSim_OnlyOwner.selector);
+        sim.setDepositTickSize(1e6);
+
+        vm.expectRevert(LighterCore.LighterCore_TickSizeIsZero.selector);
+        sim.setDepositTickSize(0);
+
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterSim.DepositTickSizeSet(1, 1e6);
+        sim.setDepositTickSize(1e6);
+        assertEq(sim.depositTickSize(), 1e6);
+    }
+
+    // ---------------------------------------------------------------------------------------
 
     /// @dev Two funded, registered accounts on the sim: 600_000 and 400_000 USDG.
     ///
@@ -1517,6 +1837,11 @@ contract LighterSimTest is Test {
         );
         assertEq(mockL.requiredMarginBps(), sim.requiredMarginBps(), string.concat("requiredMarginBps ", tag));
         assertEq(mockL.depositCapTicks(), sim.depositCapTicks(), string.concat("depositCapTicks ", tag));
+        // Task 8, item 2. The new deposit gate is on the shared core, so the two front ends must
+        // agree on it too — a tick that existed on only one of them would be exactly the drift the
+        // `LighterCore` extraction exists to prevent.
+        assertEq(mockL.depositTickSize(), sim.depositTickSize(), string.concat("depositTickSize ", tag));
+        assertEq(mockL.batchesSettled(), sim.batchesSettled(), string.concat("batchesSettled ", tag));
         assertEq(
             mockL.getPendingBalance(address(this), ASSET_IDX),
             sim.getPendingBalance(address(this), ASSET_IDX),

@@ -268,7 +268,13 @@ contract DrainPoCTest is Test {
         // One call, no revert, from the owner: the refusal is on the record, naming the order and
         // the reason, instead of stopping the batch.
         vm.expectEmit(true, true, true, true, address(sim));
-        emit LighterCore.OrderRejected(sIdx, MARKET, 1, LighterCore.InsufficientMargin.selector);
+        // TASK 8 SIGNATURE ADAPTATION ONLY (merge of Task 8 item 1). `OrderRejected`'s third field
+        // was the QUEUE INDEX and is now the monotonic `Order.id`, and a `batchId` was appended.
+        // The assertion is unchanged in substance and strictly sharper in fact: the poison order is
+        // the SECOND order created in this test, so its id is 2 — where the old queue index of 1
+        // named a slot that compaction could later hand to a different order. This settlement is
+        // the venue's first, so `batchId` is 1.
+        emit LighterCore.OrderRejected(sIdx, MARKET, 2, 1, LighterCore.InsufficientMargin.selector);
         sim.settleBatch();
 
         // The vault's hedge filled at its full, requested size...

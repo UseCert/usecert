@@ -196,8 +196,11 @@ contract SharedSimMultiVaultTest is Test {
 
         // Settlement does NOT revert. B's under-margined order is refused individually, named in
         // the log, and A's fills.
+        // Task 8: the third argument is now `Order.id`, monotonic from 1 and never a queue slot —
+        // vault A's hedge is order 1 and vault B's is order 2. The fourth is the batch that refused
+        // it: `setUp` already settled once (batch 1), so this is batch 2.
         vm.expectEmit(true, true, true, true, address(sim));
-        emit LighterCore.OrderRejected(_idxB(), MARKET, 1, LighterCore.InsufficientMargin.selector);
+        emit LighterCore.OrderRejected(_idxB(), MARKET, 2, 2, LighterCore.InsufficientMargin.selector);
         sim.settleBatch();
 
         assertEq(sim.positionBaseOf(_idxA(), MARKET), HEDGE_TICKS, "the healthy vault's hedge did not fill");

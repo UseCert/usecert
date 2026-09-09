@@ -77,6 +77,17 @@ abstract contract LighterCore is ILighter {
         ///      submitter's own book. Round 1's note that the attribution "governs cancellation
         ///      only" was the finding that made this task necessary.
         uint48 account;
+        /// @dev Task 8. A MONOTONIC identifier, assigned once at `createOrder` and never reused, so
+        ///      an indexer can tie an `OrderEnqueued` to the `OrderFilled` or `OrderRejected` that
+        ///      resolves it.
+        ///
+        ///      The queue POSITION cannot do that job, and the pre-Task-8 `OrderRejected` used
+        ///      exactly that position as its `orderId`. `_cancelOrdersOf` compacts the array in
+        ///      place, so slot `k` names a different order after any cancellation: an operator
+        ///      watching a testnet where anything cancels would attribute a rejection to an order
+        ///      that had already left the queue. `uint96` because 16 + 48 + 32 + 8 + 8 + 48 + 96 =
+        ///      256 bits exactly — the identifier is free, the struct is still one storage slot.
+        uint96 id;
     }
 
     error AccountIsNotRegistered();
@@ -132,6 +143,173 @@ abstract contract LighterCore is ILighter {
     ///      queue and every other account's `createOrder` — the vault's hedge included — would
     ///      revert. The per-account cap is what makes the global cap safe to have.
     error LighterCore_AccountOrderCapReached();
+    /// @dev Task 8, item 2. A deposit that is not an exact multiple of `depositTickSize`.
+    ///
+    ///      The real venue's per-asset config gates deposits on `tickSize`, `minDepositTicks` and
+    ///      `depositCapTicks`, and a non-multiple is refused outright. This simulator accepted any
+    ///      amount, so no test could observe a vault whose margin post is unrepresentable in venue
+    ///      ticks.
+    error LighterCore_DepositNotTickMultiple(uint256 amount, uint256 tickSize);
+    /// @dev Task 8, item 2. `deposit` named an asset this venue holds no config for.
+    ///
+    ///      The `assetIndex` argument used to be IGNORED — the parameter was unnamed — so a vault
+    ///      misconfigured with the wrong USDG index deposited successfully here and would revert on
+    ///      the real venue. That is Global Constraint 5's exact shape: a simulator easier than
+    ///      mainnet, hiding a deployment misconfiguration that has no on-chain recovery, because
+    ///      `CertVault.cfg` is immutable and a redeployed vault is a new certificate token.
+    error LighterCore_UnknownAssetIndex(uint16 given, uint16 expected);
+    /// @dev Task 8, item 2. A zero tick size would brick every deposit on a division by zero rather
+    ///      than on a named refusal, so it is refused where it is set.
+    error LighterCore_TickSizeIsZero();
+
+    // -------------------------------------------------------------------------------- events
+    //
+    // TASK 8, ITEM 1. Before this task the venue emitted NOTHING. A full
+    // deposit -> createOrder -> settleBatch -> fill -> withdraw -> drain lifecycle produced two
+    // logs, both ERC-20 `Transfer`s from the collateral token and zero from this contract —
+    // measured with `vm.recordLogs` against the deployable artefact. An indexer could see that
+    // tokens moved and nothing about which account they were credited to, which order was
+    // submitted, whether it filled or was refused, or at what price.
+    //
+    // THEY LIVE ON THE CORE, not on the front ends, for the same reason the mechanics do: an event
+    // emitted next to the state transition it describes cannot drift from it, and the suite then
+    // certifies the same log stream the testnet deployment produces.
+    //
+    // WHAT IS INDEXED, AND WHY. Task 7 made margin, positions and entry prices PER-ACCOUNT, so
+    // `account` is a topic on everything an account does — without it an indexer cannot attribute a
+    // single figure, which is the whole point of the per-account rewrite. `marketIndex` is a topic
+    // on everything market-scoped, because a consumer follows one mirror (uTSLA market 16, uSPY
+    // market 26) and must not have to decode every other market's logs to do it. `orderId` is a
+    // topic so one order's enqueue, fill or rejection can be joined without a full scan. Amounts,
+    // prices and reasons are NOT indexed: nothing filters on a price, and a topic is a worse place
+    // to read a value from than the data section.
+
+    /// @notice Collateral was posted as margin for `to`, credited to venue account `account`.
+    /// @dev `account` resolves the registration for this deposit whether or not it was new; see
+    ///      `AccountRegistered` for the first-registration edge. `ticks` is `amount /
+    ///      depositTickSize`, the unit `depositCapTicks` is measured in.
+    event Deposited(
+        address indexed to,
+        uint48 indexed account,
+        uint16 indexed assetIndex,
+        uint256 amount,
+        uint256 ticks,
+        uint256 marginBalanceAfter
+    );
+
+    /// @notice A registering deposit resolved `owner` to a venue account index for the first time.
+    /// @dev Indices are assigned from 3 upward and never reused, so this fires at most once per
+    ///      address. An indexer needs it to build the address/account map every other event here is
+    ///      keyed by, and `CertVault` reads the same mapping to find its own index.
+    event AccountRegistered(address indexed owner, uint48 indexed account);
+
+    /// @notice An order was accepted into the settlement queue. It has NOT filled — orders never
+    ///         fill in the calling transaction, which is the venue behaviour this simulator exists
+    ///         to model, and the single most misread property of the whole system.
+    /// @param queueSlot Where it landed. Informational only: `_cancelOrdersOf` compacts the array,
+    ///        so a slot is not an identifier. `orderId` is.
+    event OrderEnqueued(
+        uint48 indexed account,
+        uint16 indexed marketIndex,
+        uint96 indexed orderId,
+        uint48 baseAmount,
+        uint32 price,
+        uint8 isAsk,
+        uint8 orderType,
+        uint256 queueSlot
+    );
+
+    /// @notice A queued order filled at the mark, inside batch `batchId`.
+    /// @param fillPx18 The mark the fill was priced at, scaled to 1e18. Every fill here happens at
+    ///        the mark, which is why an increase carries no PnL of its own to credit.
+    /// @param sizeDelta Signed change in the account's position, in base ticks: the FILLED SIZE,
+    ///        which is not always the submitted `baseAmount`. A zero `baseAmount` is Lighter's
+    ///        close-all primitive and resolves to the submitter's own position size, on the side
+    ///        the submitter named — so an ask against a short DOUBLES it, and this field is where
+    ///        that becomes visible instead of inferred.
+    /// @param resultingBase The account's position in that market after the fill, so a consumer can
+    ///        rebuild the position book from logs alone rather than by replaying the arithmetic.
+    event OrderFilled(
+        uint48 indexed account,
+        uint16 indexed marketIndex,
+        uint96 indexed orderId,
+        uint256 batchId,
+        uint256 fillPx18,
+        int256 sizeDelta,
+        int256 resultingBase
+    );
+
+    /// @notice Every unsettled order belonging to `account` left the queue without filling.
+    /// @dev Without this an `OrderEnqueued` that is later cancelled has no terminal event at all
+    ///      and a consumer waits for a fill forever. `LighterSim.OperatorCancelledOrders` reports
+    ///      the operator hatches; this reports the account's own `cancelAllOrders`.
+    event OrdersCancelled(uint48 indexed account, uint256 cancelled, uint256 queueLengthAfter);
+
+    /// @notice A withdrawal request was accepted and credited to the caller's pending balance.
+    /// @dev NOT a payment. The real `AdditionalZkLighter.withdraw` enqueues a priority request and
+    ///      decides sufficiency inside the rollup, so this is the venue saying "asked, and this much
+    ///      was credited". Tokens move on `withdrawPendingBalance` — see `WithdrawalFulfilled`.
+    event WithdrawalEnqueued(
+        address indexed owner,
+        uint48 indexed account,
+        uint16 indexed assetIndex,
+        uint64 requested,
+        uint256 credited,
+        uint256 pendingAfter
+    );
+
+    /// @notice A withdrawal was credited for LESS than it asked for, and did not revert.
+    ///
+    /// @dev THE MOST IMPORTANT EVENT IN THIS FILE for an operator, and deliberately separate from
+    ///      `WithdrawalEnqueued` so it can be filtered on alone.
+    ///
+    ///      `withdraw` must not revert on insufficiency — the real venue does not, it credits what
+    ///      it can and STRANDS the rest, and `CertVault._queueExit` is built around exactly that.
+    ///      The consequence is that a venue paying nothing at all looks, on-chain, identical to a
+    ///      venue paying in full. `shortfall` is the difference an operator otherwise has to infer
+    ///      by diffing two storage reads across a block, and a stranded shortfall is the one state
+    ///      solvency exists to detect.
+    event WithdrawalSilentlyRejected(
+        address indexed owner,
+        uint48 indexed account,
+        uint16 indexed assetIndex,
+        uint64 requested,
+        uint256 credited,
+        uint256 shortfall
+    );
+
+    /// @notice A pending balance was drained: collateral actually left the venue.
+    event WithdrawalFulfilled(
+        address indexed owner,
+        uint48 indexed account,
+        uint16 indexed assetIndex,
+        uint128 amount,
+        uint128 pendingAfter
+    );
+
+    /// @notice One `settleBatch` call finished.
+    ///
+    /// @dev `batchId` is the venue's settlement clock and it advances on EVERY call, including one
+    ///      that settles nothing. Two reasons it must: Task 12's attester relays a batch id to
+    ///      `SolvencyRegistry.attest`, which refuses one that is not strictly newer, so a stalled
+    ///      counter stalls attestation and starves `maxNotional18` to zero; and an empty batch is
+    ///      the keeper's heartbeat, which is what the runbook's "minting stopped after ~5 minutes"
+    ///      row is diagnosed with.
+    ///
+    /// @param fromQueueSlot First slot this call considered (the cursor on entry).
+    /// @param toQueueSlot One past the last slot it considered.
+    /// @param filled How many orders filled.
+    /// @param rejected How many were refused individually and skipped. Each also emits
+    ///        `OrderRejected`.
+    /// @param queueDrained Whether the cursor reached the end and the queue was cleared.
+    event BatchSettled(
+        uint256 indexed batchId,
+        uint256 fromQueueSlot,
+        uint256 toQueueSlot,
+        uint256 filled,
+        uint256 rejected,
+        bool queueDrained
+    );
 
     /// @notice A queued order was refused at settlement and the rest of the batch continued.
     ///
@@ -143,11 +321,23 @@ abstract contract LighterCore is ILighter {
     ///      raisable. Rejecting the individual order is both the venue-faithful behaviour and the
     ///      fix: a bad order can no longer reach anyone else's fills.
     ///
+    /// @dev TASK 8 CHANGED `orderId`, and the change is a correctness fix rather than cosmetics. It
+    ///      used to be the refused order's INDEX IN THE QUEUE, which is not an identifier:
+    ///      `_cancelOrdersOf` compacts the array in place, so slot `k` names a different order after
+    ///      any cancellation and an operator would attribute a rejection to an order that had
+    ///      already left. It is now `Order.id`, monotonic and never reused, matching the
+    ///      `OrderEnqueued` that introduced the order. `batchId` was added at the same time so a
+    ///      rejection names the settlement window that refused it — `OrderRejected` alone could not
+    ///      say whether two rejections were one order refused twice or two orders refused once.
+    ///
     /// @param account The submitting account, from `Order.account`.
     /// @param marketIndex The market the refused order was on.
-    /// @param orderId The refused order's index in the settlement queue.
+    /// @param orderId The refused order's monotonic id, as emitted by `OrderEnqueued`.
+    /// @param batchId The `settleBatch` call that refused it.
     /// @param reason The error selector the order would have reverted with in `strictMode`.
-    event OrderRejected(uint48 indexed account, uint16 indexed marketIndex, uint256 indexed orderId, bytes4 reason);
+    event OrderRejected(
+        uint48 indexed account, uint16 indexed marketIndex, uint96 indexed orderId, uint256 batchId, bytes4 reason
+    );
 
     IERC20 public immutable collateral;
     uint16 public immutable collateralAssetIndex;
@@ -179,7 +369,43 @@ abstract contract LighterCore is ILighter {
     uint256 public requiredMarginBps = 5_000;
     /// @dev Mirrors AssetConfig.depositCapTicks on the real contract, which withdraw() validates
     ///      `_baseAmount` against. Defaults large so existing tests are unaffected.
+    ///
+    ///      TASK 8, ITEM 2: `deposit` validates against it too, which it did not before. The real
+    ///      venue's cap is a GLOBAL deposit cap — that is the whole reason
+    ///      `docs/DEPLOYMENT-CHECKLIST.md` carries a row for it — and a simulator that enforced it
+    ///      only on the way out could not produce the state that row describes.
     uint256 public depositCapTicks = type(uint64).max;
+
+    /// @notice The venue's deposit granularity: a deposit must be an exact multiple of this.
+    ///
+    /// @dev Task 8, item 2. Mirrors `AssetConfig.tickSize` on the real contract.
+    ///
+    ///      DEFAULT 1, AND THAT IS A DELIBERATE CHOICE RATHER THAN A NEUTRAL ONE. The real value is
+    ///      open item O-2 in the design spec — the venue's asset endpoints are 403-gated and it has
+    ///      never been read — and the C1 plan's rule for exactly this situation is that an
+    ///      unverified value must never be a hardcoded literal. A guessed tick would be worse than
+    ///      a vacuous one in both directions: too small silently certifies deposits the venue
+    ///      refuses, and too large makes every `CertVault._postMargin` revert on a testnet for a
+    ///      reason no document explains, because a margin post is `netCollateral *
+    ///      targetMarginBps / 10_000` and is not a round number in any tick.
+    ///
+    ///      So the MECHANISM is enforced and the VALUE is left at the identity until the venue's
+    ///      own figure is read, and `LighterSim.setDepositTickSize` can raise it — the conservative
+    ///      direction under Global Constraint 5, since a coarser tick refuses strictly more.
+    ///      Recorded rather than assumed: at 1 this check is satisfied by every amount, and
+    ///      `test_depositRejectsNonTickMultiple` sets a real tick to prove the mechanism is live.
+    uint256 public depositTickSize = 1;
+
+    /// @notice How many `settleBatch` calls this venue has completed. The venue's settlement clock.
+    /// @dev Task 8, item 1. `BatchSettled`'s id, and what Task 12's attester relays to
+    ///      `SolvencyRegistry.attest` — which refuses a batch id that is not strictly newer, so
+    ///      this must advance on every call, including one that settles an empty queue.
+    uint256 public batchesSettled;
+
+    /// @dev Task 8, item 1. The next `Order.id`. Starts at 1 so that 0 is never a real order and an
+    ///      indexed `orderId` topic of zero cannot be mistaken for one — the same convention
+    ///      `OperatorCancelledOrders` uses for account index 0.
+    uint96 private _nextOrderId = 1;
 
     /// @notice When set, `settleBatch` reverts on the first order it cannot fill instead of
     ///         rejecting that order and continuing.
@@ -241,20 +467,47 @@ abstract contract LighterCore is ILighter {
 
     // ------------------------------------------------------------------------ ILighter surface
 
-    function deposit(address to, uint16, uint8, uint256 amount) public payable virtual {
+    /// @notice Post `amount` of collateral as margin for `to`, registering `to` if it is new.
+    ///
+    /// @dev TASK 8, ITEM 2 ADDED THREE REFUSALS, and the ORDER of the checks is load-bearing.
+    ///      `LighterCore_ZeroDepositAmount` stays FIRST: `test/sim/DrainPoC.t.sol` pins the
+    ///      free-registration closure by depositing zero and reading that exact selector back, and
+    ///      a zero amount also satisfies all three new checks vacuously (0 is a multiple of any
+    ///      tick and is under any cap), so putting any of them ahead of it would change the
+    ///      reported reason for a state that is already refused.
+    ///
+    ///      All three are enforced on the SHARED CORE, so `MockLighter` inherits them and the whole
+    ///      suite runs against the venue's real deposit gates rather than a looser set. That is the
+    ///      same placement decision as the caller binding and for the same reason: a refusal the
+    ///      venue makes is venue fidelity, not UseCert access control.
+    function deposit(address to, uint16 assetIndex, uint8, uint256 amount) public payable virtual {
         // Fix round 1, Critical 1. See LighterCore_ZeroDepositAmount: a zero-value transferFrom
         // succeeds with no allowance and no balance, so this used to be a FREE registration.
         if (amount == 0) revert LighterCore_ZeroDepositAmount();
+        // The argument was previously unnamed and therefore ignored. See
+        // LighterCore_UnknownAssetIndex: a vault carrying the wrong USDG index is a deployment
+        // misconfiguration with no on-chain recovery, and this simulator used to hide it.
+        if (assetIndex != collateralAssetIndex) revert LighterCore_UnknownAssetIndex(assetIndex, collateralAssetIndex);
+        uint256 tick = depositTickSize;
+        if (amount % tick != 0) revert LighterCore_DepositNotTickMultiple(amount, tick);
+        uint256 ticks = amount / tick;
+        // The cap is denominated in TICKS, which is what `depositCapTicks` names and what
+        // `withdraw` already compares against; at the default tick of 1 the two are the same
+        // number, so this is the same ceiling on the way in as on the way out.
+        if (ticks > depositCapTicks) revert AboveDepositCap();
+
         collateral.transferFrom(msg.sender, address(this), amount);
         uint48 idx = addressToAccountIndex[to];
         if (idx == 0) {
             idx = _nextAccountIndex++;
             addressToAccountIndex[to] = idx;
             _accounts.push(idx);
+            emit AccountRegistered(to, idx);
         }
         // Task 7: the collateral lands in `to`'s OWN book. It used to land in a shared pool, which
         // is what made every account's withdrawal ceiling every other account's balance.
         marginBalanceOf[idx] += amount;
+        emit Deposited(to, idx, assetIndex, amount, ticks, marginBalanceOf[idx]);
     }
 
     function createOrder(
@@ -279,8 +532,13 @@ abstract contract LighterCore is ILighter {
         // Task 7 takes the amendment's preferred option and SCOPES the reading instead: in
         // `settleBatch` a zero amount now means "the full size of the SUBMITTING ACCOUNT's
         // position". Rejecting it would have broken the one caller that legitimately needs it.
-        _queue.push(Order(marketIndex, baseAmount, price, isAsk, orderType, accountIndex));
+        uint96 id = _nextOrderId++;
+        uint256 slot = _queue.length;
+        _queue.push(Order(marketIndex, baseAmount, price, isAsk, orderType, accountIndex, id));
         ++queuedOrdersOf[accountIndex];
+        // Task 8, item 1. The submission half of the lifecycle. Emitted AFTER the push so a
+        // consumer that reads `queueSlot` reads the slot the order actually occupies.
+        emit OrderEnqueued(accountIndex, marketIndex, id, baseAmount, price, isAsk, orderType, slot);
     }
 
     /// @dev Models AdditionalZkLighter.withdraw() on the real contract: it does NOT check the
@@ -316,6 +574,20 @@ abstract contract LighterCore is ILighter {
         _pendingTotal += fulfilled;
         _fundPending();
         _pending[msg.sender][assetIndex] += uint128(fulfilled);
+
+        // Task 8, item 1. Two events, and the second one is the point. This call does not revert
+        // when the venue cannot pay in full: it credits what it can and STRANDS the rest, which is
+        // real venue behaviour and is why `CertVault._queueExit` is built the way it is. On-chain
+        // that makes "paid nothing" indistinguishable from "paid in full", so the shortfall is
+        // announced separately rather than left to be inferred from two storage reads.
+        emit WithdrawalEnqueued(
+            msg.sender, accountIndex, assetIndex, baseAmount, fulfilled, _pending[msg.sender][assetIndex]
+        );
+        if (fulfilled < baseAmount) {
+            emit WithdrawalSilentlyRejected(
+                msg.sender, accountIndex, assetIndex, baseAmount, fulfilled, baseAmount - fulfilled
+            );
+        }
     }
 
     /// @notice Cancel every queued order belonging to `accountIndex`, and nothing else.
@@ -339,6 +611,11 @@ abstract contract LighterCore is ILighter {
         _pending[owner][assetIndex] -= baseAmount;
         _pendingTotal = uint256(baseAmount) >= _pendingTotal ? 0 : _pendingTotal - uint256(baseAmount);
         collateral.transfer(owner, baseAmount);
+        // Task 8, item 1. The only point in the whole withdrawal path at which collateral actually
+        // leaves the venue. Everything before it is a credit against a pending balance.
+        emit WithdrawalFulfilled(
+            owner, addressToAccountIndex[owner], assetIndex, baseAmount, _pending[owner][assetIndex]
+        );
     }
 
     // ------------------------------------------------------------------------ batch settlement
@@ -385,6 +662,14 @@ abstract contract LighterCore is ILighter {
         // repeated calls instead of by one transaction that may not fit in a block.
         uint256 stop = n - i > SETTLE_BATCH_MAX ? i + SETTLE_BATCH_MAX : n;
 
+        // Task 8, item 1. Advanced BEFORE the loop, so every event this call emits carries the same
+        // batch id, and advanced unconditionally, so an empty settlement is still a tick of the
+        // venue's clock. See `batchesSettled`.
+        uint256 batchId = ++batchesSettled;
+        uint256 from = i;
+        uint256 filled;
+        uint256 rejected;
+
         for (; i < stop; ++i) {
             Order memory o = _queue[i];
             // Consumed either way: rejected orders leave the queue too, or the rejection would be
@@ -421,58 +706,110 @@ abstract contract LighterCore is ILighter {
                 resulting = previous + signed;
             }
 
-            uint256 absResulting = resulting >= 0 ? uint256(resulting) : uint256(-resulting);
-            uint256 absPrevious = previous >= 0 ? uint256(previous) : uint256(-previous);
-            if (absResulting > absPrevious) {
-                uint256 notional18 = absResulting * markPrice[o.marketIndex] / (10 ** sizeDecimals);
-                uint256 requiredMargin18 = notional18 * requiredMarginBps / 10_000;
-                // FIX ROUND 1 (Task 7 review, Important). POST-REALISATION cash, computed WITHOUT
-                // writing it.
-                //
-                // Task 7 moved this gate above `_applyFill` — necessary, because a `continue`
-                // after a write would half-apply a fill — but that also changed the check's
-                // INPUT. Reading `marginBalanceOf` here reads cash BEFORE `_realisePortion`
-                // debits the loss on whatever leg the fill closes, so a side-flipping order that
-                // both closes a losing leg and GROWS the position passed the gate on cash it was
-                // about to lose. Measured at this repo's own suite parameters: a 1000.01 USDG
-                // account, short 100_000 ticks at an entry of 100e18, mark moved to 200e18, then
-                // a bid of 200_001 — required 1000.01e18 against a pre-fill cash18 of exactly
-                // 1000.01e18, so it filled, and `_applyFill` then realised -1000 USDG leaving
-                // 0.01 USDG of cash behind a 2000.02e18 notional long. The pre-Task-7 code read
-                // the balance AFTER `_applyFill` and reverted `InsufficientMargin` on it.
-                //
-                // Not a value-theft path — the loss floors at zero cash, `equity()` floors at
-                // zero, and `_fundPending()` is a no-op on `LighterSim` — but it made the
-                // simulator EASIER than the venue, which is the one direction Global Constraint 5
-                // forbids, on the deployment path that exists today.
-                //
-                // The gate still rejects without having mutated anything: `_cashAfterFillRealisation`
-                // is a `view`, and it shares `_closedPortion`, `_realisedPnlOn` and `_creditDebit`
-                // with `_applyFill`, so the figure it predicts is the figure the fill will produce.
-                // Getting this wrong in the other direction is a deviation too, so the suite pins
-                // both — see `test_aFlipAffordableOnlyOnTheRealisedGainStillFills`.
-                uint256 cash = _cashAfterFillRealisation(o.account, o.marketIndex, previous, resulting);
-                uint256 cash18 = _collateralDecimals <= 18
-                    ? cash * (10 ** (18 - _collateralDecimals))
-                    : cash / (10 ** (_collateralDecimals - 18));
-                if (cash18 < requiredMargin18) {
-                    if (strictMode) revert InsufficientMargin();
-                    emit OrderRejected(o.account, o.marketIndex, i, InsufficientMargin.selector);
-                    continue;
-                }
+            // FIX ROUND 1 (Task 7 review, Important) + TASK 8, ITEM 1, MERGED. The gate itself
+            // lives in `_coversInitialMargin` — item 1's batch-scoped locals put this frame over
+            // solc 0.8.24's stack limit and `via_ir` is forbidden — and that helper computes
+            // POST-REALISATION cash. Both halves are load-bearing; see the helper's own comment.
+            //
+            // Still checked BEFORE anything is written, so a rejection `continue`s with the books
+            // untouched: `_coversInitialMargin` is a `view`.
+            if (!_coversInitialMargin(o.account, o.marketIndex, previous, resulting)) {
+                if (strictMode) revert InsufficientMargin();
+                ++rejected;
+                emit OrderRejected(o.account, o.marketIndex, o.id, batchId, InsufficientMargin.selector);
+                continue;
             }
 
             _trackMarket(o.marketIndex);
             _applyFill(o.account, o.marketIndex, previous, resulting);
             positionBaseOf[o.account][o.marketIndex] = resulting;
+            ++filled;
+            // Task 8, item 1. `resulting - previous` rather than `o.baseAmount`: the two differ for
+            // the close-all primitive, and the FILLED size is the one an indexer has to have.
+            emit OrderFilled(
+                o.account, o.marketIndex, o.id, batchId, markPrice[o.marketIndex], resulting - previous, resulting
+            );
         }
 
-        if (i >= _queue.length) {
+        bool drained = i >= _queue.length;
+        if (drained) {
             delete _queue;
             settleCursor = 0;
         } else {
             settleCursor = i;
         }
+        emit BatchSettled(batchId, from, i, filled, rejected, drained);
+    }
+
+    /// @notice Whether `account` has posted enough cash to cover the initial margin on a fill that
+    ///         moves its position from `previous` to `resulting`.
+    ///
+    /// @dev EXTRACTED IN TASK 8, AND THE REASON IS WORTH RECORDING BECAUSE IT CONSTRAINS FUTURE
+    ///      EDITS. This body was inline in `settleBatch` until item 1 added three batch-scoped
+    ///      locals (`batchId`, `from`, and the fill/reject counters) to it, at which point the
+    ///      function no longer compiled: solc 0.8.24 without `via_ir` ran out of stack slots.
+    ///      Global Constraint 1 forbids setting `via_ir` — it changes codegen for every contract in
+    ///      the repo, including `CertVault`, whose EIP-170 margin is the deployment's tightest —
+    ///      so the fix is fewer live locals in the frame, not a different pipeline. `settleBatch`
+    ///      is close to that limit; anything added to it will need the same treatment.
+    ///
+    ///      THE EXTRACTION ITSELF CHANGES NO BEHAVIOUR, deliberately and in every particular:
+    ///
+    ///        * Only a fill that INCREASES |position| requires initial margin. A decrease or a
+    ///          close returns true without reading a price, which is why this returns `true` rather
+    ///          than computing a vacuous zero requirement.
+    ///        * The requirement is valued at `markPrice`, against the resulting notional.
+    ///        * It reads CASH, not equity. A real venue's initial margin is met with posted
+    ///          collateral, and every fill here happens at the mark it is valued against, so an
+    ///          increase carries no PnL of its own to credit.
+    ///        * Task 7's fix is preserved exactly: the cash is the SUBMITTING account's own, never
+    ///          a pool. That one read is what stopped an account holding 1 USDG from opening a
+    ///          $10,000 position on everyone else's margin.
+    ///
+    /// @dev FIX ROUND 1 (Task 7 review, Important) — MERGED INTO THE EXTRACTION, AND THE ONE LINE
+    ///      IN THIS FUNCTION THAT MUST NOT BE SIMPLIFIED BACK. The cash read is
+    ///      `_cashAfterFillRealisation`, i.e. POST-REALISATION cash, NOT `marginBalanceOf[account]`.
+    ///
+    ///      Task 7 moved this gate above `_applyFill` — necessary, because a `continue` after a
+    ///      write would half-apply a fill — but that also changed the check's INPUT. Reading
+    ///      `marginBalanceOf` here reads cash BEFORE `_realisePortion` debits the loss on whatever
+    ///      leg the fill closes, so a side-flipping order that both closes a losing leg and GROWS
+    ///      the position passed the gate on cash it was about to lose. Measured at this repo's own
+    ///      suite parameters: a 1000.01 USDG account, short 100_000 ticks at an entry of 100e18,
+    ///      mark moved to 200e18, then a bid of 200_001 — required 1000.01e18 against a pre-fill
+    ///      cash18 of exactly 1000.01e18, so it filled, and `_applyFill` then realised -1000 USDG
+    ///      leaving 0.01 USDG of cash behind a 2000.02e18 notional long. The pre-Task-7 code read
+    ///      the balance AFTER `_applyFill` and reverted `InsufficientMargin` on it.
+    ///
+    ///      Not a value-theft path — the loss floors at zero cash, `equity()` floors at zero, and
+    ///      `_fundPending()` is a no-op on `LighterSim` — but it made the simulator EASIER than the
+    ///      venue, which is the one direction Global Constraint 5 forbids, on the deployment path
+    ///      that exists today.
+    ///
+    ///      The gate still rejects without having mutated anything: this function is a `view`, and
+    ///      `_cashAfterFillRealisation` shares `_closedPortion`, `_realisedPnlOn` and `_creditDebit`
+    ///      with `_applyFill`, so the figure it predicts is the figure the fill will produce.
+    ///      Getting this wrong in the other direction is a deviation too, so the suite pins both —
+    ///      see `test_aFlipAffordableOnlyOnTheRealisedGainStillFills`.
+    ///
+    ///      This is why the Task 8 extraction could not be taken as-written on top of the fix: the
+    ///      extracted body was behaviour-identical against the PRE-FIX gate, and reinstating its
+    ///      `marginBalanceOf` read here would silently reopen the relaxation.
+    function _coversInitialMargin(uint48 account, uint16 marketIndex, int256 previous, int256 resulting)
+        internal
+        view
+        returns (bool)
+    {
+        uint256 absResulting = resulting >= 0 ? uint256(resulting) : uint256(-resulting);
+        uint256 absPrevious = previous >= 0 ? uint256(previous) : uint256(-previous);
+        if (absResulting <= absPrevious) return true;
+        uint256 notional18 = absResulting * markPrice[marketIndex] / (10 ** sizeDecimals);
+        uint256 requiredMargin18 = notional18 * requiredMarginBps / 10_000;
+        uint256 cash = _cashAfterFillRealisation(account, marketIndex, previous, resulting);
+        uint256 cash18 = _collateralDecimals <= 18
+            ? cash * (10 ** (18 - _collateralDecimals))
+            : cash / (10 ** (_collateralDecimals - 18));
+        return cash18 >= requiredMargin18;
     }
 
     // ----------------------------------------------------------------------- mark-to-market
@@ -598,6 +935,9 @@ abstract contract LighterCore is ILighter {
         }
         cancelled = n - kept;
         queuedOrdersOf[accountIndex] -= cancelled;
+        // Task 8, item 1. The third terminal state an enqueued order can reach, after filled and
+        // rejected. Without it a consumer waits for a fill that will never come.
+        emit OrdersCancelled(accountIndex, cancelled, _queue.length);
     }
 
     /// @dev The whole-queue half of `LighterSim.ownerPurgeQueue`, with no authorisation of its own.
