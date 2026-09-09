@@ -444,6 +444,46 @@ and each would produce failures that *look like vault bugs and are not*:
    changing them.
 4. Bound `settleBatch`'s loop with a cursor so a large queue cannot exceed the block gas limit.
 
+### Amended AGAIN after Task 5's fix-round re-review — the allowlist protects INTEGRITY, not just liveness
+
+The re-reviewer found a consequence sharper than anything reported before it, and it changes what
+this task must deliver:
+
+**`settleBatch` reads `previous = positionBase[o.marketIndex]` with NO account scoping at all**
+(`src/sim/LighterCore.sol:225`), `createOrder` has **no zero-`baseAmount` check**
+(`:136-149`), and `settleBatch:243-245` treats `baseAmount == 0` as *"the full position size on the
+side the caller named"*. So **any second registered account can queue
+`createOrder(idx, MARKET, 0, px, isAsk=1, 1)` and, at settlement, zero out the vault's entire
+hedge.** That is the same harm as the pre-Task-5 `delete _queue`, reached through settlement instead
+of cancellation, and the per-account `Order.account` attribution does not touch it because that
+attribution governs *cancellation* only.
+
+Two things follow:
+
+- The allowlist Task 5 shipped is load-bearing for **integrity**, not merely liveness. A second
+  allowlisted address on a live deployment is a hedge-destruction path.
+- `src/sim/LighterSim.sol:105-110` tells a future implementer to delete the allowlist "when Task 7
+  lands". **That must be read as: when BOTH halves of this task land** — per-account `equity()` AND
+  per-order rejection in `settleBatch`. The note does not currently draw that distinction. Fix the
+  note as part of this task.
+
+Additional required items, all from that re-review:
+
+3. **Reject `baseAmount == 0` at `createOrder`, or scope the full-position reading to the
+   submitting account's own position.** `ZeroBaseAmount` already exists as an error on `withdraw`
+   (`src/sim/LighterCore.sol:171`) and is simply not applied here. Prefer the scoping fix if
+   `baseAmount == 0` is genuinely venue behaviour worth modelling; otherwise reject it and say why.
+4. **Cap the queue.** `createOrder` pushes with no length bound, `settleBatch` loops the whole
+   queue, and — the part that matters — **both escape-hatch entry points are also O(queue)**:
+   `_cancelOrdersOf` compacts and pops per element, and `ownerPurgeQueue`'s `delete _queue` clears
+   every slot. So a queue long enough to exceed the block gas limit brakes `settleBatch` *and* the
+   hatch meant to rescue it. On a testnet with a free faucet that is reachable. Add a `MAX_QUEUE`
+   or a per-account order cap so the hatch's cost is bounded.
+5. **`ownerCancelAccountOrders(0)` should revert.** `src/sim/LighterSim.sol:52-54` documents that
+   `accountIndex == 0` in the event means "the whole queue was purged", but
+   `ownerCancelAccountOrders(0)` is not rejected and would emit an indexed topic indistinguishable
+   from a real purge. One line makes the documented convention true.
+
 ### Amended after the Task 5 review — this task now owns the real fix for the drain
 
 Task 5 bound each account-scoped call to its caller, which was necessary and insufficient. A
