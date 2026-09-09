@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {CommonBase} from "forge-std/Base.sol";
 import {StdUtils} from "forge-std/StdUtils.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {console2} from "forge-std/console2.sol";
 import {CertVault} from "../../src/CertVault.sol";
 import {Certificate} from "../../src/Certificate.sol";
@@ -152,7 +153,11 @@ contract VaultHandler is CommonBase, StdUtils {
     uint256 public requestMintBelowInstantCapCount;
     uint256 public settleMintAtCapacityCount;
     uint256 public rebalanceInBandCount;
-    uint256 public settleBatchInsufficientMarginCount;
+    /// @dev Fix round 1 (Task 7 review, Minor 2): renamed from `settleBatchInsufficientMarginCount`
+    ///      and re-pointed at `LighterCore.OrderRejected`, because Task 7 replaced the whole-batch
+    ///      `InsufficientMargin` revert this used to catch with a per-order rejection. See
+    ///      `settleBatch()` below.
+    uint256 public settleBatchOrderRejectedCount;
     /// @dev M2: claimRedeem's retryable "not yet". Counted, never asserted on — the Law 2
     ///      property is that the receipt survives and eventually pays, which is enforced by
     ///      pushing it back onto pendingRedeemReceipts rather than by this counter.
@@ -523,16 +528,44 @@ contract VaultHandler is CommonBase, StdUtils {
         }
     }
 
+    /// @dev FIX ROUND 1 (Task 7 review, Minor 2). This action used to count `InsufficientMargin`
+    ///      as a CAUGHT REVERT, and that branch became unreachable the moment Task 7 turned
+    ///      settlement's margin failure into a per-order rejection: `strictMode` defaults to false,
+    ///      this fixture never turns it on, so `lighter.settleBatch()` no longer reverts that way
+    ///      at all. Nothing asserted on the counter, so nothing broke — which is precisely the
+    ///      "stays green through the change it guards" pattern this file exists to defeat. A
+    ///      permanently-zero coverage counter is worse than no counter, because it reads as
+    ///      evidence the path was exercised.
+    ///
+    ///      So the counter now watches the MECHANISM THAT REPLACED THE REVERT: the `OrderRejected`
+    ///      event `LighterCore.settleBatch` emits when it refuses one order and continues. Same
+    ///      question ("did a position increase outrun posted margin under fuzzing?"), asked of the
+    ///      thing that actually happens now. `test_settleBatchOrderRejectedIsReachable` in
+    ///      BackingInvariant.t.sol pins that it can leave zero, so this cannot quietly die again.
+    ///
+    ///      A rejection is an accepted outcome, not a violation: it is not a redemption action, so
+    ///      Law 2 does not reach it. The `catch` is kept for every OTHER revert settlement might
+    ///      produce, and stays keyed to nothing so a genuine new failure mode is not silently
+    ///      absorbed as an accept.
     function settleBatch() external {
         callsSettleBatch++;
         uint256 postedBefore = vault.postedMargin();
-        try lighter.settleBatch() {} catch (bytes memory reason) {
-            if (_isSelector(reason, LighterCore.InsufficientMargin.selector)) {
-                settleBatchInsufficientMarginCount++;
-                console2.log("SETTLE_BATCH_INSUFFICIENT_MARGIN", settleBatchInsufficientMarginCount);
+        vm.recordLogs();
+        try lighter.settleBatch() {
+            Vm.Log[] memory logs = vm.getRecordedLogs();
+            for (uint256 i = 0; i < logs.length; ++i) {
+                if (
+                    logs[i].emitter == address(lighter) && logs[i].topics.length > 0
+                        && logs[i].topics[0] == LighterCore.OrderRejected.selector
+                ) {
+                    settleBatchOrderRejectedCount++;
+                    console2.log("SETTLE_BATCH_ORDER_REJECTED", settleBatchOrderRejectedCount);
+                }
             }
-            // InsufficientMargin(): a position increase outran posted margin in this random
-            // sequence. Not a redemption action, so this is an accepted outcome, not a violation.
+        } catch {
+            // Settlement reverted as a whole. With strictMode off that is not the margin gate any
+            // more, so there is no selector to accept here — it is left uncounted rather than
+            // mislabelled.
         }
         _trackDeposit(postedBefore);
     }
