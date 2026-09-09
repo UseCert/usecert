@@ -32,14 +32,33 @@ import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 ///      * FIX ROUND 1, CRITICAL 2: the liveness regression the caller binding INTRODUCED. Once
 ///        only an order's own account could cancel it, and `settleBatch` reverted as a whole, one
 ///        unsettleable order killed settlement for everyone with no operator recourse. Closed here
-///        by an owner escape hatch.
+///        by an owner escape hatch — interim, superseded below.
 ///
 ///      The common cause of all three is that `marginBalance` and `positionBase` are GLOBAL, so
 ///      any account's actions reach every other account's money. Every fix in this file is an
-///      interim that narrows who can act rather than what an actor can reach. TASK 7 owns the real
-///      fix — per-account collateral isolation, plus a `settleBatch` that rejects one order instead
-///      of the batch. When it lands, these tests should be re-pointed at the new reverts rather
-///      than deleted: the attacks stay valid questions even after the answers change.
+///      interim that narrows who can act rather than what an actor can reach. TASK 7 shipped the
+///      real fix — per-account collateral isolation, plus a `settleBatch` that rejects one order
+///      instead of the batch.
+///
+///      RE-POINTED 2026-09-09: Task 7's `settleBatch` change means the Critical-2 jam this file
+///      demonstrated can no longer form — the poison order is rejected on its own turn and the
+///      batch completes, so `test_C2_ownerHatchClearsAJammedQueue`'s premise (four reverting
+///      `settleBatch()` calls, cleared only by the owner hatch) went obsolete: see
+///      `.superpowers/sdd/2026-09-09-usecert-testnet-execution/task-7-report.md` §7, which reports
+///      the failure and recommends this re-point rather than applying it itself, per that task's
+///      own brief to leave this frozen file alone. That test is now
+///      `test_C2_poisonOrderIsRejectedAndSettlementSurvives`: same setup, same two accounts, but it
+///      asserts the new answer to the same question — does one account's bad order stop everyone
+///      else's settlement, and is there any way out — with real values (the poison order rejected
+///      by name, the honest hedge filled at its full size, the queue fully drained) rather than an
+///      absence-of-revert check. The hatch itself is unweakened and still covered: it is no longer
+///      needed for AN INSUFFICIENT-MARGIN jam, but `test_C2_ownerHatchClearsAMarklessMarketJam`
+///      already pins it for the jam that is still whole-batch by design (an unset mark price, §6 of
+///      the same report), and `test_C2_theHatchIsScopedToTheNamedAccount`,
+///      `test_C2_ownerPurgeQueueDropsEverything`, `test_C2_theHatchIsOwnerOnly`, and
+///      `test_C2_theHatchIsOnTheDeployableFrontEndOnly` are untouched. The remaining 14 tests in
+///      this file, including both Critical 1 gates, are untouched. The attack stays a valid
+///      question even after the answer changed — this is that re-point, not a deletion.
 contract DrainPoCTest is Test {
     uint16 constant ASSET_IDX = 3;
     uint8 constant SIZE_DECIMALS = 4;
@@ -215,60 +234,62 @@ contract DrainPoCTest is Test {
     // Fix round 1: the settlement DoS that fix round 0 introduced.
     // ---------------------------------------------------------------------------------------
 
-    /// @notice THE FIX-ROUND-1 CRITICAL 2 PROOF. One under-margined order jams `settleBatch` for
-    ///         everyone, because the batch reverts as a whole and only the order's own account can
-    ///         cancel it. The owner hatch is the only thing that clears it.
+    /// @notice RE-POINTED 2026-09-09 (was `test_C2_ownerHatchClearsAJammedQueue`; see the file
+    ///         header). Same original question — can one account's bad order stop everyone else's
+    ///         settlement, and is there any way out — with the new answer: no, `settleBatch`
+    ///         rejects the poison order by name and keeps going, so the jam this test used to prove
+    ///         cannot form and no hatch is needed for it at all. `settleCursor` is the queue's own
+    ///         evidence that nothing is stuck: after the poison order's turn, it is back to 0.
     ///
-    ///         The jammer is ALLOWLISTED here on purpose. The allowlist reduces who can jam the
-    ///         queue but does not make a jam impossible — an approved account can be under-margined
-    ///         by accident, and Task 7's multi-tenant world reopens the case entirely. So this
-    ///         proves the hatch works on its own merits, not because the allowlist hides the need
-    ///         for it.
-    function test_C2_ownerHatchClearsAJammedQueue() public {
+    ///         The jammer is ALLOWLISTED here on purpose, unchanged from the original test: the
+    ///         allowlist reduces who can reach the venue but was never what made this attack fail.
+    ///
+    /// @dev Twin of `test_oneAccountsBadOrderCannotBrickSettlement` in `test/sim/LighterSim.t.sol`
+    ///      and `test_twoVaultsShareOneSimWithoutInterference` in
+    ///      `test/sim/SharedSimMultiVault.t.sol` — the task-7 report's evidence that this attack is
+    ///      closed twice over, kept here as the frozen file's own proof rather than relying on
+    ///      theirs.
+    function test_C2_poisonOrderIsRejectedAndSettlementSurvives() public {
         sim.setMarkPrice(MARKET, 100e18);
         sim.setDepositorAllowed(stranger, true);
 
         uint48 aIdx = sim.addressToAccountIndex(depositorA);
         vm.prank(depositorA);
-        sim.createOrder(aIdx, MARKET, 100, 10_000, 0, 1); // the vault's legitimate hedge
+        sim.createOrder(aIdx, MARKET, 100, 10_000, 0, 1); // the vault's legitimate hedge, queued first
 
         usdgSim.mint(stranger, 1e6);
         vm.startPrank(stranger);
         usdgSim.approve(address(sim), type(uint256).max);
         sim.deposit(stranger, ASSET_IDX, 0, 1e6); // $1, nowhere near enough
         uint48 sIdx = sim.addressToAccountIndex(stranger);
-        sim.createOrder(sIdx, MARKET, type(uint48).max, 10_000, 0, 1); // the poison pill
+        sim.createOrder(sIdx, MARKET, type(uint48).max, 10_000, 0, 1); // the poison pill, queued second
         vm.stopPrank();
 
-        // The jam, exactly as reported: nobody can settle. Not a third party, not the vault, not
-        // the owner.
-        vm.expectRevert(LighterCore.InsufficientMargin.selector);
+        // One call, no revert, from the owner: the refusal is on the record, naming the order and
+        // the reason, instead of stopping the batch.
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.OrderRejected(sIdx, MARKET, 1, LighterCore.InsufficientMargin.selector);
         sim.settleBatch();
+
+        // The vault's hedge filled at its full, requested size...
+        assertEq(sim.positionBaseOf(aIdx, MARKET), 100, "the legitimate hedge did not survive settlement");
+        // ...the poison pill holds nothing, rejected rather than partially applied...
+        assertEq(sim.positionBaseOf(sIdx, MARKET), 0, "the rejected order still moved the poison account's book");
+        // ...and the venue-level view agrees: open interest is exactly the hedge.
+        assertEq(sim.positionBase(MARKET), 100, "aggregate position does not match the surviving hedge");
+
+        // The rejection consumed its queue slot instead of jamming it: nothing left, and no one
+        // stuck waiting behind it.
+        assertEq(sim.queueLength(), 0, "the rejected order stayed in the queue");
+        assertEq(sim.queuedOrdersOf(sIdx), 0, "the rejected order still counts against its account");
+        assertEq(sim.settleCursor(), 0, "a rejected order left the cursor stuck");
+
+        // And settlement keeps working afterwards — the half the old owner-hatch-only answer could
+        // not give a third party without operator help.
         vm.prank(depositorA);
-        vm.expectRevert(LighterCore.InsufficientMargin.selector);
+        sim.createOrder(aIdx, MARKET, 50, 10_000, 0, 1);
         sim.settleBatch();
-        vm.expectRevert(LighterCore.InsufficientMargin.selector);
-        sim.settleBatch(); // owner
-
-        // The two things a reader would reach for, and neither works. The vault cancelling its own
-        // orders leaves the poison pill queued...
-        vm.prank(depositorA);
-        sim.cancelAllOrders(aIdx);
-        vm.expectRevert(LighterCore.InsufficientMargin.selector);
-        sim.settleBatch();
-        // ...and the owner cannot reach the jammer's account through `cancelAllOrders`, whose
-        // per-account scoping is deliberately NOT relaxed.
-        vm.expectRevert(LighterCore.LighterCore_AccountNotCaller.selector);
-        sim.cancelAllOrders(sIdx);
-
-        // THE HATCH. Owner-only, evented, scoped to the offending account.
-        vm.expectEmit(true, false, false, true, address(sim));
-        emit LighterSim.OperatorCancelledOrders(sIdx, 1);
-        sim.ownerCancelAccountOrders(sIdx);
-
-        // Settlement is alive again.
-        sim.settleBatch();
-        assertEq(sim.positionBase(MARKET), 0, "the cancelled hedge should not have filled");
+        assertEq(sim.positionBaseOf(aIdx, MARKET), 150, "settlement did not survive the earlier rejection");
     }
 
     /// @notice The hatch drops ONLY the named account's orders, so unjamming does not silently
