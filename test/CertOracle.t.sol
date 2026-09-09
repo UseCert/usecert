@@ -1140,4 +1140,66 @@ contract CertOracleTest is Test {
         vm.expectRevert(CertOracle.CertOracle_FeedDecimalsOutOfRange.selector);
         new CertOracle(address(born), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false);
     }
+
+    // =======================================================================================
+    // Task 13: `_readFeed`'s second overflow, the sibling of Task 3's.
+    //
+    // Task 3's `d > 36` bound at `_readFeed` closed the EXPONENT half of the asymmetry with
+    // `_tryFeed` — `10 ** (d - 18)` can no longer overflow. The PRODUCT half was still open:
+    // `uint256(answer) * (10 ** (18 - d))`, for `d <= 18`, can overflow uint256 on its own.
+    // `_tryFeed` has guarded exactly this product since the CRITICAL B re-audit (`:376-379`);
+    // `_readFeed` — which px() and the constructor use, and therefore both mint paths — never did,
+    // so a feed reporting `decimals() <= 17` with a large enough answer panicked (0x11) instead of
+    // reverting by name. Confirmed by execution before this fix landed: `MockAggregatorV3(0, 2e59)`
+    // made both `oracle.px()` and `new CertOracle(...)` panic uncaught.
+    // =======================================================================================
+
+    /// @notice px() is allowed to refuse a malfunctioning feed — it backs minting, which must be
+    ///         gated — but it must refuse by NAME. `vm.expectRevert` with a selector does not match
+    ///         a Panic, so this assertion is what makes the new guard load-bearing: revert the
+    ///         product check in `_readFeed` and this fails with
+    ///         `panic: arithmetic underflow or overflow (0x11)`.
+    ///
+    ///         Also restates Law 2 in the same failing state: `pxUnguarded()` — the only reader any
+    ///         `src/` redemption path uses — must still return the last-good snapshot rather than
+    ///         reverting, exactly as `_tryFeed`'s own CRITICAL B guard already ensures.
+    function test_pxRevertsNamedOnAnswerNotNormalisable() public {
+        // d = 0 -> multiplier 1e18; 2e59 * 1e18 > type(uint256).max (~1.16e77).
+        feed.setDecimals(0);
+        feed.set(2e59, block.timestamp);
+
+        vm.expectRevert(CertOracle.CertOracle_AnswerNotNormalisable.selector);
+        oracle.px();
+
+        // Law 2 restated: redemption is unaffected. pxUnguarded() goes through _tryFeed, which
+        // treats this feed as simply unusable and falls back to the last-good snapshot.
+        (uint256 p, uint256 t) = oracle.pxUnguarded();
+        assertEq(p, PX, "pxUnguarded must fall back to last-good, not revert");
+        assertGt(t, 0);
+        assertEq(oracle.basisBps(), 0);
+        assertFalse(oracle.mintAllowed());
+    }
+
+    /// @notice The constructor reads through _readFeed too, so a feed already reporting an
+    ///         unnormalisable answer at deploy time is refused by name instead of panicking — the
+    ///         same improvement Task 3 made for the decimals case.
+    function test_constructorRevertsNamedOnAnswerNotNormalisable() public {
+        MockAggregatorV3 born = new MockAggregatorV3(0, 2e59);
+        vm.expectRevert(CertOracle.CertOracle_AnswerNotNormalisable.selector);
+        new CertOracle(address(born), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false);
+    }
+
+    /// @notice The exact edge of the new guard: at `d == 18` the multiplier `10 ** (18 - d)` is 1,
+    ///         so no `answer` up to `type(int256).max` can overflow the product — the condition is
+    ///         unreachable at 18 and above (above, the ternary divides instead of multiplying). If
+    ///         this guard were wrong — either dead (never fires when it should) or over-broad (fires
+    ///         when it should not) — this is where it would show: px() must return cleanly here,
+    ///         not revert.
+    function test_readFeedAnswerNotNormalisableUnreachableAtD18() public {
+        feed.setDecimals(18);
+        feed.set(type(int256).max, block.timestamp);
+
+        uint256 p = oracle.px();
+        assertEq(p, uint256(type(int256).max), "d == 18 must normalise 1:1 without reverting");
+    }
 }

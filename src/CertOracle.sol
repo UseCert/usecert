@@ -58,6 +58,17 @@ contract CertOracle is ICertOracle {
     ///      copied deliberately rather than re-derived; the asymmetry was recorded in
     ///      docs/DEPLOYMENT-CHECKLIST.md §2 and this closes it.
     error CertOracle_FeedDecimalsOutOfRange();
+    /// @dev Task 13: the `d > 36` bound above closes the EXPONENT half of the asymmetry with
+    ///      `_tryFeed` (Task 3) — the PRODUCT half was still open. For `d <= 18`,
+    ///      `uint256(answer) * (10 ** (18 - d))` can overflow uint256 on its own: at `d = 0` the
+    ///      multiplier is 1e18 and any answer above ~1.1579e59 panics (0x11), anonymously, inside
+    ///      both mint paths (`px()` and the constructor, which reads through `_readFeed` too).
+    ///      `_tryFeed` has guarded exactly this product since the CRITICAL B re-audit
+    ///      (`:376-379`); `_readFeed` never did. A NEW error, not a reuse of
+    ///      `CertOracle_FeedDecimalsOutOfRange`: the two conditions are disjoint (`d > 36` versus
+    ///      `d <= 18` with an unrepresentable answer) and a caller must be able to tell "the
+    ///      feed's scale is absurd" from "the feed's print cannot be normalised at its own scale".
+    error CertOracle_AnswerNotNormalisable();
 
     /// @dev M-5 (Law 3): a rotation is a public commitment with a published effective time.
     event AttesterRotationProposed(address indexed attester, uint256 effectiveAt);
@@ -312,6 +323,14 @@ contract CertOracle is ICertOracle {
         if (answer <= 0) revert CertOracle_NonPositivePrice();
         uint8 d = feed.decimals();
         if (d > 36) revert CertOracle_FeedDecimalsOutOfRange();
+        // Task 13: guard the PRODUCT, not a hard-coded magnitude, so the bound tracks `d` exactly
+        // like `_tryFeed`'s mirror check at `:376-379` — mirrored here rather than re-derived.
+        // Unreachable for `d` in 18..36: at `d == 18` the multiplier is 1 (1e0), so no `answer` up
+        // to `int256` max can overflow the product; above 18 the ternary below divides instead of
+        // multiplying. Only `d <= 17` can reach this revert.
+        if (d <= 18 && uint256(answer) > type(uint256).max / (10 ** (18 - d))) {
+            revert CertOracle_AnswerNotNormalisable();
+        }
         px18 = d <= 18 ? uint256(answer) * (10 ** (18 - d)) : uint256(answer) / (10 ** (d - 18));
         updatedAt = t;
         roundId = r;
