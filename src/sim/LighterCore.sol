@@ -33,6 +33,11 @@ abstract contract LighterCore is ILighter {
         uint32 price;
         uint8 isAsk;
         uint8 orderType;
+        /// @dev Task 5 (C1). The account that submitted this order, so `cancelAllOrders` can cancel
+        ///      that account's orders and ONLY that account's. Previously the queue was anonymous
+        ///      and `cancelAllOrders` ignored its argument and did `delete _queue`, so any address
+        ///      could wipe the vault's hedge. 20 bytes total: still one storage slot.
+        uint48 account;
     }
 
     error AccountIsNotRegistered();
@@ -41,6 +46,19 @@ abstract contract LighterCore is ILighter {
     error InsufficientMargin();
     error ZeroBaseAmount();
     error AboveDepositCap();
+    /// @dev Task 5, item 7 (C1). The caller named an account index that is not its own.
+    ///
+    ///      This is VENUE FIDELITY, not UseCert access control, which is why it lives on the shared
+    ///      core rather than on `LighterSim`: the real `ZkLighter` never takes the acting account on
+    ///      trust from calldata, it derives it from the caller via
+    ///      `validateAndGetAccountIndexFromAddress`. A simulator that accepts any index is a
+    ///      simulator that is EASIER than mainnet, which Global Constraint 5 names as Critical — and
+    ///      here it was also an unconditional drain of every depositor's collateral, since
+    ///      `withdraw` credits `_pending[msg.sender]` out of a single global `marginBalance`.
+    ///
+    ///      `MockLighter` inherits this deliberately. The suite must run against the venue's real
+    ///      authorisation model, not a looser one.
+    error LighterCore_AccountNotCaller();
 
     IERC20 public immutable collateral;
     uint16 public immutable collateralAssetIndex;
@@ -101,9 +119,10 @@ abstract contract LighterCore is ILighter {
         uint8 orderType
     ) public virtual {
         if (accountIndex == 0) revert AccountIsNotRegistered();
+        _requireCallerOwnsAccount(accountIndex);
         if (marketIndex > 254) revert MarketIndexTooHigh();
         if (orderType > 1) revert BadOrderType();
-        _queue.push(Order(marketIndex, baseAmount, price, isAsk, orderType));
+        _queue.push(Order(marketIndex, baseAmount, price, isAsk, orderType, accountIndex));
     }
 
     /// @dev Models AdditionalZkLighter.withdraw() on the real contract: it does NOT check the
@@ -117,8 +136,15 @@ abstract contract LighterCore is ILighter {
     ///      M3: the ceiling is equity(), not marginBalance. A withdrawal that draws on the
     ///      position's gain realises exactly the amount the cash balance cannot cover (moving
     ///      entryPrice toward markPrice so the same gain is never paid twice) and then debits it.
+    ///      Task 5, item 7 (C1): `accountIndex` must be the CALLER's. Before this, the only gate
+    ///      was `accountIndex != 0`, and the credit went to `_pending[msg.sender]` out of a single
+    ///      global `marginBalance` — so any address that had never deposited passed a literal
+    ///      non-zero index, took `min(baseAmount, equity())` (every depositor's collateral) and
+    ///      drained it with `withdrawPendingBalance`. Two transactions, no registration. Reproduced
+    ///      against the deployable artefact before this line existed; see the Task 5 report.
     function withdraw(uint48 accountIndex, uint16 assetIndex, uint8, uint64 baseAmount) public virtual {
         if (accountIndex == 0) revert AccountIsNotRegistered();
+        _requireCallerOwnsAccount(accountIndex);
         if (baseAmount == 0) revert ZeroBaseAmount();
         if (baseAmount > depositCapTicks) revert AboveDepositCap();
 
@@ -132,8 +158,27 @@ abstract contract LighterCore is ILighter {
         _pending[msg.sender][assetIndex] += uint128(fulfilled);
     }
 
-    function cancelAllOrders(uint48) public virtual {
-        delete _queue;
+    /// @notice Cancel every queued order belonging to `accountIndex`, and nothing else.
+    /// @dev Task 5, item 7 (C1). This used to ignore its argument entirely and `delete _queue`, so
+    ///      any address — registered or not — could wipe the vault's pending hedge. Two things
+    ///      changed: the caller must own the account it names, and the cancellation is scoped to
+    ///      that account's own orders via `Order.account`. The queue is compacted in place, which
+    ///      preserves the relative order of the surviving entries — `settleBatch` fills in queue
+    ///      order, so a cancellation must not reshuffle another account's priority.
+    function cancelAllOrders(uint48 accountIndex) public virtual {
+        if (accountIndex == 0) revert AccountIsNotRegistered();
+        _requireCallerOwnsAccount(accountIndex);
+
+        uint256 kept;
+        uint256 n = _queue.length;
+        for (uint256 i = 0; i < n; ++i) {
+            if (_queue[i].account == accountIndex) continue;
+            if (kept != i) _queue[kept] = _queue[i];
+            ++kept;
+        }
+        for (uint256 i = n; i > kept; --i) {
+            _queue.pop();
+        }
     }
 
     function getPendingBalance(address owner, uint16 assetIndex) public view virtual returns (uint128) {
@@ -228,6 +273,18 @@ abstract contract LighterCore is ILighter {
     }
 
     // ----------------------------------------------------------------------------- internals
+
+    /// @dev Task 5, item 7 (C1). The venue's `validateAndGetAccountIndexFromAddress`, modelled: an
+    ///      account-scoped call may only act on the account the CALLER is registered as.
+    ///
+    ///      `deposit` is deliberately NOT bound this way. `deposit(to, ...)` legitimately registers
+    ///      another address — the vault is registered by whoever funds it, which is how
+    ///      `CertVault.bootstrap()` gets an account index at all — and that must keep working.
+    ///      Only the account-scoped operations (`withdraw`, `createOrder`, `cancelAllOrders`) are
+    ///      bound.
+    function _requireCallerOwnsAccount(uint48 accountIndex) internal view {
+        if (accountIndex != addressToAccountIndex[msg.sender]) revert LighterCore_AccountNotCaller();
+    }
 
     /// @dev Book-keeps entryPrice across one fill, realising PnL on whatever the fill closes.
     ///      Called with positionBase[m] still holding `prev`.
