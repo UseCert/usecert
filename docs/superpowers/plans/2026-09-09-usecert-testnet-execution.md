@@ -444,8 +444,50 @@ and each would produce failures that *look like vault bugs and are not*:
    changing them.
 4. Bound `settleBatch`'s loop with a cursor so a large queue cannot exceed the block gas limit.
 
+### Amended after the Task 5 review — this task now owns the real fix for the drain
+
+Task 5 bound each account-scoped call to its caller, which was necessary and insufficient. A
+reviewer demonstrated the drain still open in three transactions against the post-fix artefact: an
+attacker calls `deposit(self, _, _, 0)` — a **zero-value** transfer, which OZ permits without
+allowance — is registered for free, and the caller binding is then *satisfied*. `withdraw`'s
+ceiling is `equity()`, which is `marginBalance + unrealisedPnl()` with **no account parameter at
+all**. Measured: an address holding nothing took both depositors' full 1,000,000e6 and left the
+simulator at zero, identical to the pre-fix result.
+
+So the following is not a fidelity improvement, it is the actual remedy:
+
+0. **`withdraw`'s ceiling must be the caller's own account balance plus its own share of PnL —
+   never the global pool.** `equity()` must take an account index, and every consumer must pass
+   one. This is what makes "a single-vault deployment is safe" a fact rather than an assumption.
+   Task 5 shipped an owner-gated registration allowlist as an interim that closes the drain by
+   shrinking the account set to `{vault}`; once this item lands, that allowlist becomes defence in
+   depth rather than the only thing standing between an attacker and the pool, and whether to keep
+   it is then a free choice. Do not remove it in this task.
+1. **`settleBatch` must reject the individual order and continue** — see item 3 below. The Task 5
+   review found that scoping `cancelAllOrders` to its own account, combined with `settleBatch`
+   reverting wholesale, created a **permanent unrecoverable settlement DoS**: a self-registered
+   attacker with zero collateral queues one oversized order and every future `settleBatch` reverts
+   `InsufficientMargin` forever, with no operator cancel path and `requiredMarginBps` only
+   raisable. Pre-fix, anyone could `delete _queue` and unstick it; that escape disappeared. Task 5
+   added an owner escape hatch as an interim. **Item 3's per-order rejection is the structural
+   fix** and it must land here.
+2. **Gate `settleBatch`** (owner, or an owner-settable keeper address). The Task 5 review judged
+   leaving it permissionless defensible *today* only because `setMarkPrice` is now owner-only and
+   there is a single global position, so a caller timing a fill has no counterparty leg to profit
+   from. **The moment this task gives accounts separate positions that stops being true**, and a
+   caller choosing which block — and therefore which mark — someone else's queued order fills at
+   becomes a real griefing vector. Rate-limiting was considered and rejected: it adds a liveness
+   hazard for no gain.
+
 ### Tests
 
+- [ ] `test_selfRegisteredStrangerCannotDrainThePool` — **the regression test for the miss.**
+      Register via a zero-value deposit, then attempt `withdraw` of the pool. Assert it is bounded
+      by the caller's own balance (zero), and assert the simulator's collateral and every other
+      account's balance are unchanged.
+- [ ] `test_equityIsPerAccount` — two funded accounts, assert each sees only its own.
+- [ ] `test_oneAccountsBadOrderCannotBrickSettlement` — the Critical 2 regression: a stranger's
+      unmargined order is rejected individually and every other account still settles.
 - [ ] `test_twoVaultsShareOneSimWithoutInterference` — two vaults, both mint, one deliberately
       under-margined; assert the healthy vault still settles and its position is correct.
 - [ ] `test_cancelAllOrdersOnlyAffectsCallerAccount`.
