@@ -109,6 +109,19 @@ export function WalletModal() {
       <h3 className="mt-3 text-[28px] font-semibold uppercase leading-none tracking-[-0.03em]">
         Choose a wallet
       </h3>
+      {/* The footer's non-affiliation notice does NOT render here - the dashboard has its own
+          chrome and no footer - so the one screen that actually requests a wallet was the one
+          screen without it. Both the reader and an automated wallet-security classifier look at
+          the connect prompt, so it belongs in the prompt. Also states the network plainly:
+          MetaMask will ask to add chain 46630, and a user who was not told to expect that
+          reasonably reads the request as hostile. */}
+      <p className="mt-4 font-mono text-[11px] leading-[1.6] text-white-60">
+        Testnet only, chain 46630 — your wallet will ask to add or switch to it, and no
+        real-world value is at stake. UseCert is independent and not affiliated with,
+        endorsed by, or sponsored by Robinhood Markets, Inc. or any issuer whose ticker a
+        certificate mirrors. This prompt requests an address only; every approval you are asked
+        for later is for an exact amount, never an unlimited allowance.
+      </p>
       <div className="mt-6 flex flex-col gap-px border hairline-dark bg-hairline-dark">
         {connectors.length === 0 && (
           <p className="bg-[#0d0f0d] px-5 py-4 font-mono text-[11px] leading-[1.6] text-white-60">
