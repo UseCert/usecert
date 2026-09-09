@@ -202,8 +202,13 @@ depend on the factory at all, and holds no reference to it.
 the three-sender split section 4 requires. Every read-back in section 9 is a `require()` in it, so a
 misconfiguration aborts the run before any transaction is broadcast — but **those `require`s observe
 the local simulation, never on-chain state**, because `forge script --broadcast` simulates the whole
-run first and only then sends what it collected. Section 9 is discharged on-chain by
-`script/VerifyTestnet.s.sol`. Both exist; neither replaces the other.
+run first and only then sends what it collected. Section 9 is **intended** to be discharged
+on-chain by `script/VerifyTestnet.s.sol` — but **that script is not in the tree yet**, so nothing
+in this document should be read as asserting it exists. Until it lands, section 9's on-chain half is
+performed by hand: `docs/TESTNET-RUNBOOK.md` §7.4's health check is the equivalent minimum, and it
+is a minimum rather than a substitute — it covers the live reads an operator needs, not every
+section 9 item. When the verify script does land, neither it nor the deploy script's `require`s
+replaces the other.
 
 1. Deploy `SolvencyRegistry` and `CertOracle` **from the multisig** (section 4).
 2. Deploy `CapacityOracle`, then `CertFactory`.

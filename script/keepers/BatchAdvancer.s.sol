@@ -112,7 +112,11 @@ contract BatchAdvancer is KeeperScript {
             // Called UNCONDITIONALLY the first time round, exactly as the deploy script does:
             // `settleBatch()` on an empty queue is harmless, and conditioning the call on the
             // current queue state would couple this keeper to whether the simulator's registration
-            // path happens to be synchronous or asynchronous today (Task 6 made it asynchronous).
+            // path happens to be synchronous or asynchronous today. As shipped it is SYNCHRONOUS —
+            // `LighterCore.deposit` still assigns `addressToAccountIndex` inline, and the
+            // asynchronous-registration change (planned as Task 6) is not in this tree. The
+            // unconditional call is forward-compatible rather than currently load-bearing, which is
+            // why it stays as it is.
             vm.broadcast(pk);
             sim.settleBatch();
             ++rounds;

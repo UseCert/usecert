@@ -33,11 +33,16 @@ import {IERC20Metadata} from "openzeppelin-contracts/token/ERC20/extensions/IERC
 ///         every `require` below asserts the **local simulation's** state, never on-chain state.
 ///         That is genuinely valuable — a misconfiguration aborts the run before a single
 ///         transaction is broadcast, rather than half-completing an unrepairable deployment of
-///         immutables — but it is NOT §9, which says "read these back on-chain". §9 is discharged
-///         by `script/VerifyTestnet.s.sol` (Task 11), which reads `deployments/46630.json` and
-///         re-asserts every item against the live chain, and by `script/smoke/SmokeTest.s.sol`,
-///         which performs the one real dust `forceExit` §9 asks for. Do not delete either on the
-///         grounds that this script already checks those things. It does not.
+///         immutables — but it is NOT §9, which says "read these back on-chain".
+///
+///         §9 IS INTENDED TO BE DISCHARGED by `script/VerifyTestnet.s.sol`, which reads
+///         `deployments/46630.json` and re-asserts every item against the live chain, and by
+///         `script/smoke/SmokeTest.s.sol`, which performs the one real dust `forceExit` §9 asks
+///         for. **NEITHER FILE IS IN THIS TREE YET** — they belong to a task still in flight, so
+///         nothing here should be read as asserting they exist. Until they land, §9's on-chain half
+///         is done by hand: `docs/TESTNET-RUNBOOK.md` §7.4's health check is the equivalent
+///         minimum, and it is a minimum and not a substitute. When they do land, do not delete
+///         either on the grounds that this script already checks those things. It does not.
 ///
 /// @dev    THREE SENDERS, and the split is a safety property, not tidiness:
 ///
@@ -440,6 +445,25 @@ contract DeployTestnet is Script {
         batchKeeper = _batchKeeperAddress();
         if (batchKeeper == address(0)) revert DeployTestnet_MissingBatchKeeper();
 
+        // AND IT MUST BE A FOURTH KEY, checked the same way the three above are.
+        //
+        // Non-zero was the only check here, and `docs/TESTNET-RUNBOOK.md` §3 explains at length why
+        // the batch keeper is a fourth key rather than the deployer's: it is a long-running process
+        // on a box somewhere, while `DEPLOYER_PK` is the venue's IMMUTABLE owner — the allowlist,
+        // the marks and the stuck-queue hatches all sit on it. With `BATCH_KEEPER == deployerAddr`
+        // every check passed, the deployment read as clean, and the separation the runbook promises
+        // quietly did not exist: a compromised keeper box would hold `setDepositorAllowed`,
+        // `setMarkPrice` and `setKeeper`.
+        //
+        // Against governance and the attester too, for the same reason the three `require`s above
+        // are pairwise rather than just "governance != deployer": a keeper box holding `GOV_PK`
+        // owns `setAbsoluteCap`, and one holding `ATTESTER_PK` owns every published solvency
+        // figure. `setKeeper` is rotatable from `DEPLOYER_PK` afterwards, so this costs an operator
+        // nothing but a second address.
+        require(batchKeeper != deployerAddr, "SENDERS: batchKeeper == deployer");
+        require(batchKeeper != govAddr, "SENDERS: batchKeeper == governance");
+        require(batchKeeper != attesterAddr, "SENDERS: batchKeeper == attester");
+
         // ------------------------------------------------------------------- phase 1: deployer
         vm.startBroadcast(deployerPk);
         _phase1_simulators();
@@ -747,10 +771,25 @@ contract DeployTestnet is Script {
         //
         // `createOrder` reverts `AccountIsNotRegistered` until `addressToAccountIndex[vault]` is
         // populated, so every mint reverts as one atomic transaction until the registering deposit
-        // has been EXECUTED by a batch. Task 6 makes registration asynchronous on the simulator, so
-        // the deposit alone is not enough; this is what makes it land. Harmless when the queue is
-        // empty, so it is called unconditionally rather than conditioned on the simulator's current
-        // sync-or-async behaviour.
+        // has been EXECUTED by a batch. Called UNCONDITIONALLY and deliberately not conditioned on
+        // whether the simulator's registration path is synchronous or asynchronous today: it is
+        // harmless on an empty queue, and the alternative couples this script to a venue detail
+        // that is expected to change.
+        //
+        // TO BE PRECISE ABOUT WHAT IS AND IS NOT IN THE TREE, because the earlier wording here
+        // claimed otherwise: **`LighterCore.deposit` still assigns `addressToAccountIndex` inline**,
+        // so registration is SYNCHRONOUS as shipped and `bootstrap()` alone already populates the
+        // index. The asynchronous-registration change (planned as Task 6) is not in this tree. This
+        // call is therefore forward-compatible rather than currently load-bearing — which is the
+        // right shape, and is why it stays.
+        //
+        // AND THE §9 READ-BACK DOES NOT PROVE THE ORDERING IT LOOKS LIKE IT PROVES.
+        // `_verifyAssetGate`'s `require(v.lighterAccountIndex() != 0)` passes whether or not this
+        // `settleBatch()` ran, because the inline assignment already satisfied it. So neither that
+        // read-back nor the suite establishes "the batch advance is what registered the vault"
+        // today. Stated rather than repaired: when registration does become asynchronous the
+        // read-back becomes exactly the proof it reads as, and weakening it now to chase the
+        // present behaviour would have to be undone.
         //
         // Task 12's `BatchAdvancer` keeper calls exactly this on an interval, signing with the
         // `batchKeeper` address registered just above, and on mainnet Lighter advances its own
@@ -1222,7 +1261,9 @@ contract DeployTestnet is Script {
             console2.log("  BufferBook      ", deployed[i].bufferBook);
         }
         console2.log("address book -> deployments/%s.json", vm.toString(block.chainid));
-        console2.log("NEXT: script/VerifyTestnet.s.sol (this script's requires are simulation-only),");
-        console2.log("      then the two keepers, or minting stops in ~5 minutes.");
+        console2.log("NEXT: this script's requires are simulation-only, so verify on chain.");
+        console2.log("      script/VerifyTestnet.s.sol is NOT in the tree yet - until it is, run");
+        console2.log("      docs/TESTNET-RUNBOOK.md section 7.4's health check by hand instead.");
+        console2.log("      Then start ALL THREE keepers, or minting stops in ~5 minutes.");
     }
 }

@@ -46,6 +46,64 @@ contract DeployTestnetCollapsedSenders is DeployTestnet {
     }
 }
 
+/// @notice `DeployTestnet`s whose fourth key is missing, or is not actually a fourth key.
+///
+/// @dev MINOR 5. `BATCH_KEEPER` was checked non-zero only, while `docs/TESTNET-RUNBOOK.md` §3
+///      explains at length why it must be a FOURTH key — the batch keeper is a long-running process
+///      on a box somewhere and `DEPLOYER_PK` is the venue's immutable owner. With
+///      `BATCH_KEEPER == deployerAddr` every check passed, the deployment read as clean, and the
+///      promised separation quietly did not exist: a compromised keeper box would hold
+///      `setDepositorAllowed`, `setMarkPrice` and `setKeeper`.
+///
+///      `DeployTestnet_MissingBatchKeeper` had no test at all either, so the zero case was
+///      unguarded by the suite as well as under-specified by the script.
+///
+///      Each overrides the `_batchKeeperAddress()` seam rather than mutating `BATCH_KEEPER` in the
+///      environment, for the reason the other subclasses in this file give: `vm.setEnv` is not
+///      rolled back between test cases and races across parallel suites. The collapsed addresses
+///      are read off the script's own fields, which `run()` populates before this seam is called.
+contract DeployTestnetNoBatchKeeper is DeployTestnet {
+    function _batchKeeperAddress() internal pure override returns (address) {
+        return address(0);
+    }
+}
+
+contract DeployTestnetBatchKeeperIsDeployer is DeployTestnet {
+    function _batchKeeperAddress() internal view override returns (address) {
+        return deployerAddr;
+    }
+}
+
+contract DeployTestnetBatchKeeperIsGovernance is DeployTestnet {
+    function _batchKeeperAddress() internal view override returns (address) {
+        return govAddr;
+    }
+}
+
+contract DeployTestnetBatchKeeperIsAttester is DeployTestnet {
+    function _batchKeeperAddress() internal view override returns (address) {
+        return attesterAddr;
+    }
+}
+
+/// @notice The two sender collapses that had no test, alongside `deployer == governance` which did.
+/// @dev All three `require`s are the same shape and only one was covered, so two could have been
+///      deleted without a test noticing. `governance == attester` is the sharpest of the three:
+///      governance compromise would immediately yield attester powers.
+contract DeployTestnetDeployerIsAttester is DeployTestnet {
+    function _senderKeys() internal view override returns (uint256, uint256, uint256) {
+        (uint256 d, uint256 g,) = super._senderKeys();
+        return (d, g, d);
+    }
+}
+
+contract DeployTestnetGovIsAttester is DeployTestnet {
+    function _senderKeys() internal view override returns (uint256, uint256, uint256) {
+        (uint256 d, uint256 g,) = super._senderKeys();
+        return (d, g, g);
+    }
+}
+
 /// @notice A `DeployTestnet` whose collateral deployment yields an 18-decimal token, to prove the
 ///         decimals guard in `_phase1_simulators()` is still enforced now that the token is
 ///         deployed in-script rather than injected. `TestUSDG.decimals()` is a pure literal 6 and
@@ -426,6 +484,56 @@ contract DeployTestnetTest is Test {
         DeployTestnetCollapsedSenders broken = new DeployTestnetCollapsedSenders();
         vm.expectRevert(bytes("SENDERS: deployer == governance"));
         broken.run();
+    }
+
+    /// @notice The other two sender-distinctness `require`s, which had no test.
+    /// @dev All three are the same shape and only `deployer == governance` was covered, so two of
+    ///      them could have been deleted and the suite would have stayed green. `governance ==
+    ///      attester` is the sharpest: governance compromise would immediately yield attester
+    ///      powers, and `SolvencyRegistry.governance` is immutable so there is no repair.
+    function test_scriptRevertsIfDeployerIsAlsoTheAttester() public {
+        DeployTestnetDeployerIsAttester broken = new DeployTestnetDeployerIsAttester();
+        vm.expectRevert(bytes("SENDERS: deployer == attester"));
+        broken.run();
+    }
+
+    function test_scriptRevertsIfGovernanceIsAlsoTheAttester() public {
+        DeployTestnetGovIsAttester broken = new DeployTestnetGovIsAttester();
+        vm.expectRevert(bytes("SENDERS: governance == attester"));
+        broken.run();
+    }
+
+    /// @notice `BATCH_KEEPER` unset aborts the run, by name.
+    /// @dev `DeployTestnet_MissingBatchKeeper` had NO test. Without the key, phase 5's
+    ///      `LighterSim.setKeeper` would register the zero address and Task 12's `BatchAdvancer`
+    ///      would revert `LighterSim_OnlyOwnerOrKeeper` on its first call — which reads identically
+    ///      to a dead keeper, the symptom the runbook's keeper-mismatch row exists for.
+    function test_scriptRevertsIfBatchKeeperIsUnset() public {
+        DeployTestnetNoBatchKeeper broken = new DeployTestnetNoBatchKeeper();
+        vm.expectRevert(DeployTestnet.DeployTestnet_MissingBatchKeeper.selector);
+        broken.run();
+    }
+
+    /// @notice **MINOR 5.** `BATCH_KEEPER` must be a FOURTH key, not one of the three senders
+    ///         wearing a second hat.
+    /// @dev Non-zero was the only check, so `BATCH_KEEPER=$deployerAddr` passed everything and the
+    ///      separation §3 promises silently did not exist. The batch keeper is a long-running
+    ///      process on a box somewhere; the deployer is the venue's IMMUTABLE owner, holding
+    ///      `setDepositorAllowed`, `setMarkPrice` and `setKeeper`. Governance and the attester are
+    ///      checked for the same reason: a keeper box holding `GOV_PK` owns `setAbsoluteCap`, and
+    ///      one holding `ATTESTER_PK` owns every published solvency figure.
+    function test_scriptRevertsIfBatchKeeperIsNotAFourthKey() public {
+        DeployTestnetBatchKeeperIsDeployer asDeployer = new DeployTestnetBatchKeeperIsDeployer();
+        vm.expectRevert(bytes("SENDERS: batchKeeper == deployer"));
+        asDeployer.run();
+
+        DeployTestnetBatchKeeperIsGovernance asGov = new DeployTestnetBatchKeeperIsGovernance();
+        vm.expectRevert(bytes("SENDERS: batchKeeper == governance"));
+        asGov.run();
+
+        DeployTestnetBatchKeeperIsAttester asAttester = new DeployTestnetBatchKeeperIsAttester();
+        vm.expectRevert(bytes("SENDERS: batchKeeper == attester"));
+        asAttester.run();
     }
 
     /// @notice The collateral's decimals are checked, because `CertVault` fixes them immutably.

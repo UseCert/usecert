@@ -13,20 +13,27 @@ import {console2} from "forge-std/console2.sol";
 ///         a hand-typed vault address is one copy-paste away from attesting the previous
 ///         deployment's vault — a stream of perfectly valid attestations against an asset key
 ///         nothing is minting, while the live vault starves. Reading the book means the keeper and
-///         the deployment cannot disagree without the book itself being wrong, and
-///         `script/VerifyTestnet.s.sol` checks the book against the chain.
+///         the deployment cannot disagree without the book itself being wrong.
 ///
-/// @dev    A FOUNDRY SCRIPT RUNS ONCE AND EXITS. Neither keeper loops on wall-clock time and
-///         neither is a daemon; "on an interval" means an EXTERNAL loop re-invokes the script —
-///         cron, a systemd timer, or a shell `while`. See `docs/TESTNET-RUNBOOK.md` for the
-///         intervals and the loops. `script/FeedKeeper.s.sol` (Task 9) already establishes this
-///         shape and says the same thing in its own NatSpec.
+///         `script/VerifyTestnet.s.sol` is intended to check the book against the chain, but **it
+///         is not in this tree yet** — it belongs to a task still in flight. Until it lands, that
+///         check is `docs/TESTNET-RUNBOOK.md` §7.4's health check, run by hand. Every keeper below
+///         therefore preflights its own on-chain preconditions rather than relying on a verify step
+///         having happened; see "THE ONE THING THE ADDRESS BOOK DOES NOT PROVE" below.
+///
+/// @dev    A FOUNDRY SCRIPT RUNS ONCE AND EXITS. No keeper loops on wall-clock time and none is a
+///         daemon; "on an interval" means an EXTERNAL loop re-invokes the script — cron, a systemd
+///         timer, or a shell `while`. See `docs/TESTNET-RUNBOOK.md` for the intervals and the
+///         loops. All three keepers have this shape: `script/FeedKeeper.s.sol` says the same thing
+///         in its own NatSpec, and it reads this same book (for the simulator address and the
+///         market index it needs to advance the venue mark alongside the feed).
 ///
 /// @dev    THE ONE THING THE ADDRESS BOOK DOES NOT PROVE. `vm.readFile`/`vm.parseJson` read a local
 ///         file. A book generated against one deployment and left in the tree while a second
-///         deployment happened elsewhere parses perfectly and points at dead contracts. Both
-///         keepers therefore preflight the specific on-chain fact they depend on — the batch
-///         advancer checks `LighterSim.keeper()`, the attester checks `SolvencyRegistry.attester()`
+///         deployment happened elsewhere parses perfectly and points at dead contracts. Every
+///         keeper therefore preflights the specific on-chain fact it depends on — the batch
+///         advancer checks `LighterSim.keeper()`, the feed keeper checks both
+///         `ReplayAggregator.owner()` and `LighterSim.owner()`, the attester checks `SolvencyRegistry.attester()`
 ///         and each `CertOracle.attester()` — and abort with a named reason rather than sending a
 ///         transaction that reverts with a bare selector at 3am.
 abstract contract KeeperScript is Script {
@@ -65,7 +72,7 @@ abstract contract KeeperScript is Script {
 
     /// @dev THE INJECTION SEAM, and it is the file read that is behind it rather than the parse.
     ///
-    ///      Same reasoning as `DeployTestnet._collateralAddress()`: a test overrides this by
+    ///      Same reasoning as `DeployTestnet._deployCollateral()`: a test overrides this by
     ///      SUBCLASSING rather than by mutating the process environment. `vm.setEnv` writes
     ///      process-global state Foundry does not roll back between test cases, and Foundry runs
     ///      test contracts in parallel, so an env-mutating test corrupts its neighbours.

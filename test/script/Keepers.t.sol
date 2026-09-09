@@ -14,6 +14,7 @@ import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 
 import {Attester} from "../../script/keepers/Attester.s.sol";
 import {BatchAdvancer} from "../../script/keepers/BatchAdvancer.s.sol";
+import {FeedKeeper} from "../../script/FeedKeeper.s.sol";
 import {VenueTruth} from "../../script/keepers/VenueTruth.sol";
 
 /// @notice An `Attester` whose address book is supplied in memory rather than read from
@@ -84,7 +85,54 @@ contract BatchAdvancerWithBook is BatchAdvancer {
     }
 }
 
-/// @notice TASK 12 ACCEPTANCE. The two keepers, driven against a stack built with the deployment's
+/// @notice A `FeedKeeper` with the same in-memory book seam, plus the mirror selector and the price
+///         injected rather than read from the environment.
+/// @dev THE POINT OF THIS HARNESS. Every feed push in this file used to be the same constant
+///      `FEED_PX_8`, and `test/script/DeployTestnet.t.sol` seeds the venue mark equal to the feed —
+///      so the whole pipeline's PRICE-DRIFT dimension was pinned to one value and no test in the
+///      suite could see a bug in it. One did exist: nothing advanced `LighterSim.markPrice` after
+///      deployment, so a ~6% feed move closed the mint gate permanently on the basis band. This
+///      harness exists so a test can move the price.
+contract FeedKeeperWithBook is FeedKeeper {
+    string internal book;
+    uint256 internal key;
+    address internal aggregator;
+    int256 internal price;
+
+    function setBook(string memory json) external {
+        book = json;
+    }
+
+    function setKey(uint256 k) external {
+        key = k;
+    }
+
+    function setAggregator(address a) external {
+        aggregator = a;
+    }
+
+    function setPrice(int256 p) external {
+        price = p;
+    }
+
+    function _bookJson() internal view override returns (string memory) {
+        return book;
+    }
+
+    function _signerKey() internal view override returns (uint256) {
+        return key;
+    }
+
+    function _selectedAggregator() internal view override returns (address) {
+        return aggregator;
+    }
+
+    function _feedPrice() internal view override returns (int256) {
+        return price;
+    }
+}
+
+/// @notice TASK 12 ACCEPTANCE. The three keepers, driven against a stack built with the deployment's
 ///         own parameters, on chain id 46630.
 ///
 /// @dev WHAT THIS FILE PROVES AND WHAT IT DOES NOT. `vm.broadcast` inside a test executes the call
@@ -103,6 +151,22 @@ contract KeepersTest is Test {
     uint16 internal constant MARKET = 16; // TSLA
     uint256 internal constant PX_18 = 366.6204e18;
     int256 internal constant FEED_PX_8 = 36_662_040_000;
+
+    /// @dev THE TWO PRICES THIS FILE WAS MISSING. Every feed push here used to be `FEED_PX_8`, so
+    ///      the pipeline was only ever tested at one price.
+    ///
+    ///      `FEED_PX_8_UP_5PCT` is exactly `deviationBps` (500) above the seed, which is the largest
+    ///      step `pokeLastGood()` accepts in one go — used to walk `lastGoodPx18` forward so the
+    ///      DEVIATION leg can be ruled out and the BASIS leg measured on its own.
+    ///
+    ///      `FEED_PX_8_UP_6PCT` is the reviewer's measured value, and the basis it produces against
+    ///      a frozen `PX_18` mark is 566 bps — `(388.6204 - 366.6204) * 10_000 / 388.6204` — over
+    ///      the 500 bps band, which is exactly the reading taken on `anvil --chain-id 46630`.
+    int256 internal constant FEED_PX_8_UP_5PCT = 38_495_142_000; // $384.95142
+    int256 internal constant FEED_PX_8_UP_6PCT = 38_862_040_000; // $388.6204
+    uint256 internal constant PX_18_UP_6PCT = 388.6204e18;
+    uint256 internal constant BASIS_BAND_BPS = 500;
+    uint256 internal constant DEVIATION_BPS = 500;
     uint256 internal constant SIM_IMF = 5_000;
     uint256 internal constant TARGET_MARGIN_BPS = 9_000;
     uint256 internal constant INSTANT_CAP_18 = 1_000e18;
@@ -129,17 +193,23 @@ contract KeepersTest is Test {
 
     AttesterWithBook internal attesterKeeper;
     BatchAdvancerWithBook internal batchKeeper;
+    FeedKeeperWithBook internal feedKeeper;
 
-    /// @dev Throwaway keys. The SCRIPTS never hardcode one — both read the environment, which is
+    /// @dev Throwaway keys. The SCRIPTS never hardcode one — each reads the environment, which is
     ///      what lets the operator hold the real ones. These exist only so the test can sign.
+    ///
+    ///      `DEPLOYER_PK` is new here: the feed keeper signs as the owner of BOTH the aggregator and
+    ///      the simulator, so `deployer` has to be an address this file holds a key for rather than
+    ///      a bare `makeAddr` label.
     uint256 internal constant ATTESTER_PK = 0xA77E5;
     uint256 internal constant BATCH_KEEPER_PK = 0xB47C4;
+    uint256 internal constant DEPLOYER_PK = 0xD3910;
     uint256 internal constant WRONG_PK = 0xBAD;
 
     address internal attesterAddr;
     address internal batchKeeperAddr;
     address internal gov = makeAddr("gov");
-    address internal deployer = makeAddr("deployer");
+    address internal deployer = vm.addr(DEPLOYER_PK);
     address internal alice = makeAddr("alice");
 
     function setUp() public {
@@ -237,6 +307,28 @@ contract KeepersTest is Test {
         batchKeeper = new BatchAdvancerWithBook();
         batchKeeper.setBook(_bookJson());
         batchKeeper.setKey(BATCH_KEEPER_PK);
+        feedKeeper = new FeedKeeperWithBook();
+        feedKeeper.setBook(_bookJson());
+        feedKeeper.setKey(DEPLOYER_PK);
+        feedKeeper.setAggregator(address(feed));
+        feedKeeper.setPrice(FEED_PX_8);
+    }
+
+    /// @dev One feed-keeper cycle at an explicit price, plus the attester cycle that copies the
+    ///      venue mark into `CertOracle` and the `pokeLastGood()` that keeps the DEVIATION leg's
+    ///      reference moving. This is §7's three loops for one tick of wall clock, and it is what
+    ///      the runbook tells an operator to run.
+    function _keeperCycleAt(int256 feedPx8) internal {
+        vm.warp(block.timestamp + 60);
+        feedKeeper.setPrice(feedPx8);
+        feedKeeper.run();
+        // Permissionless, and the operator's documented remedy for the deviation leg (§7.3's
+        // caveat). Kept out of the keeper deliberately: it is not a keeper's job and Law 6 keeps it
+        // ownerless.
+        oracle.pokeLastGood();
+        attesterKeeper.run();
+        vm.prank(batchKeeperAddr);
+        sim.settleBatch();
     }
 
     /// @dev The address book, in the exact shape `DeployTestnet._writeAddressBook()` emits — the
@@ -546,6 +638,225 @@ contract KeepersTest is Test {
         vm.prank(deployer);
         feed.push(FEED_PX_8);
         assertTrue(oracle.mintAllowed(), "a feed push did not reopen the mint gate");
+    }
+
+    // ------------------------------------------------------------------ THE PRICE-DRIFT DIMENSION
+
+    /// @notice **THE ACCEPTANCE TEST FOR THE FEED KEEPER'S SECOND LEG.** The mint gate survives a
+    ///         price move well past `basisBandBps` **because the keeper advances both legs** — the
+    ///         aggregator and `LighterSim.setMarkPrice` — rather than only the feed.
+    ///
+    /// @dev THE BUG THIS EXISTS TO CATCH, and why no existing test could. Every feed push in this
+    ///      file was the same constant `FEED_PX_8`, and the deploy test seeds the venue mark equal
+    ///      to the feed, so the pipeline's entire price-drift dimension was pinned to one value.
+    ///      Meanwhile `LighterSim.setMarkPrice` is `onlyOwner` and was called exactly ONCE, at
+    ///      deployment, with `seedPx18`; `CertOracle.markPx18` is written only by the attester; and
+    ///      the attester's only source is `LighterSim.markPrice`. So the two legs of the basis band
+    ///      were a moving feed against a permanently frozen mark, and a ~6% move shut minting for
+    ///      good. A whole class of bug was invisible to a green suite.
+    ///
+    ///      It drifts in SIX 1% STEPS rather than one 6% jump, and the difference is not cosmetic:
+    ///      a single jump would also trip the DEVIATION clamp (500 bps against `lastGoodPx18`),
+    ///      which is a different guard and a deliberate one. Stepping inside the band with
+    ///      `pokeLastGood()` each cycle — exactly the operator loop §7.3 documents — isolates the
+    ///      basis leg, so a failure here can only mean the mark stopped tracking the feed.
+    function test_mintGateSurvivesA6PercentFeedMoveBecauseTheKeeperAdvancesBothLegs() public {
+        // ------------------------------------------------------------------------------- BEFORE
+        assertTrue(oracle.mintAllowed(), "fixture: mint gate shut at t0");
+        (bool knownAtT0, uint256 bpsAtT0) = oracle.basisBpsChecked();
+        assertTrue(knownAtT0, "fixture: basis not measured - singleSource must be false");
+        assertEq(bpsAtT0, 0, "fixture: basis nonzero at t0");
+        assertEq(sim.markPrice(MARKET), PX_18, "fixture: venue mark not at the seed");
+        assertEq(oracle.markPx18(), PX_18, "fixture: oracle mark not at the seed");
+
+        // -------------------------------------------------- the drift, one keeper cycle per step
+        int256 px = FEED_PX_8;
+        for (uint256 i = 0; i < 6; ++i) {
+            px = px * 101 / 100;
+            _keeperCycleAt(px);
+
+            // The gate must never shut, not even for one cycle: this is the assertion the old
+            // single-leg keeper fails on the very first step large enough to matter.
+            assertTrue(oracle.mintAllowed(), "MINT GATE CLOSED MID-DRIFT with all three keepers running");
+            (bool known, uint256 bps) = oracle.basisBpsChecked();
+            assertTrue(known, "basis stopped being measurable mid-drift");
+            assertLe(bps, BASIS_BAND_BPS, "basis left the band with the keeper advancing both legs");
+        }
+
+        // -------------------------------------------------------------------------------- AFTER
+        // Past the +6% that used to be terminal. 1.01^6 = +6.15%.
+        assertGe(uint256(px), uint256(FEED_PX_8) * 106 / 100, "the drift did not reach +6%");
+
+        // BOTH LEGS MOVED, and this pair of equalities is the actual subject of the test. The
+        // venue mark is the feed price normalised to 1e18 (8 -> 18 decimals), and the oracle mark
+        // is the attester's copy of it.
+        uint256 expectedPx18 = uint256(px) * 1e10;
+        assertEq(sim.markPrice(MARKET), expectedPx18, "THE VENUE MARK DID NOT MOVE - the keeper's second leg is missing");
+        assertEq(oracle.markPx18(), expectedPx18, "the attester did not copy the advanced venue mark");
+        assertGt(sim.markPrice(MARKET), PX_18, "the venue mark is still at the deployment-day price");
+
+        (bool knownAtEnd, uint256 bpsAtEnd) = oracle.basisBpsChecked();
+        assertTrue(knownAtEnd, "basis not measurable at the end of the drift");
+        assertEq(bpsAtEnd, 0, "basis nonzero after both legs advanced together");
+        assertTrue(oracle.mintAllowed(), "MINT GATE CLOSED after a 6% move the keeper tracked on both legs");
+
+        // Not merely "permitted": a mint lands at the new price, and the hedge fills at the new
+        // venue mark rather than the deployment-day one. `settleBatch` fills at `markPrice`, so a
+        // frozen mark would have made every hedge forever fill at $366.62 while `px()` moved —
+        // a Global Constraint 5 divergence, and the worse half of this bug.
+        uint256 certOut = _mint(alice, 900e6);
+        assertTrue(certOut != 0, "mint returned zero certificates after the drift");
+    }
+
+    /// @notice **THE CONTROL, AND IT REPRODUCES THE REVIEWER'S MEASUREMENT EXACTLY.** Advancing
+    ///         ONLY the aggregator — the feed keeper's old single-leg behaviour — closes the mint
+    ///         gate on the basis band, and **restarting the attester is provably a no-op.**
+    ///
+    /// @dev This is the half that makes the test above mean something: without it, a passing drift
+    ///      test could be passing for any reason at all. Every number here was read off
+    ///      `anvil --chain-id 46630`:
+    ///
+    ///          BEFORE  mintAllowed: true   basis: (true, 0)
+    ///          push FEED_PRICE=38862040000  (+6.0%)
+    ///          AFTER   px 388.62e18  markPx18 366.62e18  basis (true, 566)  mintAllowed: false
+    ///
+    ///      And it rules out the deviation leg the same way the reviewer did, rather than asserting
+    ///      the basis is to blame: `lastGoodPx18` is walked to +5% first, so deviation is 95 bps —
+    ///      well inside 500 — leaving `basis = 566` the SOLE cause of a false `mintAllowed()`.
+    function test_advancingOnlyTheFeedClosesTheMintGateAndTheAttesterCannotReopenIt() public {
+        // ------------------------------------------------------------------------------- BEFORE
+        assertTrue(oracle.mintAllowed(), "BEFORE: mintAllowed should be true");
+        (bool known, uint256 bps) = oracle.basisBpsChecked();
+        assertTrue(known);
+        assertEq(bps, 0, "BEFORE: basis should be (true, 0)");
+
+        // Walk `lastGoodPx18` to exactly +5% — the largest step `pokeLastGood` takes in one go — so
+        // the deviation clamp cannot be what shuts the gate below.
+        vm.warp(block.timestamp + 60);
+        vm.prank(deployer);
+        feed.push(FEED_PX_8_UP_5PCT);
+        oracle.pokeLastGood();
+        assertEq(oracle.lastGoodPx18(), uint256(FEED_PX_8_UP_5PCT) * 1e10, "lastGood did not advance in-band");
+
+        // -------------------------------------------- the +6% push, AGGREGATOR ONLY (the old bug)
+        vm.warp(block.timestamp + 60);
+        vm.prank(deployer);
+        feed.push(FEED_PX_8_UP_6PCT);
+
+        // The attester runs, exactly as the runbook used to advise. It rewrites the SAME frozen
+        // mark, because its only source is `LighterSim.markPrice` and nothing moved that.
+        attesterKeeper.run();
+
+        assertEq(sim.markPrice(MARKET), PX_18, "the venue mark moved with no keeper advancing it");
+        assertEq(oracle.markPx18(), PX_18, "the attester published something other than the frozen mark");
+
+        // -------------------------------------------------------------------------------- AFTER
+        (known, bps) = oracle.basisBpsChecked();
+        assertTrue(known, "AFTER: basis must still be measurable");
+        assertEq(bps, 566, "AFTER: basis should be 566 bps - the reviewer's measured value");
+        assertGt(bps, BASIS_BAND_BPS, "566 bps must be outside the 500 bps band");
+        assertFalse(oracle.mintAllowed(), "AFTER: mintAllowed should be false");
+
+        // THE DEVIATION LEG IS NOT THE CAUSE. 95 bps, well inside 500, so the basis band is the
+        // sole reason the gate is shut.
+        uint256 lastGood = oracle.lastGoodPx18();
+        uint256 dev = (PX_18_UP_6PCT - lastGood) * 10_000 / lastGood;
+        assertLe(dev, DEVIATION_BPS, "the deviation leg is also out of band - the control proves nothing");
+        assertEq(dev, 95, "deviation should be 95 bps - the reviewer's measured value");
+
+        // RESTARTING THE ATTESTER IS A NO-OP. Measured, not argued: the runbook's old remedy for
+        // this exact symptom was "restart the attester", and here are three more cycles of it.
+        for (uint256 i = 0; i < 3; ++i) {
+            vm.warp(block.timestamp + 60);
+            vm.prank(deployer);
+            feed.push(FEED_PX_8_UP_6PCT);
+            attesterKeeper.run();
+            assertFalse(oracle.mintAllowed(), "restarting the attester reopened the gate - the runbook row would be right");
+        }
+        (, bps) = oracle.basisBpsChecked();
+        assertEq(bps, 566, "the basis moved after three attester cycles");
+
+        // ---------------------------------------------- and the FIXED feed keeper reopens it
+        //
+        // Same price, no parameter changed, nothing redeployed. One invocation of the current
+        // `script/FeedKeeper.s.sol` advances the venue mark alongside the feed, and the attester's
+        // next cycle publishes it.
+        feedKeeper.setPrice(FEED_PX_8_UP_6PCT);
+        feedKeeper.run();
+        assertEq(sim.markPrice(MARKET), PX_18_UP_6PCT, "the feed keeper did not advance the venue mark");
+
+        attesterKeeper.run();
+        assertEq(oracle.markPx18(), PX_18_UP_6PCT, "the attester did not copy the advanced mark");
+
+        (known, bps) = oracle.basisBpsChecked();
+        assertTrue(known);
+        assertEq(bps, 0, "basis not back to zero after both legs were advanced");
+        assertTrue(oracle.mintAllowed(), "the feed keeper's second leg did not reopen the mint gate");
+    }
+
+    /// @notice The feed keeper refuses a price that would set the venue mark to zero, and refuses it
+    ///         **before** pushing the feed.
+    /// @dev At a zero mark the simulator's whole mark-to-market layer is dead — notional is
+    ///      `|position| * 0`, so the margin gate passes vacuously at any size, and `entryPrice = 0`
+    ///      makes `unrealisedPnl()` permanently zero. `settleBatch` and `VenueTruth` both refuse
+    ///      that state, so a keeper that could create it would be handing them an outage. Ordering
+    ///      matters as much as the refusal: a feed pushed and a mark not set is exactly the split
+    ///      this keeper exists to prevent.
+    function test_feedKeeperRefusesAZeroOrNegativePriceWithoutTouchingTheFeed() public {
+        uint256 markBefore = sim.markPrice(MARKET);
+        (, int256 answerBefore,,,) = feed.latestRoundData();
+
+        feedKeeper.setPrice(0);
+        vm.expectRevert(
+            bytes("FEED_PRICE must be positive - a zero mark kills the simulator's mark-to-market layer")
+        );
+        feedKeeper.run();
+
+        feedKeeper.setPrice(-1);
+        vm.expectRevert(
+            bytes("FEED_PRICE must be positive - a zero mark kills the simulator's mark-to-market layer")
+        );
+        feedKeeper.run();
+
+        assertEq(sim.markPrice(MARKET), markBefore, "the venue mark changed on a refused price");
+        (, int256 answerAfter,,,) = feed.latestRoundData();
+        assertEq(answerAfter, answerBefore, "THE FEED WAS PUSHED BEFORE THE MARK WAS REFUSED");
+    }
+
+    /// @notice The mirror selector must name a mirror the address book actually holds.
+    /// @dev A revert and not a fallback to mirror 0, deliberately: an aggregator that is not in the
+    ///      book is a stale address copied from a previous deployment, and guessing a mirror would
+    ///      advance the WRONG market's mark while leaving the intended one frozen — which is this
+    ///      keeper's own bug class, reintroduced through a convenience.
+    function test_feedKeeperRefusesAnAggregatorThatIsNotInTheBook() public {
+        vm.prank(deployer);
+        ReplayAggregator stray = new ReplayAggregator(deployer, 8, "STRAY / USD", FEED_PX_8);
+
+        feedKeeper.setAggregator(address(stray));
+        feedKeeper.setPrice(FEED_PX_8);
+        vm.expectRevert(
+            bytes(
+                "REPLAY_AGGREGATOR is not any .vaults[i].replayAggregator in the address book - stale address, or a book from another deployment"
+            )
+        );
+        feedKeeper.run();
+
+        assertEq(sim.markPrice(MARKET), PX_18, "the venue mark moved for an off-book aggregator");
+    }
+
+    /// @notice The feed keeper preflights BOTH owners it depends on, and names which one disagrees.
+    /// @dev `push` and `setMarkPrice` are each `onlyOwner` and revert with a bare selector for a
+    ///      wrong key. At a 60 s interval that is a cron log full of nothing, which is the same
+    ///      reasoning behind the other two keepers' preflights.
+    function test_feedKeeperRefusesAKeyThatOwnsNeitherLeg() public {
+        feedKeeper.setKey(WRONG_PK);
+        feedKeeper.setPrice(FEED_PX_8);
+        vm.expectRevert(
+            bytes(
+                "DEPLOYER_PK does not derive ReplayAggregator.owner() - push would revert ReplayAggregator_NotOwner"
+            )
+        );
+        feedKeeper.run();
     }
 
     // --------------------------------------------------------------------- the batch advancer

@@ -70,7 +70,8 @@
     "DEPLOYER_PK": "deploys the simulators, CapacityOracle, CertFactory and both vaults",
     "GOV_PK": "deploys SolvencyRegistry and both CertOracles (checklist §4) and runs the governance phase",
     "ATTESTER_PK": "runs attest() and setMarkPrice(); never deploys anything",
-    "COLLATERAL": "address of the deployed 6-decimal test collateral (Task 8 artefact)",
-    "TEST_FAUCET": "optional; address of the deployed TestFaucet (Task 8 artefact), recorded only"
+    "BATCH_KEEPER": "REQUIRED. Address (not a key) the BatchAdvancer keeper signs with; registered as LighterSim.keeper in phase 5. Zero aborts the run with DeployTestnet_MissingBatchKeeper, and it must be distinct from all three senders",
+    "COMMIT": "optional; recorded in the address book so the EIP-170 size claim stays checkable. Passed as an env var rather than shelled out because ffi is deliberately off",
+    "_collateralNote": "COLLATERAL and TEST_FAUCET are NOT read. The script deploys its own 6-decimal TestUSDG and its TestFaucet in _phase1_simulators() and mints both floats itself; there is no way to point it at a collateral token it did not deploy. A mainnet script would take the real USDG as an injected address instead - see the contract NatSpec."
   }
 }

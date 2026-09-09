@@ -143,10 +143,16 @@ contract MockLighter is LighterCore {
     ///
     ///      This is why the hook is a no-op on `LighterCore` and this override is a test-only
     ///      front-end concern: `LighterSim` must not be able to mint its counterparty's money.
-    function _fundPending() internal override {
+    ///      TASK 6a: takes the balance the caller is about to need instead of reading
+    ///      `_pendingTotal`, because the hook is now called BEFORE the pending total is bumped —
+    ///      that reordering is what lets `_executeWithdrawal` refuse a credit it cannot back
+    ///      instead of half-applying it. Reading `_pendingTotal` here would now under-mint by
+    ///      exactly the amount being credited, and the mock would refuse every gain-drawing
+    ///      withdrawal it is supposed to honour.
+    function _fundPending(uint256 required) internal override {
         uint256 held = collateral.balanceOf(address(this));
-        if (held >= _pendingTotal) return;
-        try IMockMintable(address(collateral)).mint(address(this), _pendingTotal - held) {} catch {}
+        if (held >= required) return;
+        try IMockMintable(address(collateral)).mint(address(this), required - held) {} catch {}
     }
 }
 

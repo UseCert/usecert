@@ -90,6 +90,31 @@ abstract contract LighterCore is ILighter {
         uint96 id;
     }
 
+    /// @notice One withdrawal priority request, waiting for a batch to execute it.
+    ///
+    /// @dev TASK 6a. `withdraw` used to decide sufficiency, debit margin and credit the pending
+    ///      balance all in the calling transaction. The real `AdditionalZkLighter.withdraw`
+    ///      performs NO BALANCE CHECK: it validates flags, enqueues a priority request, and the
+    ///      rollup decides what it can pay later — with no on-chain signal and no rollback if it
+    ///      cannot. So the request has to be a stored object, and this is it.
+    ///
+    ///      `owner` is `msg.sender` at request time and NOT derived from `account` at settlement.
+    ///      The two are the same address on every path that exists — `withdraw` binds the caller to
+    ///      the account it names — but `_pending` is keyed by ADDRESS while the books are keyed by
+    ///      INDEX, so recording the address the credit was promised to is what stops a settlement
+    ///      from having to re-derive it from a mapping that may have moved on.
+    ///
+    ///      20 + 6 + 2 + 8 + 12 = 48 bytes: two storage slots, and the second one is half empty
+    ///      rather than being packed tighter, because `owner` is a full word-aligned address and
+    ///      splitting it would cost more gas to read than the slot saves.
+    struct WithdrawalRequest {
+        address owner;
+        uint48 account;
+        uint16 assetIndex;
+        uint64 baseAmount;
+        uint96 id;
+    }
+
     error AccountIsNotRegistered();
     error MarketIndexTooHigh();
     error BadOrderType();
@@ -143,6 +168,23 @@ abstract contract LighterCore is ILighter {
     ///      queue and every other account's `createOrder` — the vault's hedge included — would
     ///      revert. The per-account cap is what makes the global cap safe to have.
     error LighterCore_AccountOrderCapReached();
+    /// @dev Task 6a. The withdrawal priority queue is full.
+    ///
+    ///      Bounded for the same reason the order queue is: `_settleWithdrawals` walks it, and
+    ///      `CertVault.recallMargin()` is PERMISSIONLESS, so anyone may submit a withdrawal request
+    ///      on the vault's behalf as often as they like. An unbounded queue would make settlement's
+    ///      cost a stranger's choice on the one function the whole testnet's liveness runs through.
+    ///
+    ///      Separate from `LighterCore_QueueFull` although it reuses `MAX_QUEUE`'s value: a full
+    ///      withdrawal queue and a full order queue are different operator problems with different
+    ///      answers, and `recallMargin` swallows this in a `catch` — a shared selector would make
+    ///      the log the only way to tell them apart.
+    error LighterCore_WithdrawQueueFull();
+    /// @dev Task 6a. One account has `MAX_ORDERS_PER_ACCOUNT` withdrawal requests outstanding.
+    ///      Counterpart of `LighterCore_AccountOrderCapReached`, and what stops one account from
+    ///      monopolising the withdrawal queue and locking every other account — the vault included
+    ///      — out of `withdraw`.
+    error LighterCore_AccountWithdrawCapReached();
     /// @dev Task 8, item 2. A deposit that is not an exact multiple of `depositTickSize`.
     ///
     ///      The real venue's per-asset config gates deposits on `tickSize`, `minDepositTicks` and
@@ -197,11 +239,22 @@ abstract contract LighterCore is ILighter {
         uint256 marginBalanceAfter
     );
 
-    /// @notice A registering deposit resolved `owner` to a venue account index for the first time.
+    /// @notice A registering deposit reserved a venue account index for `owner`. The index is NOT
+    ///         usable yet — it resolves when batch `resolvesAtBatch` settles.
+    ///
     /// @dev Indices are assigned from 3 upward and never reused, so this fires at most once per
     ///      address. An indexer needs it to build the address/account map every other event here is
-    ///      keyed by, and `CertVault` reads the same mapping to find its own index.
-    event AccountRegistered(address indexed owner, uint48 indexed account);
+    ///      keyed by, and `CertVault` reads the same view to find its own index.
+    ///
+    /// @dev TASK 6b ADDED `resolvesAtBatch`, and it is the field that makes the log stream
+    ///      self-contained. Registration is now asynchronous — `addressToAccountIndex` returns 0
+    ///      until a `settleBatch` has executed the registering deposit — so an event that said only
+    ///      "registered" would name a moment that has not arrived. There is deliberately no second
+    ///      event at resolution: nothing happens in that transaction beyond the batch itself, so a
+    ///      consumer joins this against `BatchSettled(batchId)` for `batchId >= resolvesAtBatch`
+    ///      and gets the exact block the index became usable, with no extra on-chain cost and no
+    ///      per-batch walk over pending registrations.
+    event AccountRegistered(address indexed owner, uint48 indexed account, uint256 resolvesAtBatch);
 
     /// @notice An order was accepted into the settlement queue. It has NOT filled — orders never
     ///         fill in the calling transaction, which is the venue behaviour this simulator exists
@@ -245,23 +298,119 @@ abstract contract LighterCore is ILighter {
     ///      the operator hatches; this reports the account's own `cancelAllOrders`.
     event OrdersCancelled(uint48 indexed account, uint256 cancelled, uint256 queueLengthAfter);
 
-    /// @notice A withdrawal request was accepted and credited to the caller's pending balance.
-    /// @dev NOT a payment. The real `AdditionalZkLighter.withdraw` enqueues a priority request and
-    ///      decides sufficiency inside the rollup, so this is the venue saying "asked, and this much
-    ///      was credited". Tokens move on `withdrawPendingBalance` — see `WithdrawalFulfilled`.
-    event WithdrawalEnqueued(
+    /// @notice A withdrawal priority request was accepted into the queue. NOTHING has been credited
+    ///         and no book has moved — see `WithdrawalCredited` for the settlement half.
+    ///
+    /// @dev TASK 6a. This is the ONLY thing the calling transaction now produces, and the gap
+    ///      between it and `WithdrawalCredited` is the property this task exists to create. The
+    ///      real venue enqueues and returns success whatever the account holds; an insufficient
+    ///      request is rejected INSIDE THE ROLLUP with no on-chain signal and no rollback, so the
+    ///      caller sees success and the cash never arrives. `getPendingBalance` is the only on-chain
+    ///      evidence a withdrawal executed, which is exactly why `CertVault.recallMargin` is
+    ///      two-phase and reduces `marginPendingRecall` only on proven arrival.
+    ///
+    /// @param requestId Monotonic and never reused, so this can be joined to the
+    ///        `WithdrawalCredited` / `WithdrawalUnfundable` that resolves it. Counted on its own
+    ///        sequence, not on `Order.id`'s, so order ids stay dense.
+    /// @param queueSlot Where it landed. Informational: the withdrawal queue is compacted by
+    ///        nothing today, but a slot is still not an identifier. `requestId` is.
+    event WithdrawalRequested(
+        address indexed owner,
+        uint48 indexed account,
+        uint16 indexed assetIndex,
+        uint64 requested,
+        uint96 requestId,
+        uint256 queueSlot
+    );
+
+    /// @notice A queued withdrawal was executed inside batch `batchId` and `credited` was added to
+    ///         `owner`'s pending balance.
+    ///
+    /// @dev NOT a payment. This is the venue saying "asked, and this much was credited". Tokens
+    ///      move on `withdrawPendingBalance` — see `WithdrawalFulfilled`.
+    ///
+    /// @dev TASK 6a RENAMED THIS FROM `WithdrawalEnqueued`, and the rename is the point rather than
+    ///      cosmetics: the enqueue and the credit are now two different transactions, so a single
+    ///      name could only be wrong about one of them. `WithdrawalRequested` is the enqueue; this
+    ///      is the credit. Field list unchanged apart from the appended `batchId`, so an existing
+    ///      consumer reads the same six values in the same order and only has to move which
+    ///      transaction it expects them in.
+    event WithdrawalCredited(
         address indexed owner,
         uint48 indexed account,
         uint16 indexed assetIndex,
         uint64 requested,
         uint256 credited,
-        uint256 pendingAfter
+        uint256 pendingAfter,
+        uint256 batchId
+    );
+
+    /// @notice A queued withdrawal was REFUSED WHOLE at settlement because this simulator's own
+    ///         token balance could not back the credit it was about to make. Nothing was credited
+    ///         and no book moved.
+    ///
+    /// @dev TASK 6a, AND THE ONE CASE IN THIS FILE THAT FAILS CLOSED. It must not be confused with
+    ///      `WithdrawalSilentlyRejected`, which is the opposite decision for a different cause, so
+    ///      the distinction is worth stating in full:
+    ///
+    ///        * A request LARGER THAN THE ACCOUNT'S EQUITY is PARTIALLY FULFILLED — `min(request,
+    ///          available)` is credited and the shortfall is announced. That is real venue
+    ///          behaviour, and `CertVault.recallMargin` DEPENDS on it: it deliberately over-requests,
+    ///          asking the venue for what the vault OWES rather than what it deposited, which was
+    ///          the C1 audit fix and is safe only because the venue fulfils `min(request,
+    ///          available)` and `_sweepPending` reconciles whatever actually arrives. Measured at
+    ///          that audit: a receipt owed 7,102.97 while everything recallable totalled 3,559.54.
+    ///          Making withdrawals all-or-nothing would make that receipt unpayable again — the
+    ///          sharpest Law 2 breach the audit found, reintroduced through the simulator. So
+    ///          partial fulfilment is LOAD-BEARING and stays.
+    ///        * A credit THIS CONTRACT CANNOT BACK WITH TOKENS is refused entirely. That is not a
+    ///          partial fill, it is a bookkeeping half-application: `withdraw` used to succeed,
+    ///          debit `marginBalance`, rewrite `entryPrice` through `_realiseGain` and bump
+    ///          `_pendingTotal`, and only the LATER `withdrawPendingBalance` reverted on the token
+    ///          transfer — leaving a permanently unsweepable pending credit against books that had
+    ///          already moved, which on testnet presents as a vault wedged in `_sweepPending`
+    ///          forever. Refusing before anything is written is the fix.
+    ///
+    /// @param wouldHaveCredited What partial fulfilment had decided on before the funding check
+    ///        refused it. Recorded because it is the number an operator needs to size the
+    ///        collateral top-up that would let a retry through, and it is not recoverable from any
+    ///        other log line.
+    event WithdrawalUnfundable(
+        address indexed owner,
+        uint48 indexed account,
+        uint16 indexed assetIndex,
+        uint64 requested,
+        uint256 wouldHaveCredited,
+        uint256 batchId
+    );
+
+    /// @notice The withdrawal half of one `settleBatch` call finished.
+    /// @dev Task 6a. Separate from `BatchSettled` rather than adding fields to it: the two queues
+    ///      are drained independently, with their own cursors and their own `SETTLE_BATCH_MAX`
+    ///      window, so one event carrying both would report two unrelated `drained` flags.
+    /// @param credited How many requests credited something.
+    /// @param refused How many credited nothing — either fulfilled to zero, or refused whole by the
+    ///        funding check. `WithdrawalSilentlyRejected` and `WithdrawalUnfundable` say which.
+    event WithdrawalsSettled(
+        uint256 indexed batchId,
+        uint256 fromQueueSlot,
+        uint256 toQueueSlot,
+        uint256 credited,
+        uint256 refused,
+        bool queueDrained
     );
 
     /// @notice A withdrawal was credited for LESS than it asked for, and did not revert.
     ///
     /// @dev THE MOST IMPORTANT EVENT IN THIS FILE for an operator, and deliberately separate from
-    ///      `WithdrawalEnqueued` so it can be filtered on alone.
+    ///      `WithdrawalCredited` so it can be filtered on alone.
+    ///
+    /// @dev TASK 6a MOVED WHEN THIS FIRES — from the `withdraw` transaction to the `settleBatch`
+    ///      that executes the request — and deliberately did NOT change its signature, so
+    ///      `test_theShortfallEventIsDistinctFromTheEnqueueEvent`'s hashed topic and every existing
+    ///      consumer keep working. This is also now the PARTIAL-FULFILMENT event and nothing else:
+    ///      the case where the simulator cannot back the credit at all is `WithdrawalUnfundable`,
+    ///      which refuses whole. See that event for why conflating the two is severe.
     ///
     ///      `withdraw` must not revert on insufficiency — the real venue does not, it credits what
     ///      it can and STRANDS the rest, and `CertVault._queueExit` is built around exactly that.
@@ -344,7 +493,34 @@ abstract contract LighterCore is ILighter {
     uint8 public immutable sizeDecimals;
     uint8 internal immutable _collateralDecimals;
 
-    mapping(address => uint48) public addressToAccountIndex;
+    /// @dev TASK 6b. The account index RESERVED for an address by its registering deposit — the
+    ///      venue's internal book, not the published answer.
+    ///
+    ///      `addressToAccountIndex(owner)` below is the published answer, and it stays 0 until a
+    ///      `settleBatch` has executed the registering deposit. The split is the whole of 6b: the
+    ///      collateral has to land in SOME account's book in the same transaction that receives the
+    ///      tokens (they are held, so `marginBalance()` must account for them), while the INDEX
+    ///      must not resolve until the rollup runs. Keeping the reservation internal is what makes
+    ///      the second true without making the first a lie.
+    ///
+    ///      `internal` rather than `private` for no reason but symmetry with the rest of this file;
+    ///      nothing outside it reads the reservation, and nothing should — a consumer that wants to
+    ///      know whether an account is usable must ask `addressToAccountIndex`, which is the only
+    ///      read the real venue offers and the only one that answers the question.
+    mapping(address => uint48) internal _accountIndexOf;
+    /// @notice The settlement batch at which an address's registering deposit resolves its account
+    ///         index. Zero means the address has never made a registering deposit.
+    ///
+    /// @dev TASK 6b. Set to `batchesSettled + 1` by the registering deposit, so exactly one
+    ///      `settleBatch` after the deposit publishes the index — the same "the next batch executes
+    ///      the priority request" model `settleBatch` already gives orders.
+    ///
+    ///      PUBLIC ON PURPOSE, and it is the operator's diagnostic for the whole 6b window: the
+    ///      runbook's "the vault is bootstrapped but every mint reverts AccountIsNotRegistered" row
+    ///      is answered by comparing this against `batchesSettled`, which is a two-read answer
+    ///      instead of an unexplained revert. It has no counterpart on the real venue — there the
+    ///      rollup's own queue holds the equivalent — and it must not be read as modelling one.
+    mapping(address => uint256) public accountRegistrationBatch;
     uint48 private _nextAccountIndex = 3;
     /// @dev Every account index ever registered, in registration order. Exists so the aggregate
     ///      views (`marginBalance()`, `positionBase()`, `entryPrice()`, `unrealisedPnl()`) can sum
@@ -447,9 +623,27 @@ abstract contract LighterCore is ILighter {
     ///      the queue. `test_queuedOrderCountersTrackTheQueue` pins it against a direct scan.
     mapping(uint48 => uint256) public queuedOrdersOf;
 
+    /// @notice How far into the withdrawal queue settlement has already got.
+    /// @dev Task 6a. Exact counterpart of `settleCursor`, on its own queue: the two are drained in
+    ///      the same `settleBatch` call but in independent windows, so they cannot share a cursor.
+    uint256 public withdrawCursor;
+    /// @notice How many queued, unexecuted withdrawal requests an account currently has.
+    /// @dev Task 6a. Maintained in exactly two places — `withdraw` up and `_settleWithdrawals` down
+    ///      — which are the only two ways a request enters or leaves the queue. Unlike an order, a
+    ///      withdrawal request is never cancellable and never purgeable: the real venue's priority
+    ///      requests are not withdrawable once submitted, and `_settleWithdrawals` consumes every
+    ///      request it reaches whether it credits or refuses, so no request can jam its slot and no
+    ///      operator hatch is needed for this queue.
+    mapping(uint48 => uint256) public queuedWithdrawalsOf;
+
     /// @dev `internal`, not `private`, only so `MockLighter.queuedOrderCount()` / `lastOrder()`
     ///      can read it. Those two introspection helpers are test-only and stay off this base.
     Order[] internal _queue;
+    /// @dev Task 6a. The withdrawal priority queue. `internal` for symmetry with `_queue`; nothing
+    ///      outside this file reads it, and `withdrawQueueLength()` is the view.
+    WithdrawalRequest[] internal _withdrawQueue;
+    /// @dev Task 6a. The next `WithdrawalRequest.id`. Starts at 1 so 0 is never a real request.
+    uint96 private _nextWithdrawalId = 1;
     mapping(address => mapping(uint16 => uint128)) private _pending;
     /// @dev Every market this contract has ever filled, so unrealisedPnl() can sum across them.
     uint16[] internal _markets;
@@ -466,6 +660,47 @@ abstract contract LighterCore is ILighter {
     }
 
     // ------------------------------------------------------------------------ ILighter surface
+
+    /// @notice The venue account index `owner` may act as, or 0 if it has none yet.
+    ///
+    /// @dev TASK 6a/6b — THE CENTRAL CHANGE OF THIS TASK, and the reason it is a function rather
+    ///      than the auto-generated getter of a public mapping it used to be.
+    ///
+    ///      `deposit()` USED TO ASSIGN THIS INLINE, so an address was registered and immediately
+    ///      able to trade in the very transaction that funded it. On the real venue it is not: the
+    ///      registering deposit is a PRIORITY REQUEST, and `addressToAccountIndex` returns 0 until
+    ///      the rollup executes it. That is why the real `createOrder` reverts
+    ///      `AccountIsNotRegistered` for a freshly-funded account, and why
+    ///      `docs/DEPLOYMENT-CHECKLIST.md` step 8 calls the wait between `bootstrap()` and the
+    ///      first mint "the real sequencing guarantee". A simulator that resolved the index inline
+    ///      never opened that window, so no deployment rehearsal ever exercised the guarantee the
+    ///      checklist step exists to protect — Global Constraint 5's exact shape, on the deployment
+    ///      path.
+    ///
+    ///      SO THE ANSWER IS NOW GATED ON THE SETTLEMENT CLOCK. The registering deposit reserves an
+    ///      index and records the batch that will execute it; this returns 0 until that batch has
+    ///      settled. One `settleBatch` after the deposit is enough, which is exactly the sequence
+    ///      `test/helpers/VaultFixture.sol` already performs (`bootstrap()` then `settleBatch()`)
+    ///      and exactly the sequence the checklist prescribes.
+    ///
+    ///      WHY LAZY RATHER THAN A PENDING-REGISTRATION QUEUE DRAINED BY `settleBatch`. Both give
+    ///      the same observable behaviour; this one costs no extra storage writes, no cursor, no
+    ///      new bound on how many registrations one batch must walk, and — decisively —
+    ///      nothing at all in `settleBatch`'s stack frame, which is already close to solc 0.8.24's
+    ///      limit with `via_ir` forbidden (see `_coversInitialMargin`). A queue would have been a
+    ///      new denial-of-service surface on the one function whose liveness the whole testnet
+    ///      depends on, bought for no behavioural gain.
+    ///
+    ///      Returning 0 is what makes the window FAIL CLOSED rather than merely late: 0 is the
+    ///      value `createOrder` and `withdraw` refuse with `AccountIsNotRegistered`, and it is what
+    ///      `CertVault.lighterAccountIndex()` forwards, so the vault's own mint path reverts
+    ///      atomically instead of half-hedging. `virtual` because `ILighter` declares this as a
+    ///      function and a front end may need to fault-inject it.
+    function addressToAccountIndex(address owner_) public view virtual returns (uint48) {
+        uint256 resolvesAt = accountRegistrationBatch[owner_];
+        if (resolvesAt == 0 || batchesSettled < resolvesAt) return 0;
+        return _accountIndexOf[owner_];
+    }
 
     /// @notice Post `amount` of collateral as margin for `to`, registering `to` if it is new.
     ///
@@ -497,12 +732,20 @@ abstract contract LighterCore is ILighter {
         if (ticks > depositCapTicks) revert AboveDepositCap();
 
         collateral.transferFrom(msg.sender, address(this), amount);
-        uint48 idx = addressToAccountIndex[to];
+        // TASK 6b. The RESERVATION, not the registration. Read `_accountIndexOf` and not the
+        // published view: a second deposit made before the batch that resolves the first one must
+        // top up the SAME account, and reading the published (still zero) answer here would hand
+        // the address a second index and orphan the first deposit's collateral in a book nobody
+        // can ever name.
+        uint48 idx = _accountIndexOf[to];
         if (idx == 0) {
             idx = _nextAccountIndex++;
-            addressToAccountIndex[to] = idx;
+            _accountIndexOf[to] = idx;
+            // One `settleBatch` from now. See `accountRegistrationBatch`.
+            uint256 resolvesAt = batchesSettled + 1;
+            accountRegistrationBatch[to] = resolvesAt;
             _accounts.push(idx);
-            emit AccountRegistered(to, idx);
+            emit AccountRegistered(to, idx, resolvesAt);
         }
         // Task 7: the collateral lands in `to`'s OWN book. It used to land in a shared pool, which
         // is what made every account's withdrawal ceiling every other account's balance.
@@ -559,35 +802,48 @@ abstract contract LighterCore is ILighter {
     ///      already inside: bind the call to its caller and the caller could still name the whole
     ///      pool. Measured before this line existed, against the deployable artefact: an account
     ///      that had deposited 1 USDG withdrew 600_001 USDG and left the simulator at zero.
+    /// @dev TASK 6a. THIS FUNCTION NOW ONLY ENQUEUES. It reads no balance, credits nothing and
+    ///      mutates no book — every line of the fulfilment that used to be here has moved to
+    ///      `_settleWithdrawals`, which a `settleBatch` runs.
+    ///
+    ///      WHY, in the venue's own terms. The real `AdditionalZkLighter.withdraw` performs NO
+    ///      BALANCE CHECK: it validates `baseAmount != 0` and `baseAmount <= depositCapTicks`, then
+    ///      enqueues a priority request. Sufficiency is decided inside the rollup, and an
+    ///      insufficient request is rejected there with NO ON-CHAIN SIGNAL AND NO ROLLBACK — the
+    ///      caller sees success and the cash never arrives. `getPendingBalance` is the only
+    ///      on-chain evidence a withdrawal executed at all, which is precisely why
+    ///      `CertVault.recallMargin` is two-phase and why `_sweepPending` reduces
+    ///      `marginPendingRecall` only by what actually landed.
+    ///
+    ///      Crediting synchronously — which is what this did — meant `_sweepPending`'s "the money
+    ///      may simply never come" path was NEVER EXERCISED by the suite or by a testnet
+    ///      rehearsal. That path is the vault's entire defence against a venue that pays nothing,
+    ///      and it was certified by nothing.
+    ///
+    ///      The four validations stay, and stay in this order, because they are the four the real
+    ///      contract performs before enqueuing. The two queue bounds are new and are simulator
+    ///      self-defence rather than venue fidelity — see `LighterCore_WithdrawQueueFull`.
+    ///
+    ///      NOTE THAT THE CEILING IS NOT CHECKED HERE, deliberately and importantly. Refusing an
+    ///      over-large request at request time would make withdrawals all-or-nothing, and
+    ///      `CertVault.recallMargin` deliberately OVER-REQUESTS — it asks for what the vault owes,
+    ///      not what it deposited. See `WithdrawalUnfundable` for the measured Law 2 breach that
+    ///      reintroduces.
     function withdraw(uint48 accountIndex, uint16 assetIndex, uint8, uint64 baseAmount) public virtual {
         if (accountIndex == 0) revert AccountIsNotRegistered();
         _requireCallerOwnsAccount(accountIndex);
         if (baseAmount == 0) revert ZeroBaseAmount();
         if (baseAmount > depositCapTicks) revert AboveDepositCap();
-
-        uint256 available = equity(accountIndex);
-        uint256 fulfilled = baseAmount <= available ? baseAmount : available;
-        uint256 cash = marginBalanceOf[accountIndex];
-        if (fulfilled > cash) _realiseGain(accountIndex, fulfilled - cash);
-        marginBalanceOf[accountIndex] -= fulfilled;
-
-        _pendingTotal += fulfilled;
-        _fundPending();
-        _pending[msg.sender][assetIndex] += uint128(fulfilled);
-
-        // Task 8, item 1. Two events, and the second one is the point. This call does not revert
-        // when the venue cannot pay in full: it credits what it can and STRANDS the rest, which is
-        // real venue behaviour and is why `CertVault._queueExit` is built the way it is. On-chain
-        // that makes "paid nothing" indistinguishable from "paid in full", so the shortfall is
-        // announced separately rather than left to be inferred from two storage reads.
-        emit WithdrawalEnqueued(
-            msg.sender, accountIndex, assetIndex, baseAmount, fulfilled, _pending[msg.sender][assetIndex]
-        );
-        if (fulfilled < baseAmount) {
-            emit WithdrawalSilentlyRejected(
-                msg.sender, accountIndex, assetIndex, baseAmount, fulfilled, baseAmount - fulfilled
-            );
+        if (_withdrawQueue.length >= MAX_QUEUE) revert LighterCore_WithdrawQueueFull();
+        if (queuedWithdrawalsOf[accountIndex] >= MAX_ORDERS_PER_ACCOUNT) {
+            revert LighterCore_AccountWithdrawCapReached();
         }
+
+        uint96 id = _nextWithdrawalId++;
+        uint256 slot = _withdrawQueue.length;
+        _withdrawQueue.push(WithdrawalRequest(msg.sender, accountIndex, assetIndex, baseAmount, id));
+        ++queuedWithdrawalsOf[accountIndex];
+        emit WithdrawalRequested(msg.sender, accountIndex, assetIndex, baseAmount, id, slot);
     }
 
     /// @notice Cancel every queued order belonging to `accountIndex`, and nothing else.
@@ -614,7 +870,7 @@ abstract contract LighterCore is ILighter {
         // Task 8, item 1. The only point in the whole withdrawal path at which collateral actually
         // leaves the venue. Everything before it is a credit against a pending balance.
         emit WithdrawalFulfilled(
-            owner, addressToAccountIndex[owner], assetIndex, baseAmount, _pending[owner][assetIndex]
+            owner, addressToAccountIndex(owner), assetIndex, baseAmount, _pending[owner][assetIndex]
         );
     }
 
@@ -739,6 +995,138 @@ abstract contract LighterCore is ILighter {
             settleCursor = i;
         }
         emit BatchSettled(batchId, from, i, filled, rejected, drained);
+
+        // TASK 6a. The withdrawal queue is drained in the same call, AFTER the fills, and as a
+        // separate internal function rather than a second loop in this frame.
+        //
+        // AFTER THE FILLS on purpose: a fill realises PnL into cash and moves the position, so a
+        // withdrawal executed in the same batch must see the book the batch produced, not the one
+        // it started from. One batch, executed in order.
+        //
+        // A SEPARATE FUNCTION because `settleBatch` is close to solc 0.8.24's stack limit and
+        // `via_ir` is forbidden — the same constraint that forced `_coversInitialMargin` out of
+        // this frame in Task 8. A called function's locals live in its own frame, so this adds
+        // nothing to the one above.
+        _settleWithdrawals(batchId);
+    }
+
+    /// @notice Execute up to `SETTLE_BATCH_MAX` queued withdrawal requests.
+    ///
+    /// @dev TASK 6a. Everything `withdraw` used to do in the calling transaction happens here, one
+    ///      batch later — which is the point of the task.
+    ///
+    ///      A request is CONSUMED whatever the outcome, exactly as a rejected order is: it leaves
+    ///      the queue and its account's counter comes down. The real venue's priority requests are
+    ///      not re-queued when the rollup cannot pay them, and a request that survived its own
+    ///      refusal would be a jam by another name. This is why the queue needs no operator hatch
+    ///      while the order queue does.
+    function _settleWithdrawals(uint256 batchId) internal {
+        uint256 n = _withdrawQueue.length;
+        uint256 i = withdrawCursor;
+        uint256 stop = n - i > SETTLE_BATCH_MAX ? i + SETTLE_BATCH_MAX : n;
+        uint256 from = i;
+        uint256 credited;
+        uint256 refused;
+
+        for (; i < stop; ++i) {
+            WithdrawalRequest memory w = _withdrawQueue[i];
+            --queuedWithdrawalsOf[w.account];
+            if (_executeWithdrawal(w, batchId)) {
+                ++credited;
+            } else {
+                ++refused;
+            }
+        }
+
+        bool drained = i >= _withdrawQueue.length;
+        if (drained) {
+            delete _withdrawQueue;
+            withdrawCursor = 0;
+        } else {
+            withdrawCursor = i;
+        }
+        emit WithdrawalsSettled(batchId, from, i, credited, refused, drained);
+    }
+
+    /// @notice Execute one withdrawal request: credit `min(request, available)` to the pending
+    ///         balance, or refuse the whole request if this contract cannot back that credit.
+    ///
+    /// @dev TASK 6a, AND THE TWO CASES HERE MUST NOT BE CONFLATED. Conflating them is easy and the
+    ///      consequence is a Law 2 breach, so both are spelled out.
+    ///
+    ///      CASE 1 — THE REQUEST EXCEEDS THE ACCOUNT'S AVAILABLE EQUITY. Partial fulfilment, and it
+    ///      STAYS. `min(request, available)` is credited, the shortfall is announced through
+    ///      `WithdrawalSilentlyRejected`, and nothing reverts. This is real venue behaviour: the
+    ///      rollup fulfils what it can and strands the rest. It is also LOAD-BEARING for the
+    ///      protocol, not merely faithful — `CertVault.recallMargin` deliberately over-requests,
+    ///      asking the venue for what the vault OWES rather than what it deposited, which was the
+    ///      C1 audit fix, and it is safe only because the venue fulfils `min(request, available)`
+    ///      and `_sweepPending` reconciles whatever arrives. Measured at that audit: a receipt owed
+    ///      7,102.97 while everything recallable totalled 3,559.54. All-or-nothing here makes that
+    ///      receipt unpayable, which is the sharpest Law 2 breach the audit found — reintroduced
+    ///      through the simulator rather than through the vault.
+    ///
+    ///      CASE 2 — THIS CONTRACT'S OWN TOKEN BALANCE CANNOT BACK THE CREDIT. Refused WHOLE, with
+    ///      nothing credited and no book mutated, and `WithdrawalUnfundable` on the record. This is
+    ///      the Task 4 review's finding I2. It is NOT a partial fill: the old code succeeded here,
+    ///      debiting `marginBalance`, rewriting `entryPrice` through `_realiseGain` and bumping
+    ///      `_pendingTotal`, and only the LATER `withdrawPendingBalance` reverted on the token
+    ///      transfer — a permanently unsweepable pending credit against books that had already
+    ///      moved, which on testnet presents as a vault wedged in `_sweepPending` forever. A
+    ///      bookkeeping half-application, and the one thing in this file that fails closed.
+    ///
+    ///      THE ORDER OF THE THREE STEPS IS LOAD-BEARING. Fulfilment is decided, then `_fundPending`
+    ///      is given its chance to produce the tokens (a no-op on `LighterSim`, a mint on
+    ///      `MockLighter`), then the balance is checked — and only after all three does anything get
+    ///      written. Checking before `_fundPending` would refuse credits the mock can honour;
+    ///      writing before the check is the defect itself.
+    ///
+    ///      `balanceOf >= _pendingTotal + fulfilled` is exactly the condition that makes
+    ///      `withdrawPendingBalance` unable to revert on the transfer, because
+    ///      `_pending[owner][asset] <= _pendingTotal` always: every pending balance this contract
+    ///      has promised is fully backed by tokens it holds.
+    ///
+    /// @return credited Whether anything was actually credited. A fulfilment of zero counts as not
+    ///         credited and is reported through `WithdrawalSilentlyRejected` for its full amount —
+    ///         it is a partial fill of nothing, which is the state a venue paying nothing at all
+    ///         produces, and the one mainnet makes indistinguishable from paying in full.
+    function _executeWithdrawal(WithdrawalRequest memory w, uint256 batchId) private returns (bool credited) {
+        uint256 available = equity(w.account);
+        uint256 fulfilled = w.baseAmount <= available ? w.baseAmount : available;
+
+        // CASE 2, decided before a single write. See the doc comment.
+        uint256 required = _pendingTotal + fulfilled;
+        _fundPending(required);
+        if (fulfilled > 0 && collateral.balanceOf(address(this)) < required) {
+            emit WithdrawalUnfundable(w.owner, w.account, w.assetIndex, w.baseAmount, fulfilled, batchId);
+            return false;
+        }
+
+        if (fulfilled > 0) {
+            // M3, unchanged and moved verbatim: the ceiling is equity, not cash, so a withdrawal
+            // drawing on the position's gain realises exactly the amount cash cannot cover —
+            // moving `entryPrice` toward `markPrice` so the same gain is never paid twice — and
+            // then debits it.
+            uint256 cash = marginBalanceOf[w.account];
+            if (fulfilled > cash) _realiseGain(w.account, fulfilled - cash);
+            marginBalanceOf[w.account] -= fulfilled;
+            _pendingTotal = required;
+            _pending[w.owner][w.assetIndex] += uint128(fulfilled);
+        }
+
+        emit WithdrawalCredited(
+            w.owner, w.account, w.assetIndex, w.baseAmount, fulfilled, _pending[w.owner][w.assetIndex], batchId
+        );
+        // CASE 1. The venue does not revert when it cannot pay in full: it credits what it can and
+        // STRANDS the rest. On-chain that makes "paid nothing" indistinguishable from "paid in
+        // full", so the shortfall is announced rather than left to be inferred from two storage
+        // reads across a block.
+        if (fulfilled < w.baseAmount) {
+            emit WithdrawalSilentlyRejected(
+                w.owner, w.account, w.assetIndex, w.baseAmount, fulfilled, w.baseAmount - fulfilled
+            );
+        }
+        return fulfilled > 0;
     }
 
     /// @notice Whether `account` has posted enough cash to cover the initial margin on a fill that
@@ -894,6 +1282,26 @@ abstract contract LighterCore is ILighter {
         return _queue.length;
     }
 
+    /// @notice Every credited-but-undrained pending balance, summed.
+    ///
+    /// @dev Task 6a. The venue's total outstanding promise, and the figure the fail-closed check in
+    ///      `_executeWithdrawal` is written against: `collateral.balanceOf(this) >= pendingTotal()`
+    ///      is the invariant that makes `withdrawPendingBalance` unable to revert on its transfer.
+    ///      Exposed so a test can assert it did not move across a refused withdrawal — which is the
+    ///      whole of finding I2 — and so an operator can check the invariant with one read instead
+    ///      of summing every account's pending balance.
+    function pendingTotal() public view virtual returns (uint256) {
+        return _pendingTotal;
+    }
+
+    /// @notice How many withdrawal requests are queued, executed prefix included.
+    /// @dev Task 6a. Counterpart of `queueLength()`, and the read that lets a test or an operator
+    ///      distinguish "the request was never submitted" from "the request is submitted and
+    ///      waiting for a batch" — which before this task were the same on-chain state.
+    function withdrawQueueLength() public view virtual returns (uint256) {
+        return _withdrawQueue.length;
+    }
+
     // ----------------------------------------------------------------------------- internals
 
     /// @dev Task 5, item 7 (C1). The venue's `validateAndGetAccountIndexFromAddress`, modelled: an
@@ -905,7 +1313,15 @@ abstract contract LighterCore is ILighter {
     ///      Only the account-scoped operations (`withdraw`, `createOrder`, `cancelAllOrders`) are
     ///      bound.
     function _requireCallerOwnsAccount(uint48 accountIndex) internal view {
-        if (accountIndex != addressToAccountIndex[msg.sender]) revert LighterCore_AccountNotCaller();
+        // TASK 6b. Reads the PUBLISHED index, so an address whose registering deposit has not been
+        // settled yet owns no account and can act on none. Deliberately still
+        // `LighterCore_AccountNotCaller` rather than `AccountIsNotRegistered` for a caller with no
+        // published index: the two are distinct venue refusals — "you are not registered" is about
+        // the ACCOUNT NAMED IN CALLDATA (the `accountIndex == 0` check in each entry point, which
+        // is the one `CertVault` reaches, because `lighterAccountIndex()` forwards the 0), while
+        // this one is about the CALLER not owning the account it named. `test/sim/DrainPoC.t.sol`
+        // pins the unregistered-stranger case on this exact selector.
+        if (accountIndex != addressToAccountIndex(msg.sender)) revert LighterCore_AccountNotCaller();
     }
 
     /// @dev The queue-compaction half of `cancelAllOrders`, with NO authorisation of its own.
@@ -1122,11 +1538,22 @@ abstract contract LighterCore is ILighter {
         _markets.push(m);
     }
 
-    /// @dev Hook called by `withdraw()` once the pending credit has been booked. A NO-OP here, and
-    ///      that is the conservative default: on the real venue the tokens backing a gain-drawing
-    ///      withdrawal are the losing counterparty's collateral, so a simulator that cannot
-    ///      produce them must fail rather than conjure them. `MockLighter` overrides this to mint
-    ///      the shortfall, which is a *test* convenience — see the override's comment. Keeping it
-    ///      off this base is what stops `LighterSim` from being easier than mainnet.
-    function _fundPending() internal virtual {}
+    /// @dev Hook asking the front end to make this contract's token balance at least `required`.
+    ///      A NO-OP here, and that is the conservative default: on the real venue the tokens
+    ///      backing a gain-drawing withdrawal are the losing counterparty's collateral, so a
+    ///      simulator that cannot produce them must fail rather than conjure them. `MockLighter`
+    ///      overrides this to mint the shortfall, which is a *test* convenience — see the
+    ///      override's comment. Keeping it off this base is what stops `LighterSim` from being
+    ///      easier than mainnet.
+    ///
+    /// @dev TASK 6a CHANGED THE SIGNATURE AND THE CALL SITE, and both changes are the fix for
+    ///      finding I2. It used to take no argument, read `_pendingTotal` itself, and be called
+    ///      AFTER `_pendingTotal` had already been incremented and the margin already debited — so
+    ///      a failure to produce the tokens was unobservable at the decision point and surfaced
+    ///      only when `withdrawPendingBalance` later reverted on the transfer, against books that
+    ///      had already moved. It is now called BEFORE anything is written, with the balance the
+    ///      caller is about to need, and `_executeWithdrawal` refuses the whole request if the
+    ///      balance is still short. Passing `required` rather than letting the hook read a
+    ///      half-updated `_pendingTotal` is what makes that ordering expressible at all.
+    function _fundPending(uint256 required) internal virtual {}
 }
