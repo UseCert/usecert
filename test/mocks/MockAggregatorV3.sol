@@ -40,11 +40,6 @@ contract MockAggregatorV3 is IAggregatorV3 {
         updatedAt = t;
     }
 
-    /// @dev Direct control for tests that need a specific round id (e.g. the equality edge).
-    function setRoundId(uint80 r) external {
-        roundId = r;
-    }
-
     function setShouldRevert(bool r) external {
         shouldRevert = r;
     }

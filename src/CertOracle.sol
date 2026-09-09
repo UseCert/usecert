@@ -23,8 +23,12 @@ contract CertOracle is ICertOracle {
     ///      not spoken again". Sharing one error would make a dead feed look like a young one.
     error CertOracle_ReferenceRoundNotAdvanced();
     /// @dev Task 1: a constructor parameter outside its permitted range. Currently only
-    ///      `pokeConfirmationSeconds == 0`, which would let an arm and its confirmation land in
-    ///      the same block — exactly the atomic poke sequence H-1 exists to prevent.
+    ///      `pokeConfirmationSeconds == 0`, at which the `roundId` proof is the only remaining
+    ///      gate — and that proof bounds round DISTINCTNESS, not RATE. Zero does NOT let an arm
+    ///      and its confirmation land in the same block (that is refused at every window value);
+    ///      it degrades the rate limit to one clamped step per block that carries a new feed
+    ///      round, which is a rate limit in name only. The measured behaviour is on the
+    ///      constructor's check.
     error CertOracle_ConfigOutOfBounds();
     /// @dev M-5: only the rotation authority bound at deploy may propose a new attester.
     error CertOracle_OnlyGovernance();
@@ -126,12 +130,25 @@ contract CertOracle is ICertOracle {
         // _readFeed below would revert on it and take the whole deployment down anyway, but with an
         // anonymous low-level failure rather than a named error.
         if (_feed == address(0) || _attester == address(0)) revert CertOracle_ZeroAddress();
-        // Task 1: a zero confirmation window leaves the roundId proof as the ONLY gate, and that
-        // proof bounds distinctness, not RATE. With the window at zero, every fresh round the
-        // feed publishes buys another clamped step, so a feed reporting more than once in a block
-        // (or a poke sequence riding several rounds inside one transaction) walks the reference at
-        // whatever speed the feed happens to run at — which is exactly the atomic reference reset
-        // H-1 fixed. Refuse it at deploy time rather than discover it live.
+        // Task 1: a zero confirmation window leaves the `roundId` proof as the ONLY gate, and that
+        // proof bounds round DISTINCTNESS, not RATE.
+        //
+        // What zero does NOT do, measured with this guard lifted (fix round 1 review, and two
+        // earlier write-ups of this check got it wrong in the same direction): it does not permit
+        // an atomic walk. An arm plus a same-block poke carrying a brand-new round reverts
+        // CertOracle_ReferenceRateLimited, because arming writes `pendingSince = block.timestamp`
+        // and the strict `0 > 0` is false. Ten further fresh rounds inside that same block all
+        // revert identically and the reference does not move. A second confirmation in the block
+        // of a SUCCESSFUL one reverts the same way, because the confirm path re-arms `pendingSince`
+        // to the current block time. So H-1's atomic reference reset stays shut even at zero.
+        //
+        // What zero DOES do is degrade the rate limit to ONE clamped `deviationBps` step per block
+        // that carries a new feed round. Not atomic — but on a fast chain that is roughly 5% of
+        // the reference per block: a 20% dislocation was absorbed in four blocks end to end
+        // (100 -> 105 -> 110.25 -> 115.7625 -> 120, at deviationBps = 500). A rate limit that
+        // concedes a full clamped step every block is a rate limit in name only, and that is the
+        // real and sufficient reason to refuse zero. Refuse it at deploy time rather than discover
+        // it live.
         if (_pokeConfirmationSeconds == 0) revert CertOracle_ConfigOutOfBounds();
         feed = IAggregatorV3(_feed);
         attester = _attester;
@@ -418,8 +435,26 @@ contract CertOracle is ICertOracle {
     ///      Note what did NOT get weaker. Removing the timestamp inequality removed an inference,
     ///      not a check: distinctness is still required, now directly, and the rate limit is still
     ///      required, now on its own axis. A poke sequence inside one transaction still cannot
-    ///      confirm anything — `block.timestamp - pendingSince` is 0 for every call after the
-    ///      arming one, which is why `pokeConfirmationSeconds == 0` is refused at construction.
+    ///      confirm anything — both arming sites below write `pendingSince = block.timestamp`, so
+    ///      `block.timestamp - pendingSince` is 0 for every same-block follow-up and the strict
+    ///      `>` refuses it.
+    ///
+    ///      That same-block refusal holds at EVERY window value, zero included (measured both
+    ///      ways), so it is not what makes zero unsafe and it is NOT the reason
+    ///      `pokeConfirmationSeconds == 0` is refused at construction. Zero is refused because it
+    ///      leaves the `roundId` proof as the only gate, which degrades the rate limit to one
+    ///      clamped step per block that carries a new feed round — see the constructor for the
+    ///      measured numbers.
+    ///
+    ///      What the breaker now DEPENDS ON, and cannot check for itself: the feed's `roundId`
+    ///      being strictly non-decreasing for the life of the deployment. A Chainlink proxy
+    ///      guarantees it (the phase id occupies the high 16 bits of the uint80, so an aggregator
+    ///      rotation raises `roundId` rather than resetting it); an underlying aggregator read
+    ///      directly, or any feed whose numbering resets or is constant, does not, and then an
+    ///      armed candidate can never be confirmed. That fails CLOSED — minting stays paused,
+    ///      redemption is untouched via pxUnguarded(), and the in-band path below still refreshes
+    ///      the reference when price returns within deviationBps — but it is a pre-deploy gate,
+    ///      recorded as one in docs/DEPLOYMENT-CHECKLIST.md §2.
     ///
     ///      Not touched: pxUnguarded() (Law 2's never-reverts guarantee lives there and this
     ///      function is not on its path) and mintAllowed()'s own arithmetic. The breaker is
