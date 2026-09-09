@@ -324,8 +324,23 @@ contract CertVault {
     ///      one specific holder has on it — and recallMargin()'s two-phase contract ("submission
     ///      is not arrival", proven by test_recallMarginSubmitsAndSweeps) is about that claim.
     ///      This counter is margin nobody has a claim on at all: the exit that freed it was paid
-    ///      in full, in the same transaction, out of the float. So it needs no two-phase
-    ///      distinction, and recallMargin() may request AND collect it in one call.
+    ///      in full, in the same transaction, out of the float. So it needs no two-phase COUNTER —
+    ///      nothing has to be kept alive across calls to remember whose money it is — and
+    ///      recallMargin() therefore requests AND sweeps it in the same call.
+    ///
+    ///      CORRECTED 2026-09-09: that same-call sweep does NOT mean the cash comes home in one
+    ///      call, and this comment used to say it did. The venue credits nothing in the
+    ///      transaction that calls withdraw() — AdditionalZkLighter.withdraw performs no balance
+    ///      check and only enqueues a priority request — so the sweep that runs immediately after
+    ///      the request finds a pending balance of zero. It takes two permissionless calls with a
+    ///      keeper batch between them: one to request, one to collect. The old simulator credited
+    ///      synchronously, which is the only reason the one-call reading ever appeared to hold; it
+    ///      could never have held on mainnet. Design Law 2 is untouched — the margin is still
+    ///      recallable by ANYONE, with no certificate, no receipt and no operator — and this is
+    ///      exactly the two-call shape the C1 audit already established for the receipt path. See
+    ///      test_marginExcessIsStillRecallableWithoutAReceiptAcrossABatch in
+    ///      test/sim/AsyncVenue.t.sol, which pins both halves: the one-call attempt moves nothing,
+    ///      and the two-call sequence brings it home.
     ///
     ///      Increased in redeemInstant, as a TRANSFER out of postedMargin (so the counter sum
     ///      invariant_marginNeverExceedsDeposited checks is unchanged by the move); decreased only
@@ -1325,15 +1340,38 @@ contract CertVault {
         // redemption. It is a separate step from the request above, not folded into `want`, for
         // two reasons.
         //
-        // First, it is allowed to COLLECT in the same call. The two-phase shape above —
-        // recallMargin() submits, a later recallMargin() sweeps — exists because margin behind an
-        // open position is locked by the venue's initial margin requirement, so a request cannot
-        // be assumed to have been honoured and marginPendingRecall must survive until
-        // getPendingBalance proves cash arrived (Task 8d). marginExcess has no such claim behind
-        // it: the exit that freed it was already paid, in full, out of the float. So sweeping
-        // straight after the request is not a shortcut here, it is the correct shape — and it is
-        // what makes the freed margin reachable in ONE permissionless call by an address holding
-        // no certificates and no receipt, which is what M-4 is about.
+        // First, it is allowed to COLLECT in the same call. The two-phase COUNTER above —
+        // recallMargin() submits, a later recallMargin() sweeps and only then reduces
+        // marginPendingRecall — exists because margin behind an open position is locked by the
+        // venue's initial margin requirement, so a request cannot be assumed to have been
+        // honoured and the counter must survive until getPendingBalance proves cash arrived
+        // (Task 8d). marginExcess has no such claim behind it: the exit that freed it was already
+        // paid, in full, out of the float. So sweeping straight after the request is not a
+        // shortcut here, it is the correct shape — there is nothing to keep alive.
+        //
+        // CORRECTED 2026-09-09 — READ THIS BEFORE TRUSTING THE OLD CLAIM. This comment used to
+        // conclude that the freed margin is therefore "reachable in ONE permissionless call". It
+        // is not, and it never was on a faithful venue. ZkLighter.withdraw performs no balance
+        // check and credits nothing in the calling transaction; it enqueues a priority request
+        // that the rollup executes later. So the _sweepPending() below runs against a pending
+        // balance that is still zero, and the cash arrives on the NEXT permissionless
+        // recallMargin() after a keeper batch. The old simulator credited inside withdraw(),
+        // which is the only reason the one-call reading ever appeared to hold — the simulator was
+        // hiding it, and Task 6 removed the hiding place (see
+        // .superpowers/sdd/2026-09-09-usecert-testnet-execution/task-6-report.md §6).
+        //
+        // WHAT M-4 IS ABOUT IS UNCHANGED, and that is the important half. Before M-4 this margin
+        // was reachable by NOBODY until someone queued an exit; it is now reachable by ANYONE
+        // holding no certificates and no receipt, with no owner and no keeper privilege. That is
+        // the Law 2 property, and it holds. It costs two permissionless calls and one batch — the
+        // same shape the C1 audit already established for the receipt path, and both the wait and
+        // the calls are available to any address. Pinned by
+        // test_marginExcessIsStillRecallableWithoutAReceiptAcrossABatch in
+        // test/sim/AsyncVenue.t.sol. NOTE for anyone reading a red suite: the frozen auditor test
+        // test_A5_recallMarginCannotRefillTheBufferAfterInstantRedeems in test/AuditPoC.t.sol
+        // asserts the single-call property and therefore FAILS — correctly, and by design. It is
+        // the auditor's file; it is not ours to re-point, and its failure is this comment's
+        // former claim, not a broken contract.
         //
         // Second, keeping it out of `want` keeps this addition inert for every state that does
         // not have instantly-redeemed margin sitting at the venue: marginExcess is zero unless
