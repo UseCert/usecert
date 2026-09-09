@@ -13,8 +13,16 @@ are the external auditor's PoC files, unsatisfiable as written — see below).
 
 These bind every task. A violation is a review failure regardless of what the task text says.
 
-1. **`pragma solidity 0.8.24;` exactly.** Custom errors only, never `require` strings. Do not modify
-   `foundry.toml` — in particular never set `via_ir` and never relax the optimizer or size checks.
+1. **`pragma solidity 0.8.24;` exactly.** Custom errors only, never `require` strings —
+   **this binds deployable contracts under `src/`; `require` with a message is correct in a
+   `script/` file**, where the string is an operator-facing abort reason and there is no bytecode
+   cost that matters.
+   **`foundry.toml`:** never change anything that affects compilation or codegen — never set
+   `via_ir`, never relax the optimizer, `optimizer_runs`, or the size checks, and never enable
+   `ffi`. A narrowly scoped `fs_permissions` grant needed by a deployment script to write its
+   address book is permitted, because it changes no compiled output; say so in your report.
+   (Clarified after Task 10: the original flat prohibition would have blocked `vm.writeFile`, which
+   is how the address book is produced at all.)
 2. **`test/AuditPoC.t.sol` and `test/AttackSuite.t.sol` are FROZEN external audit evidence.** Do not
    edit them, for any reason. They currently contribute exactly 2 failures
    (`test_A1_capacityCapIsPerCallNotCumulative`, `test_A3_pokeLastGoodDefeatsTheDeviationBreaker`),
