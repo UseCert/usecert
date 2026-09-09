@@ -7,9 +7,11 @@ import {
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { AnimatePresence } from "framer-motion";
+import { WagmiProvider } from "wagmi";
 
+import { getWagmiConfig } from "@/chain/config";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import Layout from "@/components/Layout";
@@ -145,6 +147,10 @@ function RootComponent() {
   const [exiting, setExiting] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
+  // Built here rather than at module scope: `createConfig` runs connector and storage
+  // setup, and this app is server-rendered. See src/chain/config.ts.
+  const wagmiConfig = useMemo(() => getWagmiConfig(), []);
+
   useEffect(() => {
     const a = window.setTimeout(() => setExiting(true), 1700);
     const b = window.setTimeout(() => setLoaded(true), 2600);
@@ -155,14 +161,19 @@ function RootComponent() {
   }, []);
 
   return (
-    <QueryClientProvider client={queryClient}>
-      <AnimatePresence>
-        {!loaded && <Preloader key="preloader" exiting={exiting} />}
-      </AnimatePresence>
-      <FilmGrain />
-      <ScrollToTop />
-      {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-      <Outlet />
-    </QueryClientProvider>
+    // WagmiProvider wraps QueryClientProvider: wagmi's hooks are react-query mutations
+    // and queries, so the query client must be inside. The existing QueryClientProvider
+    // is reused as-is — there is only ever one.
+    <WagmiProvider config={wagmiConfig}>
+      <QueryClientProvider client={queryClient}>
+        <AnimatePresence>
+          {!loaded && <Preloader key="preloader" exiting={exiting} />}
+        </AnimatePresence>
+        <FilmGrain />
+        <ScrollToTop />
+        {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+        <Outlet />
+      </QueryClientProvider>
+    </WagmiProvider>
   );
 }
