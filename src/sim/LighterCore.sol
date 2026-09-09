@@ -59,6 +59,26 @@ abstract contract LighterCore is ILighter {
     ///      `MockLighter` inherits this deliberately. The suite must run against the venue's real
     ///      authorisation model, not a looser one.
     error LighterCore_AccountNotCaller();
+    /// @dev Fix round 1, Critical 1. `deposit` was callable with `amount == 0`.
+    ///
+    ///      OpenZeppelin's `transferFrom` permits a zero-value transfer with NO allowance and NO
+    ///      balance, so `deposit(self, _, _, 0)` cost nothing, needed nothing, and still ran the
+    ///      registration branch below — which handed the caller an account index and therefore
+    ///      SATISFIED `_requireCallerOwnsAccount`. `withdraw`'s ceiling is the global `equity()`,
+    ///      so a self-registered address with no collateral then took every depositor's balance in
+    ///      three transactions: the same end state as the pre-Task-5 drain, one transaction later.
+    ///      Task 5's caller binding only ever caught the *unregistered* attacker.
+    ///
+    ///      A zero-value deposit that registers an account is not venue behaviour worth modelling,
+    ///      and it is the specific mechanism that made registration free, so it is refused here on
+    ///      the shared core. `MockLighter` inherits the refusal: no test in the suite deposited
+    ///      zero, and neither `CertVault.bootstrap()` (which deposits `10 ** decimals`) nor
+    ///      `CertVault._postMargin()` (which early-returns on a zero share) can reach it.
+    ///
+    ///      This is the narrow half of the fix. The registration allowlist on `LighterSim` is the
+    ///      other half, and per-account collateral isolation — the real fix, which makes a free
+    ///      registration harmless rather than merely unreachable — is Task 7.
+    error LighterCore_ZeroDepositAmount();
 
     IERC20 public immutable collateral;
     uint16 public immutable collateralAssetIndex;
@@ -103,6 +123,9 @@ abstract contract LighterCore is ILighter {
     // ------------------------------------------------------------------------ ILighter surface
 
     function deposit(address to, uint16, uint8, uint256 amount) public payable virtual {
+        // Fix round 1, Critical 1. See LighterCore_ZeroDepositAmount: a zero-value transferFrom
+        // succeeds with no allowance and no balance, so this used to be a FREE registration.
+        if (amount == 0) revert LighterCore_ZeroDepositAmount();
         collateral.transferFrom(msg.sender, address(this), amount);
         marginBalance += amount;
         if (addressToAccountIndex[to] == 0) {
@@ -168,17 +191,7 @@ abstract contract LighterCore is ILighter {
     function cancelAllOrders(uint48 accountIndex) public virtual {
         if (accountIndex == 0) revert AccountIsNotRegistered();
         _requireCallerOwnsAccount(accountIndex);
-
-        uint256 kept;
-        uint256 n = _queue.length;
-        for (uint256 i = 0; i < n; ++i) {
-            if (_queue[i].account == accountIndex) continue;
-            if (kept != i) _queue[kept] = _queue[i];
-            ++kept;
-        }
-        for (uint256 i = n; i > kept; --i) {
-            _queue.pop();
-        }
+        _cancelOrdersOf(accountIndex);
     }
 
     function getPendingBalance(address owner, uint16 assetIndex) public view virtual returns (uint128) {
@@ -284,6 +297,29 @@ abstract contract LighterCore is ILighter {
     ///      bound.
     function _requireCallerOwnsAccount(uint48 accountIndex) internal view {
         if (accountIndex != addressToAccountIndex[msg.sender]) revert LighterCore_AccountNotCaller();
+    }
+
+    /// @dev The queue-compaction half of `cancelAllOrders`, with NO authorisation of its own.
+    ///      Extracted in fix round 1 so `LighterSim`'s owner escape hatch can drop a stuck
+    ///      account's orders without duplicating the compaction — the hatch is ADDITIONAL to the
+    ///      per-account scoping above, never a relaxation of it: every non-owner path still goes
+    ///      through `cancelAllOrders`, which still binds the caller.
+    ///
+    ///      Compaction in place, not `delete`: `settleBatch` fills in queue order, so removing one
+    ///      account's orders must not reshuffle another account's priority.
+    /// @return cancelled How many orders were removed.
+    function _cancelOrdersOf(uint48 accountIndex) internal returns (uint256 cancelled) {
+        uint256 kept;
+        uint256 n = _queue.length;
+        for (uint256 i = 0; i < n; ++i) {
+            if (_queue[i].account == accountIndex) continue;
+            if (kept != i) _queue[kept] = _queue[i];
+            ++kept;
+        }
+        for (uint256 i = n; i > kept; --i) {
+            _queue.pop();
+        }
+        return n - kept;
     }
 
     /// @dev Book-keeps entryPrice across one fill, realising PnL on whatever the fill closes.

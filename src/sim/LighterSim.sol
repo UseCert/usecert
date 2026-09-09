@@ -43,10 +43,16 @@ contract LighterSim is LighterCore {
     /// @dev A zero owner would leave the mark price permanently unset. That is fail-CLOSED given
     ///      the guard below, but it is still a bricked deployment, so reject it loudly.
     error LighterSim_OwnerIsZero();
+    /// @dev `deposit(to, ...)` named an address the owner has not approved for registration. See
+    ///      `depositorAllowed`.
+    error LighterSim_DepositorNotAllowed(address to);
 
     event RequiredMarginBpsSet(uint256 previous, uint256 current);
     event MarkPriceSet(uint16 indexed marketIndex, uint256 previous, uint256 current);
     event DepositCapTicksSet(uint256 previous, uint256 current);
+    event DepositorAllowedSet(address indexed depositor, bool allowed);
+    /// @dev Emitted by the queue escape hatch. `accountIndex == 0` means the whole queue was purged.
+    event OperatorCancelledOrders(uint48 indexed accountIndex, uint256 cancelled);
 
     /// @notice The initial-margin fraction floor, in bps of the resulting notional.
     ///
@@ -68,6 +74,44 @@ contract LighterSim is LighterCore {
     ///         transferable owner is one more thing that can go wrong on a disposable testnet
     ///         artefact. Redeploy instead.
     address public immutable owner;
+
+    /// @notice Addresses the owner has approved to hold an account on this simulator.
+    ///
+    /// @dev FIX ROUND 1, CRITICAL 1 — and it is NOT VENUE-FAITHFUL. The real venue registers
+    ///      anyone who deposits; this one registers only what the operator approves.
+    ///
+    ///      Why it is here anyway. Task 5 bound every account-scoped call to its caller, which
+    ///      closed the drain for an *unregistered* attacker. It did not close it for one who
+    ///      registers first, and registering was free: `deposit(self, _, _, 0)` is a zero-value
+    ///      `transferFrom`, which OpenZeppelin permits with no allowance and no balance, so the
+    ///      caller got an index and `_requireCallerOwnsAccount` was then satisfied. `withdraw`'s
+    ///      ceiling is `equity()`, which is GLOBAL — `marginBalance` and `positionBase` are not
+    ///      per-account — so a self-registered address with zero collateral could take every
+    ///      depositor's balance. Reproduced against this artefact before this mapping existed; see
+    ///      `test/sim/DrainPoC.t.sol`.
+    ///
+    ///      Why this direction is permitted. Global Constraint 5 forbids a simulator that is EASIER
+    ///      than mainnet; this one is HARDER — it refuses registrations the venue would accept, and
+    ///      refuses nothing the venue refuses. A vault certified against this contract is certified
+    ///      against a strictly more restrictive counterparty than the one it will meet, so no
+    ///      approval it earns here is one the venue would withhold. That is the direction Global
+    ///      Constraint 5 explicitly allows.
+    ///
+    ///      What it actually buys. On the single-vault testnet deployment Task 9 performs, the
+    ///      approved set is `{vault}`. That reduces the account set to one, which closes Critical 1
+    ///      (no attacker account can exist to name) AND Critical 2's entry condition (no attacker
+    ///      account can queue the poison order) at once.
+    ///
+    ///      SIMULATOR-ONLY, AND INTERIM. This restriction has no counterpart on the real venue and
+    ///      must never be read as modelling one. Task 7 supersedes it with per-account collateral
+    ///      isolation, which makes an open registration harmless rather than merely impossible —
+    ///      at which point this mapping should be deleted, not kept as defence in depth, because
+    ///      keeping it would leave the simulator permanently diverged from the venue on who may
+    ///      hold an account.
+    ///
+    ///      Deliberately on `LighterSim` and NOT on `LighterCore`: `MockLighter` must stay
+    ///      unrestricted so the existing suite runs against the venue's real registration model.
+    mapping(address => bool) public depositorAllowed;
 
     /// @param _requiredMarginBps The initial-margin fraction to run with. Must be >=
     ///        `VENUE_IMF_BPS`; pass `VENUE_IMF_BPS` to match the live venue exactly.
@@ -107,6 +151,73 @@ contract LighterSim is LighterCore {
         uint256 previous = depositCapTicks;
         depositCapTicks = cap;
         emit DepositCapTicksSet(previous, cap);
+    }
+
+    /// @notice Approve, or revoke, an address's permission to hold an account on this simulator.
+    /// @dev See `depositorAllowed` for why a registration allowlist exists on a contract that
+    ///      stands in for a venue which registers anyone, and why Task 7 removes it.
+    ///
+    ///      Revoking does NOT unregister an already-registered address: `addressToAccountIndex` is
+    ///      on the core and is the venue's own state. Revocation only stops further deposits to
+    ///      that address. The escape hatch below is what deals with an account that already exists
+    ///      and is misbehaving.
+    function setDepositorAllowed(address depositor, bool allowed) external onlyOwner {
+        depositorAllowed[depositor] = allowed;
+        emit DepositorAllowedSet(depositor, allowed);
+    }
+
+    // -------------------------------------------------------------- gated registration
+
+    /// @notice Post collateral as margin for `to`, registering `to` if it is not registered yet.
+    /// @dev Fix round 1, Critical 1. `to` must be owner-approved. The amount check that made
+    ///      registration free rather than merely open lives on `LighterCore` alongside the rest of
+    ///      the venue mechanics; this override adds only the allowlist, which is simulator-only.
+    function deposit(address to, uint16 assetIndex, uint8 routeType, uint256 amount)
+        public
+        payable
+        virtual
+        override
+    {
+        if (!depositorAllowed[to]) revert LighterSim_DepositorNotAllowed(to);
+        super.deposit(to, assetIndex, routeType, amount);
+    }
+
+    // ------------------------------------------------------------- stuck-queue escape hatch
+
+    /// @notice Drop every queued order belonging to `accountIndex`, as the operator.
+    ///
+    /// @dev FIX ROUND 1, CRITICAL 2 — a liveness escape hatch, and an INTERIM one.
+    ///
+    ///      `settleBatch` refuses a batch as a WHOLE: on `InsufficientMargin` in
+    ///      `LighterCore.settleBatch`, and on the `LighterSim_MarkPriceUnset` pre-pass above. One
+    ///      unsettleable order therefore blocks every other account's fills, and Task 5's
+    ///      per-account `cancelAllOrders` binding means only that order's own account can withdraw
+    ///      it. An account with zero collateral queueing one oversized market order made settlement
+    ///      revert for everyone — including the vault and the owner — permanently, with no operator
+    ///      path to clear it and no way back short of redeploying. `requiredMarginBps` can only be
+    ///      raised, so it is no help either. Reproduced in `test/sim/DrainPoC.t.sol` before this
+    ///      function existed; Task 9's `BatchAdvancer` would have reverted forever.
+    ///
+    ///      This is ADDITIONAL, not a relaxation: `cancelAllOrders` keeps its per-account scoping
+    ///      for every non-owner caller, and this path is reachable only by `owner`. It also has no
+    ///      counterpart on the real venue, so — like the allowlist — it errs in the direction of a
+    ///      more privileged, more restrictive counterparty rather than a more permissive one.
+    ///
+    ///      TASK 7 OWNS THE STRUCTURAL FIX: `settleBatch` rejecting an individual order and
+    ///      continuing rather than reverting wholesale, at which point a stuck queue cannot form
+    ///      and this hatch should go.
+    function ownerCancelAccountOrders(uint48 accountIndex) external onlyOwner {
+        emit OperatorCancelledOrders(accountIndex, _cancelOrdersOf(accountIndex));
+    }
+
+    /// @notice Drop the entire queue, as the operator. The blunt instrument, for a queue that is
+    ///         stuck for a reason the operator cannot attribute to one account.
+    /// @dev Same rationale as `ownerCancelAccountOrders`. Emitted with `accountIndex == 0`, which
+    ///      is never a real account index, so a log reader can tell a purge from a scoped drop.
+    function ownerPurgeQueue() external onlyOwner {
+        uint256 cancelled = _queue.length;
+        delete _queue;
+        emit OperatorCancelledOrders(0, cancelled);
     }
 
     // ---------------------------------------------------------------------- fail-closed settle
