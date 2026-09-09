@@ -11,6 +11,8 @@ import {SolvencyRegistry} from "../src/SolvencyRegistry.sol";
 import {CapacityOracle} from "../src/CapacityOracle.sol";
 import {LighterSim} from "../src/sim/LighterSim.sol";
 import {ReplayAggregator} from "../src/sim/ReplayAggregator.sol";
+import {TestUSDG} from "../src/sim/TestUSDG.sol";
+import {TestFaucet} from "../src/sim/TestFaucet.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "openzeppelin-contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
@@ -53,42 +55,48 @@ import {IERC20Metadata} from "openzeppelin-contracts/token/ERC20/extensions/IERC
 ///         No key is ever hardcoded, logged, or derived from a mnemonic here. The operator sets the
 ///         three env vars. Only the derived ADDRESSES are logged.
 ///
-/// @dev    USAGE
+/// @dev    USAGE — SELF-CONTAINED. No collateral or faucet address is read from the environment;
+///         this script deploys both itself, from the deployer, inside `_phase1_simulators()`.
 ///
-///           export DEPLOYER_PK=0x...  GOV_PK=0x...  ATTESTER_PK=0x...
-///           export COLLATERAL=0x...            # 6-decimal test collateral (see the blocker below)
-///           export TEST_FAUCET=0x...           # optional, recorded in the address book only
+///           export DEPLOYER_PK=0x...  GOV_PK=0x...  ATTESTER_PK=0x...  BATCH_KEEPER=0x...
 ///           forge script script/DeployTestnet.s.sol \
 ///             --rpc-url robinhood_testnet --broadcast --slow
 ///
 ///         `--slow` matters: the run spans three senders and later transactions depend on earlier
 ///         ones having landed.
 ///
-/// @dev    BLOCKER — THE COLLATERAL TOKEN AND THE FAUCET ARE NOT IN THIS TREE.
+/// @dev    THE COLLATERAL TOKEN AND THE FAUCET, AND WHY THEY ARE DEPLOYED RATHER THAN INJECTED.
 ///
-///         `docs/superpowers/plans/2026-09-09-usecert-testnet-execution.md` Task 8 owns
-///         `src/sim/TestFaucet.sol` and the deployable test collateral, and neither has landed:
-///         `src/sim/` holds only `LighterCore.sol`, `LighterSim.sol` and `ReplayAggregator.sol`.
-///         This script therefore takes the collateral as an ALREADY-DEPLOYED address from
-///         `COLLATERAL` rather than inventing a token, and asserts its decimals are 6.
+///         `src/sim/TestUSDG.sol` (Task 8) is the deployable 6-decimal stand-in for `USDG`, and
+///         `src/sim/TestFaucet.sol` hands it out to testers. `_phase1_simulators()` deploys both
+///         from the deployer — who becomes `TestUSDG.owner` — mints the deployer's own seed
+///         collateral and the faucet's opening float (both owner-gated `mint` calls), and the
+///         faucet is constructed pointed at the token this same run just deployed. Nothing here is
+///         read from `COLLATERAL` or `TEST_FAUCET`; there is no way to point this script at a
+///         collateral token it did not itself deploy, and therefore no way for the decimals check
+///         below to be checking someone else's token.
 ///
 ///         Six decimals is not a detail. `USDG` on the real chain has 6, and `CertVault` reads
 ///         `IERC20Metadata(collateral).decimals()` exactly ONCE at construction and stores it as an
 ///         immutable. Deploy against an 18-decimal token by mistake and `_to18`/`_from18` are wrong
 ///         in both directions forever — every published figure off by 10**12 — with no setter to
-///         repair it. Hence the hard check rather than a comment.
+///         repair it. `TestUSDG.decimals()` is a `pure` override returning the literal 6, so there
+///         is no deployment of it with any other value; the `require` below is defence in depth,
+///         kept alive by `test_scriptRevertsOnWrongCollateralDecimals` substituting a differently-
+///         shaped token through the `_deployCollateral()` seam rather than by trusting the literal.
 ///
-///         WHEN TASK 8 LANDS: deploy `TestCollateral` and `TestFaucet` from the deployer inside
-///         `_phase1_simulators()` where the marker comment says so, and drop the `COLLATERAL`
-///         requirement. Until then the operator deploys the token out of band.
+///         A MAINNET DEPLOYMENT MUST NOT REUSE THIS. `TestUSDG` and `TestFaucet` are disposable
+///         testnet scaffolding — `TestUSDG.owner` can mint an unbounded supply of the very asset
+///         a vault's solvency is denominated in. A mainnet deployment script takes the REAL `USDG`
+///         address as an injected, already-deployed address (the same `COLLATERAL`-env shape this
+///         script used before Task 8 landed) and never deploys collateral itself. See
+///         `docs/DEPLOYMENT-CHECKLIST.md` §1.
 contract DeployTestnet is Script {
     // ---------------------------------------------------------------------------------- errors
 
     /// @dev Guarded so the script cannot be pointed at mainnet by accident. A named error rather
     ///      than a `require` string because this is the one condition a test asserts by selector.
     error DeployTestnet_WrongChain(uint256 actual, uint256 expected);
-    /// @dev Task 8's artefact is missing; see the contract NatSpec.
-    error DeployTestnet_MissingCollateral();
     /// @dev Task 7 gated `LighterSim.settleBatch` to `owner` or `keeper`; an unregistered keeper
     ///      leaves no address on file for the bot that has to call it after deployment, and
     ///      `settleBatch` would revert `LighterSim_OnlyOwnerOrKeeper` for it the first time it did.
@@ -253,6 +261,19 @@ contract DeployTestnet is Script {
     ///      an immutable. See the contract NatSpec.
     uint8 internal constant COLLATERAL_DECIMALS = 6;
 
+    /// @dev `TestFaucet`'s per-claim drip and per-address cooldown. Matches the convention in
+    ///      `test/sim/TestCollateralAndFaucet.t.sol`: enough tUSDG for a meaningful mint, on a
+    ///      cooldown long enough that the float stretches across many testers rather than one
+    ///      address draining it in a loop.
+    uint256 internal constant FAUCET_DRIP = 10_000e6;
+    uint256 internal constant FAUCET_INTERVAL = 1 days;
+
+    /// @dev The faucet's opening float, minted by the deployer at deploy time (the deployer is
+    ///      `TestUSDG.owner`). 100 drips' worth so testers do not run it dry on day one.
+    ///      `TestFaucet` has deliberately no privileged refill path (see its NatSpec) — topping it
+    ///      up later is a plain ERC-20 `transfer` in, done by whoever holds `owner` on the token.
+    uint256 internal constant FAUCET_OPENING_FLOAT = 100 * FAUCET_DRIP;
+
     // ------------------------------------------------------------------------------ the assets
 
     /// @dev Per-mirror parameters. `docs/TESTNET-PLAN.md` §6 is the playbook: shared across all
@@ -375,10 +396,14 @@ contract DeployTestnet is Script {
         return (vm.envUint("DEPLOYER_PK"), vm.envUint("GOV_PK"), vm.envUint("ATTESTER_PK"));
     }
 
-    /// @dev The 6-decimal test collateral. Injected because Task 8 owns the deployable token; see
-    ///      the contract NatSpec's blocker note.
-    function _collateralAddress() internal view virtual returns (address) {
-        return vm.envOr("COLLATERAL", address(0));
+    /// @dev Deploys the 6-decimal test collateral, from the deployer, who becomes `TestUSDG.owner`.
+    ///      Behind a `virtual` seam for the same reason as the others here — a test that wants to
+    ///      exercise the decimals guard in `_phase1_simulators()` overrides this to return a
+    ///      differently-shaped token, BY SUBCLASSING, rather than there being an env var that could
+    ///      point a real deployment at an untrusted token. Production behaviour is unchanged: this
+    ///      is the only implementation that ever runs outside a test.
+    function _deployCollateral() internal virtual returns (address) {
+        return address(new TestUSDG(deployerAddr));
     }
 
     /// @dev The address Task 12's `BatchAdvancer` keeper signs with. Injected for the same reason as
@@ -408,11 +433,6 @@ contract DeployTestnet is Script {
         require(govAddr != attesterAddr, "SENDERS: governance == attester");
 
         _loadAssets();
-
-        // See the contract NatSpec: Task 8 owns the deployable token, so it is injected.
-        collateral = _collateralAddress();
-        if (collateral == address(0)) revert DeployTestnet_MissingCollateral();
-        testFaucet = vm.envOr("TEST_FAUCET", address(0));
 
         // Task 7 gated `LighterSim.settleBatch` to `owner` or `keeper`. Registered in phase 5, by
         // the deployer (who is also the simulator's owner); loaded and validated here so a missing
@@ -507,16 +527,28 @@ contract DeployTestnet is Script {
     ///      absent (six known mainnet proxies return `0x`), both verified live 2026-09-09. So the
     ///      deployment brings its own venue and its own aggregator.
     function _phase1_simulators() internal virtual {
-        // TASK 8 INTEGRATION POINT. When `src/sim/TestFaucet.sol` and the deployable 6-decimal
-        // test collateral land, deploy them HERE and delete the `COLLATERAL` env requirement in
-        // `run()`:
-        //     collateral = address(new TestCollateral("Test USDG", "tUSDG", 6));
-        //     testFaucet = address(new TestFaucet(IERC20(collateral), ...));
-        // Until then both are injected, and only the token is required.
+        // TASK 8 INTEGRATION POINT, DELIVERED. `src/sim/TestUSDG.sol` and `src/sim/TestFaucet.sol`
+        // are deployed HERE, from the deployer, who becomes both `TestUSDG.owner` and the address
+        // that funds itself and the faucet. No env var is required or read for either.
+        collateral = _deployCollateral();
         require(
             IERC20Metadata(collateral).decimals() == COLLATERAL_DECIMALS,
             "COLLATERAL: decimals() != 6 - CertVault fixes this immutably at construction"
         );
+
+        testFaucet = address(new TestFaucet(IERC20(collateral), FAUCET_DRIP, FAUCET_INTERVAL));
+
+        // With the token injected out of band an operator funded the deployer by hand before
+        // running this script. That stops being true now that the script owns the token: without
+        // these two mints, phase 5's `seedBuffer` calls revert on an ERC-20 balance the deployer
+        // never received, and nothing explains why. `TestUSDG.mint` is owner-gated and the
+        // deployer IS `TestUSDG.owner` (see `_deployCollateral`), so both calls are self-funding.
+        //
+        //   - the deployer's seed collateral: `SEED_COLLATERAL` is spent once per vault in phase 5
+        //     (`seedBuffer` then `bootstrap`), so the deployer needs `assets.length` copies of it.
+        //   - the faucet's opening float, so testers can `claim()` from block one.
+        TestUSDG(collateral).mint(deployerAddr, SEED_COLLATERAL * assets.length);
+        TestUSDG(collateral).mint(testFaucet, FAUCET_OPENING_FLOAT);
 
         // The venue. `_owner` is the deployer, standing in for the venue operator: the allowlist,
         // the mark prices and the stuck-queue hatches are all `onlyOwner`. `settleBatch()` is gated
@@ -786,6 +818,14 @@ contract DeployTestnet is Script {
 
         // ---- §1: the collateral decimals, immutably baked into every vault
         require(IERC20Metadata(collateral).decimals() == COLLATERAL_DECIMALS, "S9: collateral decimals != 6");
+        require(TestUSDG(collateral).owner() == deployerAddr, "S9: collateral.owner != DEPLOYER");
+
+        // ---- Task 10: the faucet points at the token this deployment actually minted, and holds
+        //      the float this run put into it. A faucet pointed at a different token would hand
+        //      testers collateral no vault here accepts; a faucet not holding its float would fail
+        //      every claim from block one.
+        require(address(TestFaucet(testFaucet).token()) == collateral, "S9: faucet.token != collateral");
+        require(IERC20(collateral).balanceOf(testFaucet) == FAUCET_OPENING_FLOAT, "S9: faucet float wrong");
 
         for (uint256 i = 0; i < assets.length; ++i) {
             _verifyAsset(i);
@@ -1027,9 +1067,12 @@ contract DeployTestnet is Script {
             _jStr(
                 "    ",
                 "_testFaucetNote",
-                "address(0) means Task 8 (src/sim/TestFaucet.sol) had not landed at deploy time"
+                "Deployed by this script alongside the collateral token (Task 10). Holds an opening float the deployer minted; has no owner and no sweep, so its balance plus its Dripped event stream is a closed account - see TestFaucet's NatSpec"
             )
         );
+        out = string.concat(out, _jNum("    ", "faucetDripAmount", FAUCET_DRIP));
+        out = string.concat(out, _jNum("    ", "faucetIntervalSeconds", FAUCET_INTERVAL));
+        out = string.concat(out, _jNum("    ", "faucetOpeningFloat", FAUCET_OPENING_FLOAT));
         out = string.concat(out, _jAddr("    ", "lighterSim", lighter));
         out = string.concat(out, _jAddr("    ", "solvencyRegistry", registry));
         out = string.concat(out, _jAddr("    ", "capacityOracle", capacity));

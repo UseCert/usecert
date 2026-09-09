@@ -89,6 +89,32 @@ long as that remains true.
 > **If a future deployment needs a token that violates row 1 or row 2, add reentrancy guards to the
 > mint and payout paths first.** That is a code change, not a configuration choice.
 
+**Where the token comes from differs by target, and this is load-bearing:**
+
+- **Testnet (`script/DeployTestnet.s.sol`, chain 46630) supplies its own.** `src/sim/TestUSDG.sol`
+  and `src/sim/TestFaucet.sol` are deployed by the script itself, from the deployer, inside
+  `_phase1_simulators()` — no `COLLATERAL` or `TEST_FAUCET` env var is read, and there is no
+  operator step to deploy a token by hand. This is what makes the testnet deployment
+  self-contained. It satisfies every row above **by construction, not by review**: `TestUSDG` is a
+  plain OpenZeppelin `ERC20` (no hooks, no fee-on-transfer, no rebasing, standard `approve`), its
+  `decimals()` is a `pure` override returning the literal `6` (there is no deployment of it with
+  any other value, so the script's `require(decimals() == 6)` is defence in depth rather than the
+  only line standing between the deployment and a wrong value), and it has no blocklist or pause.
+  Minting is gated to `owner` — the deployer — precisely because an ungated mint on the collateral
+  of a solvency-sensitive system would make every figure the testnet produces unfalsifiable; see
+  `TestUSDG`'s NatSpec. `TestFaucet` holds a float and hands it to testers via `claim()`; it has no
+  owner, no sweep, and no reference to `LighterSim`, so its balance is never mistaken for part of
+  the venue's balance sheet (see `TestFaucet`'s NatSpec for why that separation is deliberate).
+
+- **Mainnet supplies real `USDG` externally, and must still satisfy every row in the table
+  above.** A mainnet deployment script MUST take the collateral address as an already-deployed,
+  injected value — the same shape `COLLATERAL` used to have on testnet before Task 8 landed — and
+  must never deploy its own collateral. `TestUSDG`/`TestFaucet` are disposable testnet scaffolding
+  (an owner that can mint an unbounded supply is exactly wrong for real collateral) and must never
+  be referenced from a mainnet deployment path. The decimals check, the no-callback/no-fee/
+  no-rebase/no-blocklist requirements and the allowance-race note all apply to `USDG` exactly as
+  written above; nothing about testnet supplying its own token relaxes any of them for mainnet.
+
 ## 2. The price feed
 
 | Item | Requirement | Violation |
@@ -306,6 +332,12 @@ Read these back on-chain before funding:
       not the one the keeper is signing with, which is indistinguishable on-chain from a dead
       keeper. **Not applicable to a mainnet deployment against Lighter itself**, same as the row
       above
+- [ ] **Simulator deployments only:** the recorded `testFaucet` points at the recorded `collateral`
+      (`TestFaucet.token() == collateral`) and actually holds its opening float
+      (`collateral.balanceOf(testFaucet)`). A faucet pointed at the wrong token hands testers
+      collateral no vault here accepts; an empty one fails every `claim()` from block one. **Not
+      applicable to a mainnet deployment**, which supplies real `USDG` externally and deploys no
+      faucet (section 1)
 - [ ] `oracle.toTickPrice(oracle.px())` returns a sane tick, i.e. the live price is inside the
       uint32 domain at the configured `priceDecimals`
 - [ ] a `forceExit` of a dust position succeeds on the live deployment — this is Law 2 and it is

@@ -11,6 +11,9 @@ import {SolvencyRegistry} from "../../src/SolvencyRegistry.sol";
 import {CapacityOracle} from "../../src/CapacityOracle.sol";
 import {LighterSim} from "../../src/sim/LighterSim.sol";
 import {ReplayAggregator} from "../../src/sim/ReplayAggregator.sol";
+import {TestUSDG} from "../../src/sim/TestUSDG.sol";
+import {TestFaucet} from "../../src/sim/TestFaucet.sol";
+import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
 /// @notice A `DeployTestnet` that "forgets" `setAbsoluteCap`, to prove the most likely
@@ -43,23 +46,17 @@ contract DeployTestnetCollapsedSenders is DeployTestnet {
     }
 }
 
-/// @notice A `DeployTestnet` pointed at an 18-decimal collateral token.
+/// @notice A `DeployTestnet` whose collateral deployment yields an 18-decimal token, to prove the
+///         decimals guard in `_phase1_simulators()` is still enforced now that the token is
+///         deployed in-script rather than injected. `TestUSDG.decimals()` is a pure literal 6 and
+///         cannot itself be wrong, so this substitutes a differently-shaped ERC-20 through the
+///         `_deployCollateral()` seam — exactly the "test overrides by subclassing" pattern the
+///         other injection seams in this file use.
 contract DeployTestnetWrongDecimals is DeployTestnet {
-    address public immutable badToken;
-
-    constructor(address badToken_) {
-        badToken = badToken_;
-    }
-
-    function _collateralAddress() internal view override returns (address) {
-        return badToken;
-    }
-}
-
-/// @notice A `DeployTestnet` with no collateral at all — the Task 8 blocker as a guard.
-contract DeployTestnetNoCollateral is DeployTestnet {
-    function _collateralAddress() internal view override returns (address) {
-        return address(0);
+    function _deployCollateral() internal override returns (address) {
+        MockERC20 wrong = new MockERC20("Wrong", "WRONG", 18);
+        wrong.mint(deployerAddr, 1_000_000e18);
+        return address(wrong);
     }
 }
 
@@ -77,7 +74,6 @@ contract DeployTestnetNoCollateral is DeployTestnet {
 ///      other.
 contract DeployTestnetTest is Test {
     DeployTestnet internal script;
-    MockERC20 internal collateral;
 
     /// @dev Well-known throwaway test keys. The SCRIPT never hardcodes a key — it reads all three
     ///      from the environment, which is what lets the operator hold the real ones. These exist
@@ -111,16 +107,9 @@ contract DeployTestnetTest is Test {
         govAddr = vm.addr(GOV_PK);
         attesterAddr = vm.addr(ATTESTER_PK);
 
-        // THE BLOCKER, WORKED AROUND ONLY INSIDE THIS TEST. Task 8 owns the deployable 6-decimal
-        // test collateral (`src/sim/TestFaucet.sol` and its token) and it has not landed, so the
-        // script takes the collateral as an injected address. Here that injection is satisfied by
-        // `test/mocks/MockERC20.sol` at 6 decimals — a TEST mock, which is why the script does not
-        // and must not reference it. Six decimals matters: `CertVault` reads the collateral's
-        // decimals once, at construction, into an immutable.
-        collateral = new MockERC20("Test USDG", "tUSDG", 6);
-
-        // The deployer funds both vaults' buffer seeds (2 x 100_000e6) plus bootstrap dust.
-        collateral.mint(deployerAddr, 1_000_000e6);
+        // Task 10: the script deploys and funds its own collateral now (`TestUSDG`, via
+        // `_deployCollateral()`), so the test no longer injects one or pre-funds the deployer with
+        // it. It still needs ETH for gas.
         vm.deal(deployerAddr, 100 ether);
         vm.deal(govAddr, 100 ether);
         vm.deal(attesterAddr, 100 ether);
@@ -128,7 +117,6 @@ contract DeployTestnetTest is Test {
         vm.setEnv("DEPLOYER_PK", vm.toString(bytes32(DEPLOYER_PK)));
         vm.setEnv("GOV_PK", vm.toString(bytes32(GOV_PK)));
         vm.setEnv("ATTESTER_PK", vm.toString(bytes32(ATTESTER_PK)));
-        vm.setEnv("COLLATERAL", vm.toString(address(collateral)));
         vm.setEnv("BATCH_KEEPER", vm.toString(batchKeeperAddr));
         vm.setEnv("COMMIT", "test-run-not-a-real-commit");
 
@@ -155,8 +143,15 @@ contract DeployTestnetTest is Test {
             address factory_
         ) = script.sharedAddresses();
 
-        assertEq(collateral_, address(collateral), "collateral");
-        assertEq(faucet_, address(0), "faucet: Task 8 has not landed, so it must be recorded as zero");
+        // Task 10: the script now deploys and owns both. `TestUSDG.decimals()` is a pure literal
+        // and `TestFaucet` is constructed with the deployed token, so both are asserted against
+        // the live contracts rather than against a value the test injected.
+        assertTrue(collateral_.code.length > 0, "collateral has no code");
+        assertEq(TestUSDG(collateral_).decimals(), 6, "collateral decimals != 6");
+        assertEq(TestUSDG(collateral_).owner(), deployerAddr, "collateral.owner != DEPLOYER");
+        assertTrue(faucet_.code.length > 0, "faucet has no code");
+        assertEq(address(TestFaucet(faucet_).token()), collateral_, "faucet.token != collateral");
+        assertEq(IERC20(collateral_).balanceOf(faucet_), 1_000_000e6, "faucet float wrong");
         assertTrue(lighter_.code.length > 0, "LighterSim has no code");
         assertTrue(registry_.code.length > 0, "SolvencyRegistry has no code");
         assertTrue(capacity_.code.length > 0, "CapacityOracle has no code");
@@ -202,11 +197,15 @@ contract DeployTestnetTest is Test {
         string memory book = vm.readFile("deployments/46630.json");
         assertTrue(bytes(book).length > 0, "address book is empty");
 
+        (address collateral_, address faucet_,,,,) = script.sharedAddresses();
+
         assertEq(vm.parseJsonUint(book, ".chainId"), CHAIN_ID, "book chainId");
         assertEq(vm.parseJsonAddress(book, ".senders.governance"), govAddr, "book governance");
         assertEq(vm.parseJsonAddress(book, ".senders.attester"), attesterAddr, "book attester");
-        assertEq(vm.parseJsonAddress(book, ".shared.collateral"), address(collateral), "book collateral");
+        assertEq(vm.parseJsonAddress(book, ".shared.collateral"), collateral_, "book collateral");
         assertEq(vm.parseJsonUint(book, ".shared.collateralDecimals"), 6, "book collateralDecimals");
+        assertEq(vm.parseJsonAddress(book, ".shared.testFaucet"), faucet_, "book testFaucet");
+        assertTrue(vm.parseJsonAddress(book, ".shared.testFaucet") != address(0), "book testFaucet is zero");
 
         // The parameters a reader must not have to guess at, and the two loud notes.
         assertEq(vm.parseJsonUint(book, ".parameters.targetMarginBps"), 9_000, "book targetMarginBps");
@@ -333,7 +332,7 @@ contract DeployTestnetTest is Test {
     ///      differ from uTSLA's by ~1.8x in price and 55x in capacity.
     function test_deployedVaultCanMintAndForceExit() public {
         script.run();
-        (,, address lighter_,,,) = script.sharedAddresses();
+        (address collateral_,, address lighter_,,,) = script.sharedAddresses();
 
         for (uint256 i = 0; i < script.assetCount(); ++i) {
             DeployTestnet.AssetDeployment memory d = script.deploymentOf(i);
@@ -343,10 +342,16 @@ contract DeployTestnetTest is Test {
             // $900 of collateral. Sized to stay under `instantCap18` of 1_000e18 of NOTIONAL at
             // both mirrors' seed prices - the instant cap is the whole reason a tester crosses into
             // the queued path, and this test is about the instant path.
+            //
+            // Minting is owner-gated on `TestUSDG` (deployerAddr is `owner`, see
+            // `_deployCollateral()`), which is what a real tester's `TestFaucet.claim()` stands in
+            // for here - this test cares about the mint/forceExit path, not the faucet's own rate
+            // limit, which `test/sim/TestCollateralAndFaucet.t.sol` already covers.
             uint256 amountIn = 900e6;
-            collateral.mint(alice, amountIn);
+            vm.prank(deployerAddr);
+            TestUSDG(collateral_).mint(alice, amountIn);
             vm.startPrank(alice);
-            collateral.approve(d.vault, amountIn);
+            IERC20(collateral_).approve(d.vault, amountIn);
             uint256 certOut = v.mintInstant(amountIn);
             vm.stopPrank();
 
@@ -427,21 +432,15 @@ contract DeployTestnetTest is Test {
     /// @dev `USDG` has 6. An 18-decimal token would make every `_to18`/`_from18` conversion wrong
     ///      in both directions forever — every published figure off by 10**12 — with no setter to
     ///      repair it. Cheap check, unrepairable failure.
+    ///
+    ///      `TestUSDG.decimals()` is itself a pure literal 6 and so cannot be deployed wrong (Task
+    ///      10 removed the only way this used to fail — an operator injecting the wrong address).
+    ///      This test keeps the guard honest anyway by substituting a differently-shaped token
+    ///      through the `_deployCollateral()` seam, so the `require` in `_phase1_simulators()`
+    ///      cannot silently rot into dead code.
     function test_scriptRevertsOnWrongCollateralDecimals() public {
-        MockERC20 wrong = new MockERC20("Wrong", "WRONG", 18);
-        wrong.mint(deployerAddr, 1_000_000e18);
-        DeployTestnetWrongDecimals broken = new DeployTestnetWrongDecimals(address(wrong));
+        DeployTestnetWrongDecimals broken = new DeployTestnetWrongDecimals();
         vm.expectRevert(bytes("COLLATERAL: decimals() != 6 - CertVault fixes this immutably at construction"));
-        broken.run();
-    }
-
-    /// @notice The collateral is not optional, and its absence is named rather than a zero address
-    ///         propagating into two immutable vault configs.
-    /// @dev This is the Task 8 blocker surfacing as a guard: the deployable 6-decimal token and
-    ///      `src/sim/TestFaucet.sol` are Task 8's artefacts and are not in this tree.
-    function test_scriptRevertsWithoutCollateral() public {
-        DeployTestnetNoCollateral broken = new DeployTestnetNoCollateral();
-        vm.expectRevert(DeployTestnet.DeployTestnet_MissingCollateral.selector);
         broken.run();
     }
 }
