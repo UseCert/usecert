@@ -182,7 +182,7 @@ export default function Hero() {
       >
         <span>Phase:</span>
         <SlotBars />
-        <span className="whitespace-nowrap text-white">C1 Live</span>
+        <span className="whitespace-nowrap text-white">C1 on testnet</span>
       </motion.div>
 
       {/* Bottom-right: local time */}

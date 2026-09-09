@@ -1,6 +1,6 @@
 import { Link } from "@/lib/router-compat";
 import { motion } from "framer-motion";
-import { ArrowLeftRight, ArrowUpRight, Check, Cpu, Layers, LayoutGrid, List, Shield, ShieldAlert } from "lucide-react";
+import { ArrowLeftRight, ArrowUpRight, Check, Layers, LayoutGrid, List, ShieldAlert } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDashboard } from "./store";
@@ -9,14 +9,15 @@ import { PulseDot } from "./ui";
 import { WalletButton } from "./modals";
 import { CommandTrigger } from "./CommandPalette";
 
+/* Staking and Keepers were removed with the views behind them: no insurance-staking
+ * contract and no keeper-rewards mechanism is deployed on chain 46630, and both screens
+ * ran entirely on invented figures. */
 const NAV_ITEMS: { id: ViewId; label: string; short: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", short: "Home", icon: LayoutGrid },
   { id: "vaults", label: "Vaults", short: "Vaults", icon: Layers },
   { id: "mint", label: "Mint / Redeem", short: "Mint", icon: ArrowLeftRight },
-  { id: "staking", label: "Staking", short: "Stake", icon: Shield },
   { id: "activity", label: "Activity", short: "Flows", icon: List },
   { id: "risk", label: "Risk & Parameters", short: "Risk", icon: ShieldAlert },
-  { id: "keepers", label: "Keepers", short: "Keepers", icon: Cpu },
 ];
 
 /* ---------------------------------------------------------------- top bar */
@@ -168,10 +169,12 @@ export function Sidebar() {
       </div>
 
       <div className="flex flex-col gap-4 border-t hairline-dark p-4 xl:p-6">
+        {/* The invariant is checked against an attestation, not against every block, so the
+            cadence is named here rather than implied. */}
         <div className="hidden items-start gap-2 xl:flex">
           <Check size={13} className="mt-0.5 shrink-0 text-green-bright" />
           <p className="font-mono text-[10px] uppercase leading-[1.6] tracking-[0.06em] text-green-bright">
-            Backing ≥ Supply × Price
+            Backing ≥ supply × price, per attestation
           </p>
         </div>
         <Link
@@ -192,7 +195,7 @@ export function Sidebar() {
 export function BottomTabs() {
   const { view, setView } = useDashboard();
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-40 grid grid-cols-7 border-t hairline-dark bg-abyss/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-[12px] md:hidden">
+    <nav className="fixed bottom-0 left-0 right-0 z-40 grid grid-cols-5 border-t hairline-dark bg-abyss/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-[12px] md:hidden">
       {NAV_ITEMS.map((item) => {
         const active = view === item.id;
         const Icon = item.icon;

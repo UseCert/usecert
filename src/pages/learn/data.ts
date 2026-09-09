@@ -70,7 +70,7 @@ export const ARTICLES: Article[] = [
       {
         heading: "What a certificate changes",
         paragraphs: [
-          "Deposit USDC, the vault opens a fully backed long on the equity perp underneath, and uTSLA mints to your wallet at oracle price. Delta target 1.0, provable every block. Burn it and USDC comes back at oracle price, never gated. Funding is buffered, then fee'd, never hidden. Holders are senior to stakers, always.",
+          "Deposit USDC, the vault opens a fully backed long on the equity perp underneath, and uTSLA mints to your wallet at oracle price. Delta target 1.0, proven on-chain at every attestation with the age of the proof published. Burn it and USDC comes back at oracle price, never gated. Funding is buffered, then fee'd, never hidden. Holders are senior to stakers, always.",
         ],
       },
       {
@@ -102,7 +102,7 @@ export const ARTICLES: Article[] = [
         heading: "What delta 1.0 means",
         paragraphs: [
           "Delta is sensitivity. When the stock moves one dollar, a delta 1.0 position moves one dollar with it, in the same direction, at the same time. The vault holds exactly enough perp exposure that each uTSLA mirrors Tesla tick for tick. No leverage on the backing, no shortfall, no tranche math.",
-          "You can verify this yourself. The vault's position size and the circulating certificate supply are both public, and their ratio is printed on the solvency dashboard every block.",
+          "You can verify this yourself. The vault's position size and the circulating certificate supply are both public, and their ratio is printed on the solvency dashboard at every attestation, next to the age of that attestation.",
         ],
       },
       {
@@ -161,7 +161,7 @@ export const ARTICLES: Article[] = [
       {
         heading: "Why transparency is the mechanism",
         paragraphs: [
-          "Hidden funding is how synthetic assets quietly depeg: the cost builds up off balance sheet until it cannot. Publishing the buffer balance, the thresholds, and the fee schedule every block turns funding from a surprise into a signal. You never have to take our word for the state of the buffer, because the state of the buffer is the chain.",
+          "Hidden funding is how synthetic assets quietly depeg: the cost builds up off balance sheet until it cannot. Publishing the buffer balance on-chain turns funding from a surprise into a signal. You never have to take our word for the state of the buffer, because the state of the buffer is the chain.",
         ],
       },
     ],
@@ -259,7 +259,7 @@ export const ARTICLES: Article[] = [
     date: "JUL 06, 2026",
     readTime: "4 MIN READ",
     image: "/learn-6.jpg",
-    quote: "The peg is not a promise. It is five jobs, running every block.",
+    quote: "The peg is not a promise. It is jobs that run, and a proof with its age printed on it.",
     intro: [
       "No one at UseCert presses a button to keep certificates tracking. The peg is maintained by keepers: permissionless bots that anyone can run, paid from protocol fees, doing five small jobs around the clock.",
     ],
@@ -279,7 +279,7 @@ export const ARTICLES: Article[] = [
       {
         heading: "Snapshots and the public dashboard",
         paragraphs: [
-          "A snapshot keeper publishes the full solvency state every block: backing ratio per vault, buffer balances, open interest, fee flows. The public dashboard is a read layer over these snapshots, which is why solvency at UseCert is a live fact and not a monthly attestation.",
+          "An attester publishes the solvency state each venue batch, roughly every 60 seconds, and the vault publishes how old that state is alongside it. The public dashboard is a read layer over those attestations, which is why solvency at UseCert is proven on a ~60-second cadence with its age on screen, rather than in a monthly report.",
         ],
       },
       {

@@ -30,7 +30,7 @@ const ROWS: RoleRow[] = [
     title: "DeFi Builder",
     meta: "Equity-shaped lego",
     body: [
-      "List certificates as collateral on lending markets, build uTSLA/USDC pairs, structure products on top of a spot asset that never needed to exist off chain. Certificates are plain tokens: permissionless to integrate, oracle-priced every block.",
+      "List certificates as collateral on lending markets, build uTSLA/USDC pairs, structure products on top of a spot asset that never needed to exist off chain. Certificates are plain tokens: permissionless to integrate, oracle-priced from the same feed the vaults use.",
       "Reward: the first equity-shaped asset on Robinhood Chain, in your protocol, before everyone else's.",
     ],
     image: "/roles-builder.jpg",

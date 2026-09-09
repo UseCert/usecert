@@ -77,14 +77,12 @@ export function truncHash(hash: string): string {
   return `${hash.slice(0, 6)}…${hash.slice(-4)}`;
 }
 
-const HEX = "0123456789abcdef";
-export function randHash(rand: () => number = Math.random): string {
-  let out = "0x";
-  for (let i = 0; i < 40; i++) out += HEX[Math.floor(rand() * 16)];
-  return out;
-}
-
-/* `mulberry32` (a seeded PRNG) used to live here. It existed only to generate the mock
- * solvency curves, funding bars and flow list, all of which are now read from chain or
- * rendered as an honest empty state, so it is gone. If a future series generator is
- * wanted for tests, it does not belong in the dashboard's formatting module. */
+/* Two generators used to live here and both are gone.
+ *
+ * `mulberry32` (a seeded PRNG) existed only to generate the mock solvency curves, funding
+ * bars and flow list, all of which are now read from chain or rendered as an honest empty
+ * state. `randHash()` minted a plausible-looking 0x transaction id for transactions that
+ * were never submitted; its only caller was the simulated staking flow, which is gone too.
+ *
+ * Do not reintroduce either. A hash on screen must come from a real receipt, and a number
+ * on screen must come from a contract read. */

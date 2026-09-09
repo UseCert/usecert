@@ -1,4 +1,3 @@
-import { memo, useEffect, useState } from "react";
 import { Link } from "@/lib/router-compat";
 import { motion } from "framer-motion";
 import { ArrowUpRight } from "lucide-react";
@@ -19,7 +18,7 @@ export function IntroMeta({ vault }: { vault: VaultData }) {
   const live = vault.status === "LIVE";
   const cells = [
     { label: "Vault", value: "CertVault (factory-deployed)" },
-    { label: "Delta target", value: "1.0, checked every block window" },
+    { label: "Delta target", value: "1.0, checked each attested batch" },
     { label: "Chain", value: "Robinhood Chain" },
   ];
 
@@ -131,18 +130,11 @@ export function TextBlock({
   );
 }
 
-/** Ticking oracle price: jitters gently around the base value. Isolated + memoized. */
-const TickingPrice = memo(function TickingPrice({ base }: { base: number }) {
-  const [value, setValue] = useState(base);
-  useEffect(() => {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const id = window.setInterval(() => {
-      setValue(base + (Math.random() - 0.5) * base * 0.0012);
-    }, 1600);
-    return () => window.clearInterval(id);
-  }, [base]);
-  return <span className="tabular-nums">${value.toFixed(2)}</span>;
-});
+/* `TickingPrice` used to live here: it took a hardcoded base price and jittered it with
+ * Math.random() every 1.6 s so the panel below looked like a live oracle feed. Together
+ * with a hardcoded supply, a hardcoded "100.00%" backing ratio and a hardcoded "1.000"
+ * delta, it made a marketing page look like a solvency read. All of it is gone — the
+ * dashboard reads those four figures from the contracts, and this page links to it. */
 
 /** Corner-dot frame device (echoes the hero): 1px rect with 4 filled corner dots. */
 function CornerDots() {
@@ -156,9 +148,18 @@ function CornerDots() {
   );
 }
 
-/** Section 4: live vault snapshot panel (LIVE) or roadmap plate block (SOON). */
+/**
+ * Section 4: the certificate plate, plus a pointer to where the figures actually live.
+ *
+ * This used to be a "Live vault snapshot · Powers the public dashboard" panel showing an
+ * oracle price, a circulating supply, a backing ratio and a delta. None of the four came
+ * from a contract: they were literals in `data.ts` with a `Math.random()` jitter on the
+ * price and a pulsing "Live" dot next to them, and the same panel rendered for uNVDA,
+ * which has no vault, no certificate and no oracle. A number on a public page has to
+ * trace to a chain read, so the figures are gone and the dashboard is linked instead.
+ */
 export function MediaBlock({ vault }: { vault: VaultData }) {
-  const live = vault.status === "LIVE" && vault.snapshot;
+  const live = vault.status === "LIVE";
 
   return (
     <section className="bg-ink text-white">
@@ -170,48 +171,39 @@ export function MediaBlock({ vault }: { vault: VaultData }) {
           className="relative border hairline-dark"
         >
           <CornerDots />
-          {live ? (
-            <div className="p-6 md:p-10 lg:p-14">
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
-                  Live vault snapshot &middot; Powers the public dashboard
-                </p>
-                <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.08em] text-green-bright">
-                  <span className="relative flex h-2 w-2" aria-hidden>
-                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-bright opacity-60" />
-                    <span className="relative inline-flex h-2 w-2 rounded-full bg-green-bright" />
-                  </span>
-                  Live
+          <div>
+            <div className="relative overflow-hidden">
+              <img
+                src={vault.image}
+                alt={`${vault.name} certificate plate`}
+                className="aspect-[16/10] w-full object-cover"
+              />
+              {live ? (
+                <span className="absolute left-4 top-4 inline-flex items-center gap-1.5 rounded-full border border-green-bright/40 bg-ink/70 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.08em] text-green-bright backdrop-blur-sm md:left-6 md:top-6">
+                  <span className="h-[6px] w-[6px] rounded-full bg-green-bright" aria-hidden />
+                  Deployed on testnet 46630
                 </span>
-              </div>
-
-              <div className="mt-10 grid gap-10 sm:grid-cols-2 lg:grid-cols-4">
-                <div>
-                  <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">Oracle price</p>
-                  <p className="mt-3 font-mono text-[32px] leading-none text-white md:text-[44px]">
-                    <TickingPrice base={vault.snapshot!.price} />
-                  </p>
-                </div>
-                <div>
-                  <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">Supply</p>
-                  <p className="mt-3 font-mono text-[32px] leading-none text-white md:text-[44px]">
-                    {vault.snapshot!.supply}
-                  </p>
-                  <p className="mt-2 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
-                    {vault.name} in circulation
-                  </p>
-                </div>
-                <div>
-                  <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">Backing ratio</p>
-                  <p className="mt-3 font-mono text-[32px] leading-none text-green-bright md:text-[44px]">100.00%</p>
-                </div>
-                <div>
-                  <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">Delta</p>
-                  <p className="mt-3 font-mono text-[32px] leading-none text-white md:text-[44px]">1.000</p>
-                </div>
-              </div>
-
-              <div className="mt-10 border-t hairline-dark pt-6">
+              ) : (
+                <span className="absolute left-4 top-4 inline-flex items-center gap-1.5 rounded-full border border-warn/40 bg-ink/70 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.08em] text-warn backdrop-blur-sm md:left-6 md:top-6">
+                  <span className="h-[6px] w-[6px] rounded-full bg-warn" aria-hidden />
+                  Roadmap C2
+                </span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-6 p-6 md:p-10">
+              {live ? (
+                <p className="max-w-[48ch] text-[16px] leading-[1.55] text-white-60">
+                  Price, supply, buffer and delta drift are read from the vault, the certificate and the
+                  oracle on the dashboard, each one shown with the age of the attestation it rests on. No
+                  figure for this vault is published here, because nothing on this page reads the chain.
+                </p>
+              ) : (
+                <p className="max-w-[48ch] text-[16px] leading-[1.55] text-white-60">
+                  {vault.roadmapCopy ?? "This vault deploys in phase C2."} Minting opens the day the vault
+                  contract is factory-deployed on Robinhood Chain.
+                </p>
+              )}
+              {live ? (
                 <Link
                   to="/dashboard"
                   className="group inline-flex items-center gap-2 text-[13px] font-semibold uppercase tracking-[0.08em] text-white transition-colors hover:text-green-bright"
@@ -219,26 +211,7 @@ export function MediaBlock({ vault }: { vault: VaultData }) {
                   Full solvency view
                   <ArrowUpRight size={16} className="transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
                 </Link>
-              </div>
-            </div>
-          ) : (
-            <div>
-              <div className="relative overflow-hidden">
-                <img
-                  src={vault.image}
-                  alt={`${vault.name} certificate plate`}
-                  className="aspect-[16/10] w-full object-cover"
-                />
-                <span className="absolute left-4 top-4 inline-flex items-center gap-1.5 rounded-full border border-warn/40 bg-ink/70 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.08em] text-warn backdrop-blur-sm md:left-6 md:top-6">
-                  <span className="h-[6px] w-[6px] rounded-full bg-warn" aria-hidden />
-                  Roadmap C2
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center justify-between gap-6 p-6 md:p-10">
-                <p className="max-w-[48ch] text-[16px] leading-[1.55] text-white-60">
-                  {vault.roadmapCopy ?? "This vault deploys in phase C2."} Minting opens the day the vault contract
-                  is factory-deployed on Robinhood Chain.
-                </p>
+              ) : (
                 <a
                   href="https://t.me/usecert"
                   target="_blank"
@@ -248,9 +221,9 @@ export function MediaBlock({ vault }: { vault: VaultData }) {
                   Join Telegram
                   <ArrowUpRight size={16} className="transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
                 </a>
-              </div>
+              )}
             </div>
-          )}
+          </div>
         </motion.div>
       </div>
     </section>

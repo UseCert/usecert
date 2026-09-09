@@ -9,21 +9,21 @@ import { FlowTypeBadge } from "./flows";
 import { flowVaultLabel } from "./flowMeta";
 import { cn } from "@/lib/utils";
 
-type TypeFilter = "ALL" | "MINT" | "REDEEM" | "STAKE" | "CLAIM";
+/* No "Stakes" tab: there is no staking contract on this deployment, so a filter for it
+ * could only ever match nothing while implying the mechanism exists. */
+type TypeFilter = "ALL" | "MINT" | "REDEEM" | "CLAIM";
 
 const TYPE_TABS: { value: TypeFilter; label: string }[] = [
   { value: "ALL", label: "All" },
   { value: "MINT", label: "Mints" },
   { value: "REDEEM", label: "Redeems" },
-  { value: "STAKE", label: "Stakes" },
   { value: "CLAIM", label: "Claims" },
 ];
 
 const TYPE_MATCH: Record<TypeFilter, FlowType[]> = {
-  ALL: ["MINT", "REDEEM", "STAKE", "UNSTAKE", "CLAIM", "WITHDRAW"],
+  ALL: ["MINT", "REDEEM", "CLAIM"],
   MINT: ["MINT"],
   REDEEM: ["REDEEM"],
-  STAKE: ["STAKE", "UNSTAKE", "WITHDRAW"],
   CLAIM: ["CLAIM"],
 };
 
@@ -51,7 +51,7 @@ function TxCell({ hash }: { hash: string }) {
 }
 
 export default function ActivityView() {
-  const { flows, loadMoreFlows, flowsUnavailable, vaults } = useDashboard();
+  const { flows, loadMoreFlows, flowsUnavailable, vaults, collateralSymbol } = useDashboard();
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("ALL");
   const [assetFilter, setAssetFilter] = useState<string>("all");
 
@@ -85,7 +85,6 @@ export default function ActivityView() {
               disabled: v.status !== "LIVE",
               hint: v.status !== "LIVE" ? "not deployed" : undefined,
             })),
-            { value: "token", label: "Token" },
           ]}
           value={assetFilter}
           onChange={setAssetFilter}
@@ -111,7 +110,7 @@ export default function ActivityView() {
                 <th className="px-5 py-3 font-medium">Type</th>
                 <th className="px-3 py-3 font-medium">Vault</th>
                 <th className="px-3 py-3 text-right font-medium">Amount</th>
-                <th className="px-3 py-3 text-right font-medium">USDC</th>
+                <th className="px-3 py-3 text-right font-medium">{collateralSymbol}</th>
                 <th className="hidden px-3 py-3 text-right font-medium lg:table-cell">Price</th>
                 <th className="hidden px-3 py-3 text-right font-medium md:table-cell">Fee</th>
                 <th className="px-3 py-3 text-right font-medium">Time</th>

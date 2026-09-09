@@ -33,12 +33,12 @@ const ROWS: Row[] = [
   {
     feature: "Backing",
     tooltip:
-      "What actually sits behind your position: margin you manage, a custodian's claim, or on chain perp exposure plus USDC margin you can verify every block.",
+      "What actually sits behind your position: margin you manage, a custodian's claim, or on chain perp exposure plus collateral margin you can verify at every attestation.",
     cells: ["Your own margin", "Custodian claim", "On chain perps + USDC margin"],
   },
   { feature: "Funding", cells: ["Paid directly by you", "dash", "Buffered, then fee'd, never hidden"] },
-  { feature: "Redemption", cells: ["Close your own position", "Issuer dependent", "Always, at oracle price"] },
-  { feature: "Transparency", cells: ["Exchange dashboard", "Periodic attestations", "Solvency public every block"] },
+  { feature: "Redemption", cells: ["Close your own position", "Issuer dependent", "Always, at oracle price — instant under the cap, queued above it"] },
+  { feature: "Transparency", cells: ["Exchange dashboard", "Periodic attestations", "Solvency proven every attestation"] },
   { feature: "Availability", cells: ["24/7", "Market hours, restricted", "24/7"] },
 ];
 

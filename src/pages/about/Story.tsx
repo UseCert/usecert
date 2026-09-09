@@ -14,7 +14,7 @@ const PARAGRAPHS: Paragraph[] = [
   },
   {
     lead: "When we decide whether a mechanism stays or goes, the question is never 'does it sound clever?'",
-    rest: "It is 'does the solvency math hold every block, in public?' If the answer is no, it goes.",
+    rest: "It is 'does the solvency math hold at every attestation, in public, with the age of the proof next to it?' If the answer is no, it goes.",
   },
   {
     lead: "The pattern is proven. Delta-backed synthetic assets are the most battle-tested design in DeFi:",

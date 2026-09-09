@@ -138,14 +138,28 @@ export default function Overview() {
     <div className="relative">
       <GhostWord className="-top-10 right-0 hidden text-[180px] xl:block">Live</GhostWord>
 
-      {/* Top mono stat row, same rhythm as the landing deep-green section */}
+      {/* Top mono stat row, same rhythm as the landing deep-green section.
+          "C1 Live" is gone: C1 is the identifier of an audit, not a release badge, and
+          that audit reported open criticals — so the string could only ever be read as a
+          certification the project does not have. What is factually true is which chain
+          this is reading and how solvency is proven, so that is what it says.
+          "Solvency public / every block" is gone for the same reason: solvency is proven
+          per attestation, on roughly a 60-second cadence, and the AgeLine below publishes
+          the real age of the current proof. */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b hairline-dark pb-4 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
         <span className="flex items-center gap-2">
-          <PulseDot /> C1 Live
+          <PulseDot /> Testnet 46630
         </span>
         <span className="hidden md:block">Robinhood Chain©</span>
-        <span>Solvency public / every block</span>
+        <span>Solvency proven per attestation · age published</span>
       </div>
+
+      {/* The one line about the venue. The site is openly a testnet, so this is stated
+          plainly and once, without a banner. */}
+      <p className="mt-3 font-mono text-[10px] uppercase leading-[1.7] tracking-[0.06em] text-white-60/70">
+        On testnet the perp venue is simulated, so the attested margin and notional below describe a
+        simulated position.
+      </p>
 
       <TickerStrip />
 

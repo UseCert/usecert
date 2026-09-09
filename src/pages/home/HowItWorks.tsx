@@ -10,7 +10,7 @@ export const HOW_IT_WORKS_ROWS: AccordionRow[] = [
     meta: "Delta: 1.0",
     body: [
       "Deposit USDC into a per-asset vault. The vault opens an equivalent long on the corresponding equity perp on Robinhood Chain, and your certificate mints to your wallet at oracle price. uTSLA in, uTSLA out, at the stock's price, any hour of any day.",
-      "The delta target is 1.0 at all times. Every certificate in circulation is backed by exactly one token's worth of perp exposure plus USDC margin, and the backing math is public every block.",
+      "The delta target is 1.0 at all times. Every certificate in circulation is backed by exactly one token's worth of perp exposure plus USDC margin, and the backing math is proven on-chain at every attestation (~60s), with the age of the proof published.",
     ],
     image: "/hiw-mint.jpg",
     imageAlt: "Steel vault door with locking wheel",
@@ -29,8 +29,8 @@ export const HOW_IT_WORKS_ROWS: AccordionRow[] = [
     title: "Redeem, Always",
     meta: "Gating: never",
     body: [
-      "Burn your certificate and the vault closes the matching perp exposure. USDC at oracle price returns to you in the same transaction. Redemption is never gated, never queued, never paused for convenience.",
-      "Even if minting halts on a stale or deviant oracle, redemption continues at the last good price. The vault's solvency math is public every block, so you never have to trust a dashboard screenshot.",
+      "Burn your certificate and the vault closes the matching perp exposure. Below the vault's instant cap the collateral comes back in the same transaction; above it, redemption is queued and paid by claim — two batch round-trips expected, and the venue's 14-day priority expiration is the real worst case. Redemption is never refused and never paused for convenience: forceExit is gated on nothing.",
+      "Even if minting halts on a stale or deviant oracle, redemption continues at the last good price. The vault's solvency math is proven on-chain at every attestation, and the age of that proof is published with it, so you never have to trust a dashboard screenshot.",
     ],
     image: "/hiw-redeem.jpg",
     imageAlt: "Stack of US dollar bills",

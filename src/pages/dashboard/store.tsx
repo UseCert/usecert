@@ -45,12 +45,13 @@
  * / `change24hUnavailable` / `funding8hUnavailable` / `flowsUnavailable` are on, the arrays
  * are empty, and the views render an honest empty state. Nothing is interpolated.
  *
- * STILL MOCK, DELIBERATELY. Staking (`tokenLiquid`, `tokenStaked`, `totalStaked`,
- * `rewards`, `cooldowns`, `stake`, `unstake`, `claim`, `fastForward`, `withdraw`) and the
- * keeper list (`keepers`, `runKeeper`) map to contracts that do not exist —
- * `InsuranceStaking` and `CERT` are C3, and four of the five advertised keepers are
- * fiction. They are left exactly as they were so `StakingView` and `KeepersView` keep
- * working untouched; their disposition is the copy stage's problem, not this one's.
+ * NOTHING IS MOCKED ANY MORE. The staking state (`tokenLiquid`, `tokenStaked`,
+ * `totalStaked`, `rewards`, `cooldowns`) and the keeper list (`keepers`, `runKeeper`) were
+ * the last invented numbers in this app, and they are gone along with the two views that
+ * rendered them. `InsuranceStaking` and `CERT` are C3 and are not deployed, and four of
+ * the five advertised keepers never existed — only `recallMargin()` and `rebalance()` are
+ * real, and both are already exposed on `useCertActions`. Do not reintroduce a generator
+ * here: every number this provider publishes must come from a contract read.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -78,8 +79,13 @@ import {
  * purpose — see the file header.
  */
 export type VaultId = "utsla" | "uspy" | "unvda" | "uspx" | "uqqq";
-export type ViewId = "overview" | "vaults" | "mint" | "staking" | "activity" | "risk" | "keepers";
-export type FlowType = "MINT" | "REDEEM" | "STAKE" | "UNSTAKE" | "CLAIM" | "WITHDRAW";
+/**
+ * `staking` and `keepers` are deliberately absent: neither an insurance-staking contract
+ * nor a keeper-rewards mechanism is deployed on chain 46630, and the views that used to
+ * render them ran entirely on invented figures.
+ */
+export type ViewId = "overview" | "vaults" | "mint" | "activity" | "risk";
+export type FlowType = "MINT" | "REDEEM" | "CLAIM";
 export type Timeframe = "1H" | "24H" | "7D" | "ALL";
 
 /**
@@ -231,25 +237,6 @@ export interface Flow {
   tx: string;
 }
 
-export interface Cooldown {
-  id: number;
-  amount: number;
-  startAt: number;
-  readyAt: number;
-  ready: boolean;
-}
-
-export interface Keeper {
-  id: string;
-  name: string;
-  desc: string;
-  lastRun: number;
-  runsToday: number;
-  runsLabel: string;
-  detail: string;
-  nextInSec?: number;
-}
-
 export interface Toast {
   id: number;
   state: "pending" | "success";
@@ -365,20 +352,6 @@ function loadingVault(id: ChainVaultId): Vault {
   };
 }
 
-/* ------------------------------------------------------------ mock: staking */
-/* Unchanged from the mock store. `InsuranceStaking` and `CERT` are C3 and do not exist;
- * StakingView is left untouched and still runs on these. */
-
-function makeKeepers(now: number): Keeper[] {
-  return [
-    { id: "delta", name: "DELTA-KEEPER", desc: "Band check each block window", lastRun: now - 2000, runsToday: 41204, runsLabel: "runs today", detail: "Band within ±0.2% across all vaults" },
-    { id: "funding", name: "FUNDING-SWEEPER", desc: "Hourly funding accrual sweep", lastRun: now - 14 * 60 * 1000, runsToday: 17, runsLabel: "sweeps today", detail: "Next sweep in 46m", nextInSec: 46 * 60 },
-    { id: "snapshot", name: "SOLVENCY-SNAPSHOTTER", desc: "Powers this dashboard", lastRun: now - 2000, runsToday: 41198, runsLabel: "snapshots today", detail: "Backing pinned to chain state" },
-    { id: "watchdog", name: "BUFFER-WATCHDOG", desc: "Threshold transitions, fee activation", lastRun: now - 2000, runsToday: 41201, runsLabel: "checks today", detail: "BUFFER HEALTHY · NO FEES ACTIVE" },
-    { id: "indexer", name: "CHAIN-INDEXER", desc: "Flows, stakes, blocks", lastRun: now - 2000, runsToday: 41210, runsLabel: "blocks indexed", detail: "Indexed through current block" },
-  ];
-}
-
 /* ---------------------------------------------------------------- context */
 
 interface DashboardCtx {
@@ -456,20 +429,6 @@ interface DashboardCtx {
   flowsUnavailable: boolean;
   loadMoreFlows: () => void;
 
-  /* ---- staking + keepers: still mock, see the file header ----------- */
-  tokenLiquid: number;
-  tokenStaked: number;
-  totalStaked: number;
-  rewards: number;
-  cooldowns: Cooldown[];
-  keepers: Keeper[];
-  runKeeper: (id: string) => void;
-  stake: (amount: number) => void;
-  unstake: (amount: number) => void;
-  claim: () => void;
-  fastForward: (id: number) => void;
-  withdraw: (id: number) => void;
-
   /* ---- toasts ------------------------------------------------------- */
   toasts: Toast[];
   pushToast: (toast: Omit<Toast, "id">) => number;
@@ -487,7 +446,6 @@ export function useDashboard(): DashboardCtx {
   return ctx;
 }
 
-const COOLDOWN_MS = 7 * 24 * 3600 * 1000;
 const EMPTY_AGG: Record<Timeframe, SeriesPoint[]> = { "1H": [], "24H": [], "7D": [], ALL: [] };
 
 let idCounter = 5000;
@@ -521,14 +479,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [mintPreset, setMintPreset] = useState<MintPreset>({ tab: "mint", asset: "utsla", nonce: 0 });
   const [walletModalOpen, setWalletModalOpen] = useState(false);
 
-  /* ------------------------------------------------- mock staking state */
-
-  const [tokenLiquid, setTokenLiquid] = useState(3500);
-  const [tokenStaked, setTokenStaked] = useState(1250);
-  const [totalStaked, setTotalStaked] = useState(4820000);
-  const [rewards, setRewards] = useState(42.18);
-  const [cooldowns, setCooldowns] = useState<Cooldown[]>([]);
-  const [keepers, setKeepers] = useState<Keeper[]>(() => makeKeepers(Date.now()));
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastTimers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
 
@@ -587,21 +537,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const clock = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(clock);
-  }, []);
-
-  // Keeps the mock keeper cards from looking frozen. Mock-only, see the file header.
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      if (document.hidden) return;
-      const t = Date.now();
-      setRewards((r) => r + 0.006);
-      setKeepers((ks) =>
-        ks.map((k) =>
-          k.nextInSec !== undefined ? { ...k, nextInSec: Math.max(0, k.nextInSec - 2) } : { ...k, lastRun: t },
-        ),
-      );
-    }, 2000);
-    return () => window.clearInterval(interval);
   }, []);
 
   /* ------------------------------------------------------------- vaults */
@@ -674,76 +609,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   const disconnect = useCallback(() => disconnectWallet(), [disconnectWallet]);
 
-  /* ------------------------------------------------- mock mutations */
-
-  const executeMock = useCallback(
-    (pendingTitle: string, successTitle: string, mutate: () => void) => {
-      const id = pushToast({ state: "pending", title: pendingTitle });
-      window.setTimeout(mutate, 1600);
-      window.setTimeout(() => settleToast(id, successTitle), 2400);
-    },
-    [pushToast, settleToast],
-  );
-
-  const stake = useCallback(
-    (amount: number) => {
-      executeMock("Stake pending", `Stake confirmed: ${amount.toFixed(2)} token`, () => {
-        setTokenLiquid((v) => Math.max(0, v - amount));
-        setTokenStaked((v) => v + amount);
-        setTotalStaked((v) => v + amount);
-      });
-    },
-    [executeMock],
-  );
-
-  const unstake = useCallback(
-    (amount: number) => {
-      executeMock("Unstake pending", `Unstake confirmed: ${amount.toFixed(2)} token`, () => {
-        const startAt = Date.now();
-        setTokenStaked((v) => Math.max(0, v - amount));
-        setTotalStaked((v) => Math.max(0, v - amount));
-        setCooldowns((cs) => [
-          { id: nextId(), amount, startAt, readyAt: startAt + COOLDOWN_MS, ready: false },
-          ...cs,
-        ]);
-      });
-    },
-    [executeMock],
-  );
-
-  const claim = useCallback(() => {
-    const r = rewards;
-    if (r <= 0) return;
-    executeMock("Claim pending", `Claim confirmed: ${r.toFixed(2)} token`, () => {
-      setRewards(0);
-      setTokenLiquid((v) => v + r);
-    });
-  }, [executeMock, rewards]);
-
-  const fastForward = useCallback((id: number) => {
-    setCooldowns((cs) => cs.map((c) => (c.id === id ? { ...c, ready: true, readyAt: Date.now() } : c)));
-  }, []);
-
-  const withdraw = useCallback(
-    (id: number) => {
-      const cd = cooldowns.find((c) => c.id === id);
-      if (!cd) return;
-      executeMock("Withdraw pending", `Withdraw confirmed: ${cd.amount.toFixed(2)} token`, () => {
-        setTokenLiquid((v) => v + cd.amount);
-        setCooldowns((cs) => cs.filter((c) => c.id !== id));
-      });
-    },
-    [cooldowns, executeMock],
-  );
-
-  const runKeeper = useCallback(
-    (id: string) => {
-      const t = Date.now();
-      setKeepers((ks) => ks.map((k) => (k.id === id ? { ...k, lastRun: t, runsToday: k.runsToday + 1 } : k)));
-    },
-    [],
-  );
-
   /* ---------------------------------------------------------------- flows */
 
   // Receipt ids are not enumerable on-chain and there is no `receiptsOf(user)`; a flow
@@ -803,19 +668,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     flows,
     flowsUnavailable: true,
     loadMoreFlows,
-
-    tokenLiquid,
-    tokenStaked,
-    totalStaked,
-    rewards,
-    cooldowns,
-    keepers,
-    runKeeper,
-    stake,
-    unstake,
-    claim,
-    fastForward,
-    withdraw,
 
     toasts,
     pushToast,

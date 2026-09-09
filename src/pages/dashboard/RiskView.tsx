@@ -11,22 +11,22 @@ const DESIGN_LAWS: { n: string; title: string; body: string }[] = [
   {
     n: "01",
     title: "Fully delta-backed",
-    body: "Each vault targets delta 1.0: certificate supply × oracle price ≤ perp notional + USDC margin, provable on-chain every block.",
+    body: "Each vault targets delta 1.0: certificate supply × oracle price ≤ perp notional + collateral margin. Proven on-chain per attestation, with the age of that attestation published next to every figure — not proven every block.",
   },
   {
     n: "02",
     title: "Redemption is never gated",
-    body: "Burn → close matching exposure → USDC at oracle price. Buffer stress slows minting, never redemption.",
+    body: "Burn → close matching exposure → collateral at oracle price. A thin buffer routes redemption through the queue and stops minting; it never stops redemption, and forceExit is gated on nothing.",
   },
   {
     n: "03",
-    title: "Funding buffered, then fee'd, never hidden",
-    body: "Positive funding fattens the buffer. Sustained negative funding draws it down and, past the published threshold, passes through as a transparent holding fee.",
+    title: "Funding buffered, never hidden",
+    body: "Funding accrues to and from the buffer the vault holds, and the balance is readable on-chain. The fee-passthrough threshold this law was written around is NOT deployed on chain 46630 — nothing takes over when the buffer is exhausted.",
   },
   {
     n: "04",
     title: "Holders are senior",
-    body: "Staked CERT is the junior tranche and absorbs buffer exhaustion before holder backing is ever touched.",
+    body: "By design the junior tranche absorbs buffer exhaustion before holder backing. That tranche does not exist here: InsuranceStaking and CERT are C3 and are not deployed, so there is nothing junior to holders on this deployment.",
   },
   {
     n: "05",
@@ -35,12 +35,49 @@ const DESIGN_LAWS: { n: string; title: string; body: string }[] = [
   },
 ];
 
-const SCENARIOS: { name: string; shock: string; draw: string; holder: string; severity: "ok" | "warn" }[] = [
-  { name: "Funding inversion", shock: "−30% annualised funding, 30 days", draw: "−41% of buffer", holder: "None · buffer absorbs", severity: "ok" },
-  { name: "Equity gap down", shock: "−20% overnight gap on the underlying", draw: "−12% of buffer", holder: "None · delta re-marks 1:1", severity: "ok" },
-  { name: "Redemption run", shock: "45% of supply redeemed in 24h", draw: "−9% of buffer", holder: "None · slippage inside fee", severity: "ok" },
-  { name: "Oracle outage", shock: "Price feed stale > 60s", draw: "0%", holder: "Minting paused · redemption at last valid TWAP", severity: "warn" },
-  { name: "Venue halt", shock: "Perp market operator halts the book", draw: "Frozen", holder: "Positions marked, redemption queued to reopen", severity: "warn" },
+/**
+ * Failure modes and the behaviour the deployed contracts are designed to produce.
+ *
+ * There are deliberately NO magnitudes in this table. The buffer-draw figures that used to
+ * sit here — "−41% of buffer", "−12%", "−9%", against shocks of "−30% annualised funding"
+ * and "45% of supply redeemed in 24h" — were invented: no model was run against this
+ * deployment and nothing on-chain publishes a stress result. Every row below names a
+ * mechanism that exists on chain 46630 instead of quantifying an outcome that does not.
+ */
+const SCENARIOS: { name: string; shock: string; behaviour: string; severity: "ok" | "warn" }[] = [
+  {
+    name: "Sustained negative funding",
+    shock: "Funding runs against the vault's long for an extended period",
+    behaviour:
+      "Draws down the buffer the vault holds. No fee passthrough and no insurance tranche is deployed to take over once it is exhausted.",
+    severity: "warn",
+  },
+  {
+    name: "Gap in the underlying",
+    shock: "The underlying moves faster than a rebalance can follow",
+    behaviour: "Delta drift widens against the attested perp position. Redemption is not gated on it.",
+    severity: "ok",
+  },
+  {
+    name: "Redemption run",
+    shock: "Redemptions exceed the instant float (hotBuffer)",
+    behaviour:
+      "The instant path declines with CertVault_UseQueuedRedeem and redemptions route through the queue. forceExit is gated on nothing.",
+    severity: "ok",
+  },
+  {
+    name: "Oracle stale or deviant",
+    shock: "px() reverts and mintAllowed() returns false",
+    behaviour: "Minting is refused; redemption is unaffected. Both states are read live on this page.",
+    severity: "warn",
+  },
+  {
+    name: "Attestation goes stale",
+    shock: "ageSec passes maxAttestationAgeSec",
+    behaviour:
+      "Capacity falls to zero and minting is off until a fresh attestation lands — the likeliest reason a healthy deployment refuses to mint.",
+    severity: "warn",
+  },
 ];
 
 /* ----------------------------------------------------------------- pieces */
@@ -210,7 +247,6 @@ export default function RiskView() {
       value: flowsUnavailable ? "none — no receipt or flow history" : "connected",
       state: "warn",
     },
-    { label: "Keeper heartbeat", value: EM_DASH, state: "unknown" },
   ];
 
   return (
@@ -225,8 +261,8 @@ export default function RiskView() {
         }
         right={
           <p className="max-w-[46ch] self-end text-[16px] leading-[1.4] tracking-[-0.02em] text-silver sm:text-[18px] md:text-[20px]">
-            Every parameter that governs the vaults, the buffer and the insurance tranche - published, live, and
-            stress-tested.
+            Every parameter the deployed contracts publish, read live. Where a parameter has no on-chain
+            source it is left blank rather than filled in.
           </p>
         }
       />
@@ -410,9 +446,9 @@ export default function RiskView() {
       {/* Stress scenarios */}
       <Panel className="mt-3 overflow-x-auto">
         <div className="flex items-center justify-between gap-3 border-b hairline-dark px-5 py-4">
-          <MicroLabel>Stress Scenarios</MicroLabel>
+          <MicroLabel>Failure Modes</MicroLabel>
           <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-white-60">
-            Modelled, not measured
+            Designed behaviour · no magnitudes published
           </span>
         </div>
         <table className="w-full min-w-[720px] font-mono text-[12px]">
@@ -420,8 +456,7 @@ export default function RiskView() {
             <tr className="border-b hairline-dark text-left text-[10px] uppercase tracking-[0.08em] text-white-60">
               <th className="px-5 py-3 font-medium">Scenario</th>
               <th className="px-3 py-3 font-medium">Shock</th>
-              <th className="px-3 py-3 font-medium">Buffer impact</th>
-              <th className="px-3 py-3 font-medium">Holder impact</th>
+              <th className="px-3 py-3 font-medium">What the contracts do</th>
             </tr>
           </thead>
           <tbody>
@@ -429,7 +464,6 @@ export default function RiskView() {
               <tr key={s.name} className="border-b hairline-dark last:border-b-0">
                 <td className="px-5 py-3.5 text-white">{s.name}</td>
                 <td className="px-3 py-3.5 text-silver">{s.shock}</td>
-                <td className="px-3 py-3.5 tabular-nums text-white">{s.draw}</td>
                 <td className={cn("px-3 py-3.5", s.severity === "ok" ? "text-green-bright" : "text-warn")}>
                   <span className="flex items-start gap-2">
                     {s.severity === "ok" ? (
@@ -437,13 +471,17 @@ export default function RiskView() {
                     ) : (
                       <AlertTriangle size={13} className="mt-[2px] shrink-0" />
                     )}
-                    {s.holder}
+                    {s.behaviour}
                   </span>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
+        <p className="border-t hairline-dark px-5 py-3 font-mono text-[10px] uppercase leading-[1.7] tracking-[0.06em] text-white-60/70">
+          No stress model has been run against this deployment, so no buffer-draw or loss figure is
+          published here. The rows describe mechanisms, not outcomes.
+        </p>
       </Panel>
 
       {/* Attestations + boundaries */}
@@ -477,12 +515,26 @@ export default function RiskView() {
           </div>
           <ul className="mt-5 flex flex-col gap-4 text-[13px] leading-[1.55] text-white-60">
             <li>
-              Certificates are <span className="text-white">synthetic</span>: price exposure backed by perp positions and
-              USDC margin - not custody of shares, no dividends, no shareholder rights.
+              Certificates are <span className="text-white">synthetic</span>: price exposure backed by a perp position
+              and collateral margin - not custody of shares, no dividends, no shareholder rights.
             </li>
             <li>
-              Named risks: sustained negative funding (buffered, then fee'd), dependency on the underlying equity perp
-              market and its operator, oracle and liquidation tail risk in extreme gaps.
+              Solvency is <span className="text-white">not instantaneous</span>: margin and notional come from an
+              attestation, so every figure here is as old as the age printed beside it and goes stale at{" "}
+              {maxAttestationAgeSec}s.
+            </li>
+            <li>
+              <span className="text-white">Basis risk</span>: the oracle price and the venue's mark are different
+              numbers. basisBpsChecked() reports the gap when it can compute one, and reports that it cannot when it
+              cannot.
+            </li>
+            <li>
+              <span className="text-white">Single-venue dependency</span>: all exposure sits on one perp venue and its
+              operator. On this testnet that venue is a simulator, not a live exchange.
+            </li>
+            <li>
+              Named risks: sustained negative funding drawing the buffer down with no fee passthrough or insurance
+              tranche deployed to take over, oracle failure, and liquidation tail risk in extreme gaps.
             </li>
             <li>
               Not available where synthetic equity exposure is restricted. Interface geo-gating applies. UseCert is

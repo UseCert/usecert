@@ -7,10 +7,8 @@ import CommandPalette from "./dashboard/CommandPalette";
 import Overview from "./dashboard/Overview";
 import VaultsView from "./dashboard/VaultsView";
 import MintRedeem from "./dashboard/MintRedeem";
-import StakingView from "./dashboard/StakingView";
 import ActivityView from "./dashboard/ActivityView";
 import RiskView from "./dashboard/RiskView";
-import KeepersView from "./dashboard/KeepersView";
 
 function ViewRouter() {
   const { view } = useDashboard();
@@ -19,14 +17,10 @@ function ViewRouter() {
       return <VaultsView />;
     case "mint":
       return <MintRedeem />;
-    case "staking":
-      return <StakingView />;
     case "activity":
       return <ActivityView />;
     case "risk":
       return <RiskView />;
-    case "keepers":
-      return <KeepersView />;
     default:
       return <Overview />;
   }
@@ -102,8 +96,10 @@ function DashboardInner() {
 
 /**
  * /dashboard: UseCert protocol dashboard. Fully self-contained app chrome
- * (own sidebar + topbar, no landing Layout/Navbar/Footer), frontend-only
- * with a live mock data engine.
+ * (own sidebar + topbar, no landing Layout/Navbar/Footer), reading the live
+ * deployment on Robinhood Chain testnet (chain 46630). There is no mock data
+ * engine any more: every figure comes from a contract read or renders as an
+ * em-dash.
  */
 export default function Dashboard() {
   return (

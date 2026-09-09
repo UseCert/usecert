@@ -13,7 +13,7 @@ export default function WhyUseCert() {
       <div className="mx-auto max-w-[1440px] px-4 py-16 md:px-6 md:py-24 lg:px-12 lg:py-32">
         <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-60">Why UseCert?</p>
         <h2 className="mt-4 max-w-[14ch] text-[44px] font-semibold uppercase leading-[0.85] tracking-[-0.05em] md:text-[60px] lg:text-[78px]">
-          <LetterReveal text="Backed every block" byWord stagger={0.05} />
+          <LetterReveal text="Backed, and proven" byWord stagger={0.05} />
         </h2>
 
         <div className="mt-14 grid gap-10 lg:grid-cols-2 lg:gap-16">
@@ -39,7 +39,7 @@ export default function WhyUseCert() {
               transition={{ duration: 0.7, ease: EASE }}
             >
               <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
-                Delta target per vault, provable on chain every block
+                Delta target per vault, proven on chain every attestation
               </p>
               <Counter end={1} prefix="/" suffix=".0" decimals={0} className="mt-4 block text-[60px] font-semibold leading-[0.9] tracking-[-0.07em] text-green-bright lg:text-[78px]" />
               <Link to="/dashboard" className="group mt-6 inline-flex items-center gap-2 text-[13px] font-semibold uppercase tracking-[0.08em] text-white transition-colors hover:text-green-bright">

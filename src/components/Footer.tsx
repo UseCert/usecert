@@ -45,8 +45,8 @@ export default function Footer() {
             <div className="bg-white p-6 text-ink md:p-8">
               <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-60">Solvency, public</p>
               <p className="mt-3 text-[16px] leading-[1.55]">
-                Every certificate is backed by exactly one token's worth of perp exposure plus USDC margin. Provable
-                every block.
+                Every certificate is backed by exactly one token's worth of perp exposure plus collateral margin.
+                Proven on-chain every attestation (~60s), with the age of the proof published.
               </p>
             </div>
             {/* Community */}
@@ -114,7 +114,7 @@ export default function Footer() {
           <div className="md:text-right">
             <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">Deployed on</p>
             <p className="mt-4 text-[14px] uppercase text-white">
-              Robinhood Chain · 24/7 oracle-priced markets · Solvency public every block
+              Robinhood Chain · 24/7 oracle-priced markets · Solvency proven every attestation, age published
             </p>
             <div className="mt-5 flex gap-4 md:justify-end">
               {SOCIALS.map(({ label, href, Icon }, i) => (
