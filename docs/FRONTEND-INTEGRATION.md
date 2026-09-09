@@ -45,7 +45,22 @@ So: render them as two different things. `buffer18` is collateral the vault hold
 claim about funding and execution variance that **nothing on-chain verifies**. Label the second as
 unverified, or the UI reintroduces the exact defect the audit fixed.
 
-Both are `int256`. `accrual18` genuinely goes negative.
+Both are typed `int256`, but they are not symmetric. `buffer18` **cannot** be negative: it is
+`SafeCast.toInt256(_to18(hotBuffer()))` over a `uint256` balance (`CertVault.sol:1568-1570`), so the
+view reverts rather than publish a negative — do not build a "negative buffer" UI state, it is
+unreachable. `accrual18` genuinely does go negative, meaning a net cumulative loss.
+
+**And a negative `accrual18` silently turns minting off.** `BufferBook.capacity18` returns 0 when
+`balance18 <= 0` (`BufferBook.sol:183-187`), which forces `vault.bufferCapacity18()` to 0, which
+forces `maxNotional18` to 0. Collateral held is irrelevant to this: a vault sitting on $100,000 of
+tUSDG will refuse every mint. Together with a stale `ageSec` (§0.2) these are the **two** reasons a
+healthy-looking deployment refuses to mint, and this is the one with no visible symptom.
+
+Never sum them. One is a stock, the other a flow-integral, and they are not commensurable — but the
+decisive argument is arithmetic, not conceptual: `seedBuffer` (`CertVault.sol:595-598`) both
+transfers collateral in **and** accrues `+_to18(amount)`, so the genesis seed appears in `buffer18`
+and in `accrual18` at once. On the live deployment that is why both read ~$100,000 per mirror.
+Adding them double-counts the same dollars.
 
 ### 0.2 `ageSec` must be on screen wherever backing is
 
@@ -78,9 +93,9 @@ the same party. It is not evidence about mainnet.
 
 | Value class | Decimals | Examples |
 | --- | --- | --- |
-| Collateral | **6** | `amountIn`, `amountOut`, `hotBuffer()`, `TestUSDG` balances |
+| Collateral | **6** | `amountIn`, `amountOut`, `hotBuffer()`, `TestUSDG` balances, `postedMargin`, `marginExcess`, `totalOwedOutstanding` |
 | Certificate | **18** | `certIn`, `certOut`, `uTSLA`/`uSPY` balances, `supply` |
-| Prices and 18-dec figures | **18** | `px()`, `*Px18`, `notional18`, `buffer18`, `accrual18`, `instantCap18` |
+| Prices and 18-dec figures | **18** | `px()`, `*Px18`, `notional18`, `buffer18`, `accrual18`, `instantCap18`, `freeCollateral18()`, `bufferCapacity18()`, `maxNotional18()` |
 | Feed answers | **8** | `ReplayAggregator.latestRoundData().answer` |
 | Basis points | 10 000 = 100% | `deltaBps`, `mintFeeBps`, `basisBandBps` |
 
@@ -91,6 +106,46 @@ redeploying and reissuing the certificate token.
 **The trap:** `mintInstant(amountIn)` takes **6-decimal collateral** and returns **18-decimal
 certificates**. `redeemInstant(certIn)` is the reverse. A single shared `formatUnits(v, 18)` helper
 across the app will be wrong on roughly half your numbers.
+
+### 0.5 `bufferCapacity18()` is not the capacity, and cannot drive a progress bar
+
+Three legs gate a mint, and `CapacityOracle.maxNotional18` takes the **minimum** of them
+(`CapacityOracle.sol:89-99`): a depth leg (`depthBps` x attested open interest), an absolute cap
+(`absoluteCap18`), and `vault.bufferCapacity18()`. Only the minimum matters, and on this deployment
+the buffer leg is never it. Measured on chain 46630:
+
+| | `bufferCapacity18()` | `absoluteCap18` | **binds** |
+| --- | --- | --- | --- |
+| uTSLA | $9,999,004 | $90,000 | **$90,000** |
+| uSPY | $9,999,900 | $5,000,000 | **$5,000,000** |
+
+So `bufferCapacity18()` overstates uTSLA's real room by **111x**. It is also not "headroom": it is a
+notional-exposure ceiling, `min(freeCollateral18() x 100, max(0, accrual18) x 100)`
+(`CertVault.sol:563-569`), and it **rises** as the vault mints, because `_postMargin` retains
+`1 - targetMarginBps` of every mint as float (`CertVault.sol:1925-1931`).
+
+**Do not build a fullness bar from it.** While the own-capital leg binds, the identity
+
+```
+freeCollateral18() / bufferCapacity18() == 1 / BUFFER_COVERAGE_MULTIPLE == 1.0000%
+```
+
+holds at *every* fill level by construction — verified to six decimals on both live mirrors. A bar
+built on it is a constant that never reaches 100%. Pairing it with the 6-decimal `hotBuffer()`
+instead is worse: that is the §0.4 trap, and it renders 0.0000% forever.
+
+The one indicator that is bounded in [0, 1] and reaches 1 exactly when the contract reverts is
+`_requireCapacity` itself (`CertVault.sol:1755-1771`):
+
+```
+used = max( (certificate.totalSupply() + vault.pendingMintCerts()) * oracle.px() / 1e18,
+            vault.solvency().notional18 )
+cap  = capacityOracle.maxNotional18(vaultAddress, vault.bufferCapacity18())
+utilisation = used / cap        // CertVault_AtCapacity fires at exactly 1
+```
+
+`CapacityOracleABI` and `BufferBookABI` are exported from `frontend/usecert-contracts.ts` for this
+purpose; the addresses are `SHARED.capacityOracle` and per-mirror `bufferBook`.
 
 ---
 
@@ -154,7 +209,7 @@ One `solvency()` call per mirror gives you most of a dashboard. Multicall the re
 | Can users mint? | `oracle.mintAllowed()` |
 | Basis | `oracle.basisBpsChecked()` — see §0.3 |
 | Instant-redeem float | `vault.hotBuffer()` (6 dp) |
-| Capacity headroom | `vault.bufferCapacity18()` |
+| Remaining mint capacity | `capacityOracle.maxNotional18(vault, vault.bufferCapacity18())` — **not** `bufferCapacity18()` alone, see below |
 | Attestation freshness | `registry.ageSec(vaultAddress)` |
 | Supply, user balance | `certificate.totalSupply()`, `.balanceOf(user)` |
 
@@ -286,7 +341,7 @@ error in the ABI so `viem` can decode them. Map the ones a user can actually hit
 | --- | --- |
 | `CertVault_UseQueuedRedeem` | *Not an error.* Route to `requestRedeem`. |
 | `CertVault_AwaitingSettlement` | "Funds still arriving from the venue — retry, or call `recallMargin`." |
-| `CertVault_AtCapacity` | "This vault is at capacity." Show `bufferCapacity18` and the cap. |
+| `CertVault_AtCapacity` | "This vault is at capacity." Show `capacityOracle.maxNotional18(vault, vault.bufferCapacity18())`, **never** `bufferCapacity18()` — the latter reads ~$10,000,000 on the live uTSLA mirror while the vault refuses a $100 mint. |
 | `CertVault_MintPaused` | "Minting paused: the oracle is unhealthy." Redemption still works — say so. |
 | `CertVault_AboveInstantCap` / `BelowInstantCap` | A routing bug in the UI, not a user error. |
 | `CertVault_SettleWindowExpired` | Offer `stageRefund` → `refundMint`. |

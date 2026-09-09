@@ -57,6 +57,19 @@ KEEP = {
     },
     "TestFaucet": {"claim", "nextAvailableAt", "token", "dripAmount", "interval"},
     "SolvencyRegistry": {"latest", "ageSec", "attester"},
+    # `bufferCapacity18()` is the LOOSEST of three capacity legs and is NOT what blocks a mint.
+    # Measured live on 46630: uTSLA bufferCapacity18 = $9,999,004 while the binding
+    # `maxNotional18` = $90,000 (the absolute cap) - 111x apart. A UI that shows the former as
+    # "capacity" tells a user they have $10M of room while the vault refuses a $100 mint. Worse,
+    # `freeCollateral18() / bufferCapacity18()` is identically 1/BUFFER_COVERAGE_MULTIPLE = 1.0000%
+    # at every fill level by construction (CertVault.sol:563-569), confirmed to six decimals on
+    # both live mirrors - a progress bar built on it is a constant. So the leg that actually binds
+    # has to be reachable from the front end.
+    "CapacityOracle": {"maxNotional18", "absoluteCap18", "depthBps", "registry", "governance"},
+    # `capacity18` returns 0 whenever `balance18 <= 0`, which forces bufferCapacity18() to 0 and
+    # halts minting REGARDLESS of collateral held. That is a second "healthy-looking deployment
+    # refuses to mint" cause and a UI cannot diagnose it without reading this directly.
+    "BufferBook": {"balance18", "capacity18", "config", "holdingFeeBps", "insuranceDrawNeeded", "mintSlowed"},
 }
 
 ARTIFACTS = {
@@ -66,6 +79,8 @@ ARTIFACTS = {
     "TestUSDG": "out/TestUSDG.sol/TestUSDG.json",
     "TestFaucet": "out/TestFaucet.sol/TestFaucet.json",
     "SolvencyRegistry": "out/SolvencyRegistry.sol/SolvencyRegistry.json",
+    "CapacityOracle": "out/CapacityOracle.sol/CapacityOracle.json",
+    "BufferBook": "out/BufferBook.sol/BufferBook.json",
 }
 
 HEADER = """// GENERATED from Foundry artifacts - do not hand-edit.
