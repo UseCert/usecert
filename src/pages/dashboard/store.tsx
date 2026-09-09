@@ -286,6 +286,8 @@ export interface Totals {
    * the live state of both routed vaults. A zero denominator is undefined, not 46,054%.
    */
   ratio: number | null;
+  /** Backing over obligation, percent. The solvency test - see `aggregateTotals`. */
+  backingRatio: number | null;
   /** Protocol-wide mint-ceiling utilisation. `null` when unknown or the cap is zero. */
   capacityUsed: number | null;
   capacityCap: number | null;

@@ -47,9 +47,13 @@ export function TopBar() {
       ? "unknown"
       : totals.anyStale || totals.anyPriceUnavailable
         ? "degraded"
-        : totals.ratio === null
+        : totals.backingRatio === null
           ? "no-position"
-          : totals.ratio >= 100
+          : // Solvency = backing covers the obligation. NOT `ratio >= 100`: `ratio` is margin
+            // over hedge notional, which sits at targetMarginBps (90% here) by design, so that
+            // test published "Degraded" on a correctly configured vault - live mirrors read
+            // 91.11% while every real health signal was green.
+            totals.backingRatio >= 100
             ? "healthy"
             : "degraded";
   return (
@@ -83,14 +87,24 @@ export function TopBar() {
                   ? "No attested position"
                   : "Reading chain…"}
           </span>
-          {/* Margin/notional, both attester-relayed, with the age of that attestation. A
-              backing figure with no age is the claim this project spent the most effort
-              not making. */}
+          {/* Leads with the figure the chip's own claim rests on - backing over obligation -
+              and keeps margin/notional beside it as the hedge-margin reading it actually is.
+              Showing only margin/notional here left "Attested backing holds" sitting next to
+              91.11%, which reads as a contradiction rather than as support.
+
+              Both are attester-relayed, so the age travels with them. A backing figure with no
+              age is the claim this project spent the most effort not making. */}
           <span className="hidden truncate font-mono text-[10px] uppercase tracking-[0.08em] text-white-60 xl:block">
             {totals === null
-              ? "Margin / notional —"
-              : `Margin / notional ${
-                  totals.ratio === null ? "n/a (attested notional $0)" : `${totals.ratio.toFixed(2)}% (attested)`
+              ? "Backing / obligation —"
+              : `Backing / obligation ${
+                  totals.backingRatio === null
+                    ? "—"
+                    : Number.isFinite(totals.backingRatio)
+                      ? `${totals.backingRatio.toFixed(2)}%`
+                      : "no obligation"
+                } · margin / notional ${
+                  totals.ratio === null ? "n/a (attested notional $0)" : `${totals.ratio.toFixed(2)}%`
                 } · proven ${Math.round(totals.worstAgeSec)}s ago${
                   totals.anyStale ? ` · stale >${maxAttestationAgeSec}s` : ""
                 }`}

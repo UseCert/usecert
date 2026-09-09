@@ -1177,6 +1177,19 @@ export function aggregateTotals(vaults: LiveVault[]): {
    * denominator is undefined and must be an em-dash, not an artefact.
    */
   ratio: number | null;
+  /**
+   * Backing (attested margin + collateral held) over obligation (supply x oracle price), as a
+   * percent. `null` when no mirror published a point.
+   *
+   * THIS, NOT `ratio`, IS THE SOLVENCY TEST. `ratio` is margin over the hedge notional, which
+   * sits at `targetMarginBps` BY DESIGN - 90% on this deployment, because `_postMargin` posts
+   * only the target and retains the rest as float (`CertVault.sol:1925-1931`). Gating health on
+   * `ratio >= 100` therefore condemns a correctly configured vault: the live mirrors read
+   * 91.11% and the header published "Degraded - check age and oracle" while basis was 0 bps,
+   * minting was allowed on both mirrors and the hedge sat exactly at target. Solvency is
+   * whether backing covers what holders are owed, and that is this number.
+   */
+  backingRatio: number | null;
   /** Sum of `capacity.used` across mirrors, `null` if any is unknown. */
   capacityUsed: number | null;
   /** Sum of `capacity.cap` across mirrors, `null` if any is unknown. */
@@ -1210,6 +1223,17 @@ export function aggregateTotals(vaults: LiveVault[]): {
     buffer,
     accrualClaimedUnverified,
     ratio: notional > 0 ? (margin / notional) * 100 : null,
+    backingRatio: (() => {
+      // Same provenance the Overview strip uses: the per-vault point, which values the
+      // obligation at the live guarded price and excludes the unverified accrual claim.
+      const pts = live.map((v) => v.solvency[0] ?? null);
+      if (pts.length === 0 || pts.some((pt) => pt === null)) return null;
+      const ob = pts.reduce((t, pt) => t + pt!.obligation, 0);
+      const bk = pts.reduce((t, pt) => t + pt!.backing, 0);
+      // A zero obligation is not a solvency failure - nothing is owed. Report fully covered.
+      if (ob <= 0) return bk >= 0 ? Number.POSITIVE_INFINITY : 0;
+      return (bk / ob) * 100;
+    })(),
     capacityUsed: used18 === null ? null : fromPrice18(used18),
     capacityCap: cap18 === null ? null : fromPrice18(cap18),
     capacityUtilisationPct:
