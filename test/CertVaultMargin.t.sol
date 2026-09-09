@@ -5,6 +5,10 @@ import {CertVault} from "../src/CertVault.sol";
 import {VaultFixture} from "./helpers/VaultFixture.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockLighter} from "./mocks/MockLighter.sol";
+// Task 4: the margin mechanic (and therefore InsufficientMargin) moved to the shared venue base
+// that MockLighter and the deployable LighterSim both inherit. Solidity will not resolve an
+// inherited error through the derived contract's name, so the selector is read from LighterCore.
+import {LighterCore} from "../src/sim/LighterCore.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 
 /// @notice Task 8b: proves the vault posts margin behind the perp position it opens on Lighter
@@ -54,7 +58,7 @@ contract CertVaultMarginTest is VaultFixture {
         bareLighter.deposit(address(this), ASSET_IDX, 0, 1e6); // ~$1 dust margin, no real backing
         uint48 idx = bareLighter.addressToAccountIndex(address(this));
         bareLighter.createOrder(idx, MARKET, 99_900, 35586, 0, 1); // same size as the vault's hedge
-        vm.expectRevert(MockLighter.InsufficientMargin.selector);
+        vm.expectRevert(LighterCore.InsufficientMargin.selector);
         bareLighter.settleBatch();
     }
 

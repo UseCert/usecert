@@ -11,6 +11,9 @@ import {SolvencyRegistry} from "../../src/SolvencyRegistry.sol";
 import {CapacityOracle} from "../../src/CapacityOracle.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockLighter} from "../mocks/MockLighter.sol";
+// Task 4: InsufficientMargin now lives on the shared venue base MockLighter inherits; Solidity
+// will not resolve an inherited error through the derived contract's name.
+import {LighterCore} from "../../src/sim/LighterCore.sol";
 
 /// @notice Drives randomised mint/redeem/settle/margin sequences against one vault and records
 ///         the ground truth the invariants in BackingInvariant.t.sol check.
@@ -524,7 +527,7 @@ contract VaultHandler is CommonBase, StdUtils {
         callsSettleBatch++;
         uint256 postedBefore = vault.postedMargin();
         try lighter.settleBatch() {} catch (bytes memory reason) {
-            if (_isSelector(reason, MockLighter.InsufficientMargin.selector)) {
+            if (_isSelector(reason, LighterCore.InsufficientMargin.selector)) {
                 settleBatchInsufficientMarginCount++;
                 console2.log("SETTLE_BATCH_INSUFFICIENT_MARGIN", settleBatchInsufficientMarginCount);
             }

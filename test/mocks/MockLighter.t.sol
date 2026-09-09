@@ -3,6 +3,10 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {MockLighter} from "./MockLighter.sol";
+// Task 4: the venue mechanics (and their errors) moved to the shared base MockLighter and the
+// deployable LighterSim both inherit. Solidity will not resolve an inherited error through the
+// derived contract's name, so AccountIsNotRegistered is read from LighterCore.
+import {LighterCore} from "../../src/sim/LighterCore.sol";
 import {MockERC20} from "./MockERC20.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 
@@ -25,7 +29,7 @@ contract MockLighterTest is Test {
     }
 
     function test_createOrderRevertsForUnregisteredAccount() public {
-        vm.expectRevert(MockLighter.AccountIsNotRegistered.selector);
+        vm.expectRevert(LighterCore.AccountIsNotRegistered.selector);
         lighter.createOrder(0, 16, 100, 35586, 0, 1);
     }
 
