@@ -10,15 +10,13 @@ import {IERC20Metadata} from "openzeppelin-contracts/token/ERC20/extensions/IERC
 ///         testnet).
 ///
 /// @dev EXTRACTED VERBATIM from `test/mocks/MockLighter.sol` (Task 4). The mechanics below are the
-///      semantics the 258-test suite certifies — margin enforcement with `InsufficientMargin()`,
+///      semantics the suite certifies — margin enforcement with `InsufficientMargin()`,
 ///      mark-to-market PnL with volume-weighted entry-price tracking, asynchronous priority-queue
 ///      fills (orders NEVER fill in the calling transaction), `getPendingBalance` /
-///      `withdrawPendingBalance`, account registration, and `depositCapTicks` refusal. Nothing
-///      here was changed: a copy would silently drift from the contract those unit tests certify,
-///      which is the whole reason this is an extraction rather than a fork.
+///      `withdrawPendingBalance`, account registration, and `depositCapTicks` refusal.
 ///
 ///      `abstract` is deliberate. LighterCore is not a front end and must never be deployable on
-///      its own: once Task 5 puts access control on `LighterSim`, a concrete — and therefore
+///      its own: Task 5 put access control on `LighterSim`, so a concrete — and therefore
 ///      deployable — LighterCore would be a standing bypass of that gating. Deploy `LighterSim`.
 ///
 ///      Three things this base deliberately does NOT have, because `LighterSim` would inherit
@@ -26,6 +24,41 @@ import {IERC20Metadata} from "openzeppelin-contracts/token/ERC20/extensions/IERC
 ///      `setDepositCapTicks`), the fault-injection flags, and the counterparty-collateral mint in
 ///      `_fundPending()`. All of those live on `MockLighter`, and none of them exists on the real
 ///      venue. Global Constraint 5 — the simulator must never be easier than mainnet — is why.
+///
+///      ---------------------------------------------------------------------------------------
+///      TASK 7. PER-ACCOUNT STATE ISOLATION. This is the structural fix that two prior rounds
+///      closed only with interim measures, and it is worth stating what changed and why.
+///
+///      Margin, positions and entry prices used to be GLOBAL: one `marginBalance`, one
+///      `positionBase[market]`, one `entryPrice[market]`, shared by every registered account. Every
+///      Critical this simulator has had was a consequence of that single fact rather than of the
+///      particular entry point each round patched:
+///
+///        * `withdraw`'s ceiling was `equity()` — `marginBalance + unrealisedPnl()`, with no
+///          account parameter at all — so ANY account could draw the whole pool. Round 0 bound the
+///          call to its caller; the caller binding was then satisfied by a self-registration and
+///          the drain was unchanged. Round 1 shrank the account set with an allowlist; the drain
+///          was still there for anyone inside it.
+///        * `settleBatch` read `previous = positionBase[o.marketIndex]` with no account scoping, and
+///          `baseAmount == 0` means "the full position size on the side the caller named", so a
+///          second account could zero out the vault's entire hedge through settlement.
+///        * The initial-margin check valued the resulting notional against the GLOBAL cash balance,
+///          so one account's collateral margined another account's position increase.
+///
+///      All three are now closed at the root rather than at the entry point. `marginBalanceOf`,
+///      `positionBaseOf` and `entryPriceOf` are keyed by account index and are the only books the
+///      mechanics read or write. `equity(accountIndex)` takes an account and there is deliberately
+///      NO no-argument overload of it: a global equity figure has no legitimate consumer, and
+///      leaving one callable is how the drain survived two fix rounds.
+///
+///      `marginBalance()`, `positionBase(market)`, `entryPrice(market)` and `unrealisedPnl()`
+///      survive as AGGREGATE VIEWS, computed by summing the per-account books. They are mirrors
+///      with no authority — nothing in the mechanics reads them — and they answer the venue-level
+///      question ("what does this venue hold in total", "what is the net open interest") that
+///      several tests and a log reader legitimately ask. `entryPrice(market)` is the size-weighted
+///      mean of the per-account entries, which is the only aggregate of a price that means
+///      anything; on the single-account deployments the suite runs it is that account's own entry.
+///      ---------------------------------------------------------------------------------------
 abstract contract LighterCore is ILighter {
     struct Order {
         uint16 marketIndex;
@@ -37,6 +70,12 @@ abstract contract LighterCore is ILighter {
         ///      that account's orders and ONLY that account's. Previously the queue was anonymous
         ///      and `cancelAllOrders` ignored its argument and did `delete _queue`, so any address
         ///      could wipe the vault's hedge. 20 bytes total: still one storage slot.
+        ///
+        ///      Task 7 gives it a second, larger job. `settleBatch` now resolves every order
+        ///      against `positionBaseOf[o.account]` and margins it against
+        ///      `marginBalanceOf[o.account]`, so this field is what makes an order act on its
+        ///      submitter's own book. Round 1's note that the attribution "governs cancellation
+        ///      only" was the finding that made this task necessary.
         uint48 account;
     }
 
@@ -52,9 +91,7 @@ abstract contract LighterCore is ILighter {
     ///      core rather than on `LighterSim`: the real `ZkLighter` never takes the acting account on
     ///      trust from calldata, it derives it from the caller via
     ///      `validateAndGetAccountIndexFromAddress`. A simulator that accepts any index is a
-    ///      simulator that is EASIER than mainnet, which Global Constraint 5 names as Critical — and
-    ///      here it was also an unconditional drain of every depositor's collateral, since
-    ///      `withdraw` credits `_pending[msg.sender]` out of a single global `marginBalance`.
+    ///      simulator that is EASIER than mainnet, which Global Constraint 5 names as Critical.
     ///
     ///      `MockLighter` inherits this deliberately. The suite must run against the venue's real
     ///      authorisation model, not a looser one.
@@ -64,7 +101,7 @@ abstract contract LighterCore is ILighter {
     ///      OpenZeppelin's `transferFrom` permits a zero-value transfer with NO allowance and NO
     ///      balance, so `deposit(self, _, _, 0)` cost nothing, needed nothing, and still ran the
     ///      registration branch below — which handed the caller an account index and therefore
-    ///      SATISFIED `_requireCallerOwnsAccount`. `withdraw`'s ceiling is the global `equity()`,
+    ///      SATISFIED `_requireCallerOwnsAccount`. `withdraw`'s ceiling was the global `equity()`,
     ///      so a self-registered address with no collateral then took every depositor's balance in
     ///      three transactions: the same end state as the pre-Task-5 drain, one transaction later.
     ///      Task 5's caller binding only ever caught the *unregistered* attacker.
@@ -75,10 +112,42 @@ abstract contract LighterCore is ILighter {
     ///      zero, and neither `CertVault.bootstrap()` (which deposits `10 ** decimals`) nor
     ///      `CertVault._postMargin()` (which early-returns on a zero share) can reach it.
     ///
-    ///      This is the narrow half of the fix. The registration allowlist on `LighterSim` is the
-    ///      other half, and per-account collateral isolation — the real fix, which makes a free
-    ///      registration harmless rather than merely unreachable — is Task 7.
+    ///      Task 7 makes it belt-and-braces rather than load-bearing: a free registration is now
+    ///      HARMLESS, because a registered account with no collateral has an `equity()` of zero and
+    ///      a `positionBaseOf` of zero. The refusal stays because the mechanism it closes is still
+    ///      not venue behaviour.
     error LighterCore_ZeroDepositAmount();
+    /// @dev Task 7, item 4. The settlement queue is full.
+    ///
+    ///      `createOrder` used to push with no length bound, and EVERY path that walks the queue is
+    ///      O(queue): `settleBatch`, `_cancelOrdersOf`'s compaction, and `LighterSim`'s
+    ///      `ownerPurgeQueue`. So a queue long enough to exceed the block gas limit braked
+    ///      settlement AND the operator hatch meant to rescue it — on a testnet with a free faucet,
+    ///      reachable by anyone who can hold an account. Bounding the array is what makes the
+    ///      hatch's worst-case cost a number rather than an unknown.
+    error LighterCore_QueueFull();
+    /// @dev Task 7, item 4. One account has `MAX_ORDERS_PER_ACCOUNT` orders outstanding.
+    ///
+    ///      `MAX_QUEUE` alone would be a new denial of service: one account could fill the global
+    ///      queue and every other account's `createOrder` — the vault's hedge included — would
+    ///      revert. The per-account cap is what makes the global cap safe to have.
+    error LighterCore_AccountOrderCapReached();
+
+    /// @notice A queued order was refused at settlement and the rest of the batch continued.
+    ///
+    /// @dev Task 7, item 3, and the structural fix for fix round 1's Critical 2. `settleBatch` used
+    ///      to revert the batch as a WHOLE on the first under-margined order, and Task 5's
+    ///      per-account `cancelAllOrders` binding meant only that order's own account could
+    ///      withdraw it — so one account with no collateral queueing one oversized order stopped
+    ///      settlement for every other account, permanently, and `requiredMarginBps` is only
+    ///      raisable. Rejecting the individual order is both the venue-faithful behaviour and the
+    ///      fix: a bad order can no longer reach anyone else's fills.
+    ///
+    /// @param account The submitting account, from `Order.account`.
+    /// @param marketIndex The market the refused order was on.
+    /// @param orderId The refused order's index in the settlement queue.
+    /// @param reason The error selector the order would have reverted with in `strictMode`.
+    event OrderRejected(uint48 indexed account, uint16 indexed marketIndex, uint256 indexed orderId, bytes4 reason);
 
     IERC20 public immutable collateral;
     uint16 public immutable collateralAssetIndex;
@@ -87,20 +156,70 @@ abstract contract LighterCore is ILighter {
 
     mapping(address => uint48) public addressToAccountIndex;
     uint48 private _nextAccountIndex = 3;
+    /// @dev Every account index ever registered, in registration order. Exists so the aggregate
+    ///      views (`marginBalance()`, `positionBase()`, `entryPrice()`, `unrealisedPnl()`) can sum
+    ///      the per-account books. Read by views only; no mechanic walks it.
+    uint48[] internal _accounts;
 
-    /// @dev collateral posted as margin, in token units
-    uint256 public marginBalance;
-    /// @dev signed position size in base ticks (size_decimals applied by caller)
-    mapping(uint16 => int256) public positionBase;
-    /// @dev mark price scaled to 1e18
+    /// @dev Task 7. Collateral posted as margin, in token units, PER ACCOUNT. This is the book —
+    ///      `marginBalance()` below is a sum of it, kept for the venue-level question and for the
+    ///      tests that ask it, and read by nothing that decides anything.
+    mapping(uint48 => uint256) public marginBalanceOf;
+    /// @dev Task 7. Signed position size in base ticks (size_decimals applied by caller), PER
+    ///      ACCOUNT AND MARKET. `settleBatch` resolves `baseAmount == 0` against this, which is
+    ///      what closes the hedge-destruction path: a full-size order defaults to the size of the
+    ///      SUBMITTER's position, never of the pool's.
+    mapping(uint48 => mapping(uint16 => int256)) public positionBaseOf;
+    /// @dev Task 7. Volume-weighted entry price per account and market, scaled to 1e18. Zero when
+    ///      that account is flat in that market.
+    mapping(uint48 => mapping(uint16 => uint256)) public entryPriceOf;
+    /// @dev mark price scaled to 1e18. Genuinely venue-wide: one mark per market, not per account.
     mapping(uint16 => uint256) public markPrice;
-    /// @dev M3: volume-weighted entry price per market, scaled to 1e18. Zero when flat.
-    mapping(uint16 => uint256) public entryPrice;
     /// @dev required margin as a fraction of resulting notional, in bps. Default 5_000 (2x).
     uint256 public requiredMarginBps = 5_000;
     /// @dev Mirrors AssetConfig.depositCapTicks on the real contract, which withdraw() validates
     ///      `_baseAmount` against. Defaults large so existing tests are unaffected.
     uint256 public depositCapTicks = type(uint64).max;
+
+    /// @notice When set, `settleBatch` reverts on the first order it cannot fill instead of
+    ///         rejecting that order and continuing.
+    ///
+    /// @dev Task 7, item 3. A COMPATIBILITY PATH, not the default, and never the deployed default.
+    ///      Three tests written before this task pin `settleBatch` reverting `InsufficientMargin`
+    ///      as the way a venue refuses an over-leveraged fill; that assertion is still worth having
+    ///      — it is the proof the margin gate is not vacuous — so they run in strict mode rather
+    ///      than being rewritten. Reverting the whole batch is NOT venue behaviour and is the
+    ///      denial of service fix round 1 had to ship an owner hatch for, which is why it is opt-in.
+    ///
+    ///      Assigned by the front ends: owner-gated on `LighterSim`, ungated on `MockLighter`
+    ///      alongside its other test knobs.
+    bool public strictMode;
+
+    /// @notice The hard bound on the settlement queue's length.
+    /// @dev Task 7, item 4. Every queue walk is O(this), which is what makes the operator hatch's
+    ///      worst case a bounded number: 512 single-slot `Order`s to clear, comfortably inside a
+    ///      block. Far above anything the suite or the vault produces — the deepest existing
+    ///      sequence queues twelve.
+    uint256 public constant MAX_QUEUE = 512;
+    /// @notice The bound on one account's outstanding orders.
+    /// @dev Task 7, item 4. Stops a single account monopolising `MAX_QUEUE` and locking every other
+    ///      account — including the vault — out of `createOrder`.
+    uint256 public constant MAX_ORDERS_PER_ACCOUNT = 128;
+    /// @notice The most orders one `settleBatch` call will process.
+    /// @dev Task 7, item 4. With `settleCursor` below, a queue larger than this is drained by
+    ///      repeated calls rather than in one transaction that might not fit in a block.
+    uint256 public constant SETTLE_BATCH_MAX = 64;
+
+    /// @notice How far into the queue settlement has already got.
+    /// @dev Task 7, item 4. Orders below the cursor are settled and inert; `_cancelOrdersOf` only
+    ///      considers entries at or above it, so a cancellation can never rewind a fill. Reset to
+    ///      zero — together with the queue itself — the moment the cursor reaches the end.
+    uint256 public settleCursor;
+    /// @notice How many queued, unsettled orders an account currently has.
+    /// @dev Maintained in exactly four places — `createOrder` up, and down in `settleBatch`,
+    ///      `_cancelOrdersOf` and `_purgeQueue`, which between them are every way an order leaves
+    ///      the queue. `test_queuedOrderCountersTrackTheQueue` pins it against a direct scan.
+    mapping(uint48 => uint256) public queuedOrdersOf;
 
     /// @dev `internal`, not `private`, only so `MockLighter.queuedOrderCount()` / `lastOrder()`
     ///      can read it. Those two introspection helpers are test-only and stay off this base.
@@ -127,10 +246,15 @@ abstract contract LighterCore is ILighter {
         // succeeds with no allowance and no balance, so this used to be a FREE registration.
         if (amount == 0) revert LighterCore_ZeroDepositAmount();
         collateral.transferFrom(msg.sender, address(this), amount);
-        marginBalance += amount;
-        if (addressToAccountIndex[to] == 0) {
-            addressToAccountIndex[to] = _nextAccountIndex++;
+        uint48 idx = addressToAccountIndex[to];
+        if (idx == 0) {
+            idx = _nextAccountIndex++;
+            addressToAccountIndex[to] = idx;
+            _accounts.push(idx);
         }
+        // Task 7: the collateral lands in `to`'s OWN book. It used to land in a shared pool, which
+        // is what made every account's withdrawal ceiling every other account's balance.
+        marginBalanceOf[idx] += amount;
     }
 
     function createOrder(
@@ -145,36 +269,49 @@ abstract contract LighterCore is ILighter {
         _requireCallerOwnsAccount(accountIndex);
         if (marketIndex > 254) revert MarketIndexTooHigh();
         if (orderType > 1) revert BadOrderType();
+        // Task 7, item 4. Both bounds, and both matter: the global one keeps every queue walk
+        // affordable, the per-account one keeps the global one from being a lockout.
+        if (_queue.length >= MAX_QUEUE) revert LighterCore_QueueFull();
+        if (queuedOrdersOf[accountIndex] >= MAX_ORDERS_PER_ACCOUNT) revert LighterCore_AccountOrderCapReached();
+        // `baseAmount == 0` is NOT rejected here. It is Lighter's documented close-all primitive
+        // (see ILighter.sol) and `CertVault.closeAll()` is a real caller of it — governance's
+        // wind-down of last resort submits a literal 0 on the side its own ledger says it holds. So
+        // Task 7 takes the amendment's preferred option and SCOPES the reading instead: in
+        // `settleBatch` a zero amount now means "the full size of the SUBMITTING ACCOUNT's
+        // position". Rejecting it would have broken the one caller that legitimately needs it.
         _queue.push(Order(marketIndex, baseAmount, price, isAsk, orderType, accountIndex));
+        ++queuedOrdersOf[accountIndex];
     }
 
     /// @dev Models AdditionalZkLighter.withdraw() on the real contract: it does NOT check the
     ///      account's balance — sufficiency is decided inside the rollup, not on-chain. It only
     ///      validates baseAmount != 0 and baseAmount <= depositCapTicks before enqueuing a
     ///      priority request. So this must not revert on insufficiency; instead it credits only
-    ///      min(baseAmount, equity()) to pending, modelling a rollup batch that fulfills what it
-    ///      can and strands the rest — which is how an oversized request would actually behave on
-    ///      the real venue.
+    ///      min(baseAmount, equity(accountIndex)) to pending, modelling a rollup batch that
+    ///      fulfills what it can and strands the rest.
     ///
-    ///      M3: the ceiling is equity(), not marginBalance. A withdrawal that draws on the
-    ///      position's gain realises exactly the amount the cash balance cannot cover (moving
-    ///      entryPrice toward markPrice so the same gain is never paid twice) and then debits it.
-    ///      Task 5, item 7 (C1): `accountIndex` must be the CALLER's. Before this, the only gate
-    ///      was `accountIndex != 0`, and the credit went to `_pending[msg.sender]` out of a single
-    ///      global `marginBalance` — so any address that had never deposited passed a literal
-    ///      non-zero index, took `min(baseAmount, equity())` (every depositor's collateral) and
-    ///      drained it with `withdrawPendingBalance`. Two transactions, no registration. Reproduced
-    ///      against the deployable artefact before this line existed; see the Task 5 report.
+    ///      M3: the ceiling is equity, not cash. A withdrawal that draws on the position's gain
+    ///      realises exactly the amount the cash balance cannot cover (moving entryPrice toward
+    ///      markPrice so the same gain is never paid twice) and then debits it.
+    ///
+    ///      TASK 7, ITEM 0 — THE REAL FIX, and the whole reason this task exists. The ceiling is
+    ///      `equity(accountIndex)`: the CALLER'S OWN cash plus the CALLER'S OWN share of PnL. It
+    ///      used to be `equity()`, a global figure with no account parameter at all, so the two
+    ///      caller-binding rounds before this one were closing the door on an attacker who was
+    ///      already inside: bind the call to its caller and the caller could still name the whole
+    ///      pool. Measured before this line existed, against the deployable artefact: an account
+    ///      that had deposited 1 USDG withdrew 600_001 USDG and left the simulator at zero.
     function withdraw(uint48 accountIndex, uint16 assetIndex, uint8, uint64 baseAmount) public virtual {
         if (accountIndex == 0) revert AccountIsNotRegistered();
         _requireCallerOwnsAccount(accountIndex);
         if (baseAmount == 0) revert ZeroBaseAmount();
         if (baseAmount > depositCapTicks) revert AboveDepositCap();
 
-        uint256 available = equity();
+        uint256 available = equity(accountIndex);
         uint256 fulfilled = baseAmount <= available ? baseAmount : available;
-        if (fulfilled > marginBalance) _realiseGain(fulfilled - marginBalance);
-        marginBalance -= fulfilled;
+        uint256 cash = marginBalanceOf[accountIndex];
+        if (fulfilled > cash) _realiseGain(accountIndex, fulfilled - cash);
+        marginBalanceOf[accountIndex] -= fulfilled;
 
         _pendingTotal += fulfilled;
         _fundPending();
@@ -206,24 +343,55 @@ abstract contract LighterCore is ILighter {
 
     // ------------------------------------------------------------------------ batch settlement
 
-    /// @notice Fill every queued order at the current mark price. Emulates one batch executing.
+    /// @notice Fill up to `SETTLE_BATCH_MAX` queued orders at the current mark price, resolving and
+    ///         margining each one against its own submitting account.
+    ///
     /// @dev Fills that increase |position| must be covered by requiredMarginBps of the resulting
     ///      notional, valued at markPrice — the way a real venue would reject an under-margined
-    ///      order rather than silently fill it. The margin check deliberately still reads
-    ///      marginBalance (cash), not equity(): a real venue's initial-margin requirement is met
-    ///      with posted collateral, and every fill in the suite happens at the mark it is valued
-    ///      against, so an increase carries no PnL of its own to credit.
+    ///      order rather than silently fill it. The check reads cash margin, not equity: a real
+    ///      venue's initial-margin requirement is met with posted collateral, and every fill in the
+    ///      suite happens at the mark it is valued against, so an increase carries no PnL of its own
+    ///      to credit.
     ///
     ///      This lives on the shared base rather than on each front end. It is not a test
     ///      convenience: it is the simulator's central mechanic, `LighterSim` needs it to be a
-    ///      venue at all, and duplicating it across two front ends is precisely the drift this
-    ///      extraction exists to prevent. `virtual` so Task 6 can make settlement asynchronous in
-    ///      one place, and so Task 5 can gate it in one place.
+    ///      venue at all, and duplicating it across two front ends is precisely the drift the
+    ///      LighterCore extraction exists to prevent. `virtual` so Task 6 can make settlement
+    ///      asynchronous in one place, and so `LighterSim` can gate it in one place.
+    ///
+    ///      TASK 7 CHANGED THREE THINGS HERE, and each one closes a reported hole:
+    ///
+    ///      1. `previous` is `positionBaseOf[o.account][o.marketIndex]`, not a global
+    ///         `positionBase[market]`. Combined with the `baseAmount == 0` branch — which means
+    ///         "the full position size on the side the caller named" — the global read let ANY
+    ///         second account queue `createOrder(idx, market, 0, px, isAsk = 1, 1)` and zero out
+    ///         the vault's entire hedge at settlement. Same harm as the pre-Task-5 `delete _queue`,
+    ///         reached through settlement instead of cancellation. Reproduced before this change:
+    ///         the vault's 100_000-tick hedge went to 0 in one settled batch.
+    ///      2. The initial-margin check reads `marginBalanceOf[o.account]`, so an account can only
+    ///         open what its OWN collateral covers. Reproduced before this change: an account
+    ///         holding 1 USDG opened a $10,000 notional position on the pool's margin.
+    ///      3. The order is checked BEFORE anything is written, and a failure rejects that order
+    ///         and continues instead of reverting the batch. The old shape applied the fill, wrote
+    ///         the position, and then reverted — correct only because the revert unwound it, which
+    ///         is exactly why it could not be turned into a skip without reordering. A batch that
+    ///         reverts as a whole was fix round 1's Critical 2: one account's poison order stopped
+    ///         everyone's settlement permanently. `strictMode` restores the old behaviour for the
+    ///         three tests that pin it.
     function settleBatch() public virtual {
-        for (uint256 i = 0; i < _queue.length; ++i) {
+        uint256 n = _queue.length;
+        uint256 i = settleCursor;
+        // Task 7, item 4. A cursor rather than a whole-queue loop, so a long queue is drained by
+        // repeated calls instead of by one transaction that may not fit in a block.
+        uint256 stop = n - i > SETTLE_BATCH_MAX ? i + SETTLE_BATCH_MAX : n;
+
+        for (; i < stop; ++i) {
             Order memory o = _queue[i];
-            int256 previous = positionBase[o.marketIndex];
-            int256 signed = o.isAsk == 1 ? -int256(uint256(o.baseAmount)) : int256(uint256(o.baseAmount));
+            // Consumed either way: rejected orders leave the queue too, or the rejection would be
+            // a jam by another name.
+            --queuedOrdersOf[o.account];
+
+            int256 previous = positionBaseOf[o.account][o.marketIndex];
             int256 resulting;
             if (o.baseAmount == 0) {
                 // M-3 (MEDIUM, external C1 audit). `baseAmount == 0` means "default to the full
@@ -234,9 +402,12 @@ abstract contract LighterCore is ILighter {
                 // This mock used to set `resulting = 0` for any zero-amount order, ignoring isAsk
                 // entirely, so no test in the suite could observe the difference — and
                 // CertVault.closeAll() hardcoded SIDE_ASK. The governance wind-down of last resort
-                // was therefore unverified in the one state where its direction matters. That is
-                // spec section 9.1's own lesson recurring: venue behaviour the vault depends on has
-                // to be modelled here, or the suite certifies a design the venue would reject.
+                // was therefore unverified in the one state where its direction matters.
+                //
+                // TASK 7: `previous` is now the SUBMITTING ACCOUNT's position. The reading is
+                // unchanged; what changed is whose position it reads. A zero-amount order from an
+                // account that holds nothing is now a no-op on an empty book instead of a
+                // full-size order against someone else's hedge.
                 //
                 // REQUIRES CONFIRMATION against Lighter source, which is not in this repo: the
                 // reading above comes from the design spec's section 3.1 table. It is the
@@ -246,43 +417,119 @@ abstract contract LighterCore is ILighter {
                 uint256 magnitude = previous >= 0 ? uint256(previous) : uint256(-previous);
                 resulting = o.isAsk == 1 ? previous - int256(magnitude) : previous + int256(magnitude);
             } else {
+                int256 signed = o.isAsk == 1 ? -int256(uint256(o.baseAmount)) : int256(uint256(o.baseAmount));
                 resulting = previous + signed;
             }
-            _trackMarket(o.marketIndex);
-            _applyFill(o.marketIndex, previous, resulting);
-            positionBase[o.marketIndex] = resulting;
 
             uint256 absResulting = resulting >= 0 ? uint256(resulting) : uint256(-resulting);
             uint256 absPrevious = previous >= 0 ? uint256(previous) : uint256(-previous);
             if (absResulting > absPrevious) {
                 uint256 notional18 = absResulting * markPrice[o.marketIndex] / (10 ** sizeDecimals);
                 uint256 requiredMargin18 = notional18 * requiredMarginBps / 10_000;
-                uint256 marginBalance18 = _collateralDecimals <= 18
-                    ? marginBalance * (10 ** (18 - _collateralDecimals))
-                    : marginBalance / (10 ** (_collateralDecimals - 18));
-                if (marginBalance18 < requiredMargin18) revert InsufficientMargin();
+                uint256 cash = marginBalanceOf[o.account];
+                uint256 cash18 = _collateralDecimals <= 18
+                    ? cash * (10 ** (18 - _collateralDecimals))
+                    : cash / (10 ** (_collateralDecimals - 18));
+                if (cash18 < requiredMargin18) {
+                    if (strictMode) revert InsufficientMargin();
+                    emit OrderRejected(o.account, o.marketIndex, i, InsufficientMargin.selector);
+                    continue;
+                }
             }
+
+            _trackMarket(o.marketIndex);
+            _applyFill(o.account, o.marketIndex, previous, resulting);
+            positionBaseOf[o.account][o.marketIndex] = resulting;
         }
-        delete _queue;
+
+        if (i >= _queue.length) {
+            delete _queue;
+            settleCursor = 0;
+        } else {
+            settleCursor = i;
+        }
     }
 
     // ----------------------------------------------------------------------- mark-to-market
 
-    /// @notice Unrealised PnL across every market this account holds, in collateral token units.
+    /// @notice Unrealised PnL for one account across every market it holds, in collateral units.
     /// @dev `positionBase * (markPrice - entryPrice) / 10**sizeDecimals` gives an 18-decimal
-    ///      figure; it is scaled to the collateral's own decimals here so it can be added to
-    ///      marginBalance directly.
-    function unrealisedPnl() public view virtual returns (int256 pnl) {
+    ///      figure; it is scaled to the collateral's own decimals here so it can be added to that
+    ///      account's cash margin directly.
+    function unrealisedPnl(uint48 accountIndex) public view virtual returns (int256 pnl) {
         for (uint256 i = 0; i < _markets.length; ++i) {
-            pnl += _toCollateral(_pnl18(_markets[i]));
+            pnl += _toCollateral(_pnl18(accountIndex, _markets[i]));
         }
     }
 
-    /// @notice What this account can actually draw on: cash margin plus the position's mark-to-
-    ///         market gain (or minus its loss). Floored at zero.
-    function equity() public view virtual returns (uint256) {
-        int256 e = int256(marginBalance) + unrealisedPnl();
+    /// @notice What ONE ACCOUNT can actually draw on: its own cash margin plus its own position's
+    ///         mark-to-market gain (or minus its loss). Floored at zero.
+    ///
+    /// @dev TASK 7, ITEM 0. There is deliberately no no-argument overload. `equity()` with no
+    ///      account was `withdraw`'s ceiling for two fix rounds and it is the single line that made
+    ///      every one of this simulator's Criticals a total drain rather than a single-account one;
+    ///      leaving a global overload callable would leave the next `withdraw`-shaped entry point
+    ///      one autocomplete away from reintroducing it. Callers that want the venue-level figure
+    ///      sum `marginBalance()` and `unrealisedPnl()`, and neither of those decides anything.
+    function equity(uint48 accountIndex) public view virtual returns (uint256) {
+        int256 e = int256(marginBalanceOf[accountIndex]) + unrealisedPnl(accountIndex);
         return e <= 0 ? 0 : uint256(e);
+    }
+
+    // --------------------------------------------------------------------- aggregate views
+    //
+    // Task 7. Venue-level mirrors of the per-account books above. Views only: no mechanic reads
+    // them, so none of them can be a ceiling, a margin allowance, or a position an order resolves
+    // against — which is what each of them used to be.
+
+    /// @notice Total collateral posted as margin across every account, in token units.
+    function marginBalance() public view virtual returns (uint256 total) {
+        for (uint256 i = 0; i < _accounts.length; ++i) {
+            total += marginBalanceOf[_accounts[i]];
+        }
+    }
+
+    /// @notice Net signed position across every account in one market, in base ticks. The venue's
+    ///         open interest, not any one account's exposure.
+    function positionBase(uint16 marketIndex) public view virtual returns (int256 net) {
+        for (uint256 i = 0; i < _accounts.length; ++i) {
+            net += positionBaseOf[_accounts[i]][marketIndex];
+        }
+    }
+
+    /// @notice Size-weighted mean entry price across every account holding one market, scaled to
+    ///         1e18. Zero when no account holds it.
+    /// @dev The only aggregate of a price that means anything. On a single-account venue — which is
+    ///      every deployment Task 10 performs, and every fixture in the suite — it is exactly that
+    ///      account's own entry.
+    function entryPrice(uint16 marketIndex) public view virtual returns (uint256) {
+        uint256 weighted;
+        uint256 size;
+        for (uint256 i = 0; i < _accounts.length; ++i) {
+            int256 pos = positionBaseOf[_accounts[i]][marketIndex];
+            if (pos == 0) continue;
+            uint256 abs = pos >= 0 ? uint256(pos) : uint256(-pos);
+            weighted += abs * entryPriceOf[_accounts[i]][marketIndex];
+            size += abs;
+        }
+        return size == 0 ? 0 : weighted / size;
+    }
+
+    /// @notice Unrealised PnL across every account and market, in collateral token units.
+    function unrealisedPnl() public view virtual returns (int256 pnl) {
+        for (uint256 i = 0; i < _accounts.length; ++i) {
+            pnl += unrealisedPnl(_accounts[i]);
+        }
+    }
+
+    /// @notice How many accounts have ever registered on this venue.
+    function accountCount() public view virtual returns (uint256) {
+        return _accounts.length;
+    }
+
+    /// @notice How many orders are queued, settled prefix included.
+    function queueLength() public view virtual returns (uint256) {
+        return _queue.length;
     }
 
     // ----------------------------------------------------------------------------- internals
@@ -307,11 +554,16 @@ abstract contract LighterCore is ILighter {
     ///
     ///      Compaction in place, not `delete`: `settleBatch` fills in queue order, so removing one
     ///      account's orders must not reshuffle another account's priority.
+    ///
+    ///      Task 7: the walk starts at `settleCursor`, not at 0. Entries below the cursor are
+    ///      already filled, and compacting over them would either rewind a fill or re-settle one.
+    ///      That also bounds the cost at `MAX_QUEUE` iterations rather than at the array's length.
     /// @return cancelled How many orders were removed.
     function _cancelOrdersOf(uint48 accountIndex) internal returns (uint256 cancelled) {
-        uint256 kept;
+        uint256 start = settleCursor;
+        uint256 kept = start;
         uint256 n = _queue.length;
-        for (uint256 i = 0; i < n; ++i) {
+        for (uint256 i = start; i < n; ++i) {
             if (_queue[i].account == accountIndex) continue;
             if (kept != i) _queue[kept] = _queue[i];
             ++kept;
@@ -319,20 +571,37 @@ abstract contract LighterCore is ILighter {
         for (uint256 i = n; i > kept; --i) {
             _queue.pop();
         }
-        return n - kept;
+        cancelled = n - kept;
+        queuedOrdersOf[accountIndex] -= cancelled;
     }
 
-    /// @dev Book-keeps entryPrice across one fill, realising PnL on whatever the fill closes.
-    ///      Called with positionBase[m] still holding `prev`.
-    function _applyFill(uint16 m, int256 prev, int256 res) internal {
+    /// @dev The whole-queue half of `LighterSim.ownerPurgeQueue`, with no authorisation of its own.
+    ///      Iterates rather than `delete`ing blind, because `queuedOrdersOf` has to come down with
+    ///      the orders it counts — a purge that left the counters standing would lock every purged
+    ///      account out of `createOrder` up to `MAX_ORDERS_PER_ACCOUNT` forever. Bounded by
+    ///      `MAX_QUEUE`.
+    /// @return cancelled How many unsettled orders were removed.
+    function _purgeQueue() internal returns (uint256 cancelled) {
+        uint256 n = _queue.length;
+        for (uint256 i = settleCursor; i < n; ++i) {
+            --queuedOrdersOf[_queue[i].account];
+            ++cancelled;
+        }
+        delete _queue;
+        settleCursor = 0;
+    }
+
+    /// @dev Book-keeps `accountIndex`'s entryPrice across one fill, realising PnL on whatever the
+    ///      fill closes. Called with positionBaseOf[accountIndex][m] still holding `prev`.
+    function _applyFill(uint48 accountIndex, uint16 m, int256 prev, int256 res) internal {
         uint256 fillPx = markPrice[m];
         if (res == 0) {
-            _realisePortion(m, prev, fillPx);
-            entryPrice[m] = 0;
+            _realisePortion(accountIndex, m, prev, fillPx);
+            entryPriceOf[accountIndex][m] = 0;
             return;
         }
         if (prev == 0) {
-            entryPrice[m] = fillPx;
+            entryPriceOf[accountIndex][m] = fillPx;
             return;
         }
 
@@ -342,63 +611,68 @@ abstract contract LighterCore is ILighter {
 
         if (sameSign && absRes > absPrev) {
             // Position increased: volume-weighted entry over old size and newly filled size.
-            entryPrice[m] = (absPrev * entryPrice[m] + (absRes - absPrev) * fillPx) / absRes;
+            entryPriceOf[accountIndex][m] =
+                (absPrev * entryPriceOf[accountIndex][m] + (absRes - absPrev) * fillPx) / absRes;
         } else if (sameSign) {
             // Partial close: realise the closed slice, leave the entry of the remainder alone.
             uint256 closed = absPrev - absRes;
-            _realisePortion(m, prev > 0 ? int256(closed) : -int256(closed), fillPx);
+            _realisePortion(accountIndex, m, prev > 0 ? int256(closed) : -int256(closed), fillPx);
         } else {
             // Flipped side: the whole old position closed, the remainder is a new entry.
-            _realisePortion(m, prev, fillPx);
-            entryPrice[m] = fillPx;
+            _realisePortion(accountIndex, m, prev, fillPx);
+            entryPriceOf[accountIndex][m] = fillPx;
         }
     }
 
-    /// @dev Realise `portion` (signed, base ticks) of market `m` at `fillPx` into marginBalance.
-    function _realisePortion(uint16 m, int256 portion, uint256 fillPx) internal {
-        int256 entry = int256(entryPrice[m]);
+    /// @dev Realise `portion` (signed, base ticks) of `accountIndex`'s market `m` at `fillPx` into
+    ///      that account's own cash margin.
+    function _realisePortion(uint48 accountIndex, uint16 m, int256 portion, uint256 fillPx) internal {
+        int256 entry = int256(entryPriceOf[accountIndex][m]);
         if (entry == 0 || portion == 0) return;
         int256 pnl18 = portion * (int256(fillPx) - entry) / int256(10 ** uint256(sizeDecimals));
         int256 pnl = _toCollateral(pnl18);
         if (pnl > 0) {
-            marginBalance += uint256(pnl);
+            marginBalanceOf[accountIndex] += uint256(pnl);
         } else if (pnl < 0) {
             uint256 loss = uint256(-pnl);
-            marginBalance = loss >= marginBalance ? 0 : marginBalance - loss;
+            uint256 cash = marginBalanceOf[accountIndex];
+            marginBalanceOf[accountIndex] = loss >= cash ? 0 : cash - loss;
         }
     }
 
-    /// @dev Convert `need` collateral units of unrealised gain into cash, moving entryPrice toward
-    ///      markPrice by exactly that much so the same gain can never be drawn twice.
-    function _realiseGain(uint256 need) internal {
+    /// @dev Convert `need` collateral units of `accountIndex`'s unrealised gain into that account's
+    ///      cash, moving its entryPrice toward markPrice by exactly that much so the same gain can
+    ///      never be drawn twice.
+    function _realiseGain(uint48 accountIndex, uint256 need) internal {
         for (uint256 i = 0; i < _markets.length && need > 0; ++i) {
             uint16 m = _markets[i];
-            int256 pnl = _toCollateral(_pnl18(m));
+            int256 pnl = _toCollateral(_pnl18(accountIndex, m));
             if (pnl <= 0) continue;
             uint256 gain = uint256(pnl);
             uint256 take = need < gain ? need : gain;
-            _setRemainingGain(m, gain - take);
-            marginBalance += take;
+            _setRemainingGain(accountIndex, m, gain - take);
+            marginBalanceOf[accountIndex] += take;
             need -= take;
         }
     }
 
-    /// @dev Rewrite entryPrice[m] so this market's unrealised gain becomes exactly `rem`.
-    function _setRemainingGain(uint16 m, uint256 rem) internal {
-        int256 pos = positionBase[m];
+    /// @dev Rewrite entryPriceOf[accountIndex][m] so that account's unrealised gain in that market
+    ///      becomes exactly `rem`.
+    function _setRemainingGain(uint48 accountIndex, uint16 m, uint256 rem) internal {
+        int256 pos = positionBaseOf[accountIndex][m];
         if (pos == 0) {
-            entryPrice[m] = 0;
+            entryPriceOf[accountIndex][m] = 0;
             return;
         }
         int256 delta = _from18Inverse(rem) * int256(10 ** uint256(sizeDecimals)) / pos;
         int256 newEntry = int256(markPrice[m]) - delta;
-        entryPrice[m] = newEntry <= 0 ? 0 : uint256(newEntry);
+        entryPriceOf[accountIndex][m] = newEntry <= 0 ? 0 : uint256(newEntry);
     }
 
-    function _pnl18(uint16 m) internal view returns (int256) {
-        int256 pos = positionBase[m];
+    function _pnl18(uint48 accountIndex, uint16 m) internal view returns (int256) {
+        int256 pos = positionBaseOf[accountIndex][m];
         if (pos == 0) return 0;
-        int256 entry = int256(entryPrice[m]);
+        int256 entry = int256(entryPriceOf[accountIndex][m]);
         if (entry == 0) return 0;
         return pos * (int256(markPrice[m]) - entry) / int256(10 ** uint256(sizeDecimals));
     }

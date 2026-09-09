@@ -95,8 +95,16 @@ contract BackingInvariantTest is VaultFixture {
     ///      MockLighter's own cash-plus-mark-to-market figure (M3); the pending balance is margin
     ///      the venue has debited but not yet released, which would otherwise read as a hole in
     ///      the backing for the window between recallMargin()'s request and its sweep.
+    ///
+    ///      Task 7: `equity` takes an account index, so this reads THE VAULT'S equity rather than
+    ///      the venue's global figure. That is what this helper always meant — "everything the
+    ///      vault and the venue actually hold FOR IT" — and it is now what it asks for. Before the
+    ///      change the two happened to coincide because the vault is the only account the handler
+    ///      ever registers; a Law 1 invariant that silently counted a stranger's collateral as the
+    ///      vault's backing is precisely the shape of hole this task is about.
     function _venueBacking18() internal view returns (uint256) {
-        return _to18(usdg.balanceOf(address(vault))) + _to18(lighter.equity())
+        uint48 vaultIdx = lighter.addressToAccountIndex(address(vault));
+        return _to18(usdg.balanceOf(address(vault))) + _to18(lighter.equity(vaultIdx))
             + _to18(lighter.getPendingBalance(address(vault), ASSET_IDX));
     }
 

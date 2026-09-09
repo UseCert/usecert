@@ -75,6 +75,17 @@ contract MockLighter is LighterCore {
         markPrice[marketIndex] = px18;
     }
 
+    /// @dev Task 7, item 3. `LighterCore.settleBatch` now rejects an individual under-margined
+    ///      order and continues, because reverting the whole batch was fix round 1's Critical 2 —
+    ///      one account's poison order stopped every other account's settlement permanently.
+    ///      `strictMode` restores the old revert-on-first-failure behaviour for the tests that pin
+    ///      the margin gate AS A REVERT, which is still the sharpest available proof that the gate
+    ///      is not vacuous. Ungated here, like every other knob on this test front end; owner-gated
+    ///      on `LighterSim`, where it is a configuration knob a stranger must not reach.
+    function setStrictMode(bool on) external {
+        strictMode = on;
+    }
+
     // ----------------------------------------------------------- test-only fault injection
 
     function setShouldRevertDrain(bool v) external {

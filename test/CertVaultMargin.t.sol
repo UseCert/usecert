@@ -42,17 +42,28 @@ contract CertVaultMarginTest is VaultFixture {
         lighter.settleBatch();
         assertGt(lighter.marginBalance(), 0);
 
-        // Load-bearing check: prove InsufficientMargin is a real gate, not a vacuous one. Note
-        // MockLighter tracks marginBalance and positionBase globally, not per account, so this
-        // cannot be shown by adding a second small order to the shared `lighter` above — the
-        // vault's own margin would trivially cover it. Instead reproduce the pre-fix scenario on
-        // an independent mock/account: the SAME-SIZED hedge order the vault above just submitted
+        // Load-bearing check: prove InsufficientMargin is a real gate, not a vacuous one. The
+        // note that used to stand here said MockLighter tracks marginBalance and positionBase
+        // GLOBALLY, so a second small order on the shared `lighter` would be covered by the
+        // vault's own margin. Task 7 keys both by account index, so that is no longer true — a
+        // second account's order is margined against the second account's own cash. The
+        // independent mock below is kept anyway: it reproduces the historical failure exactly and
+        // needs no second account to do it. `test_marginIsIsolatedPerAccount` in
+        // test/sim/LighterSim.t.sol is the direct test of the per-account gate.
+        // So, on an independent mock/account: the SAME-SIZED hedge order the vault above just submitted
         // (99_900 base ticks, the vault's certOut of 9.99e18 at sizeDecimals = 4), backed by only
         // bootstrap-sized dust margin instead of the 90% share _postMargin posts. This is exactly
         // the failure mode recorded in task-8b-report.md: 9 tests reverted with
         // InsufficientMargin() when Step 6 landed before Step 3 wired _postMargin in.
         MockLighter bareLighter = new MockLighter(IERC20(address(usdg)), ASSET_IDX, 4);
         bareLighter.setMarkPrice(MARKET, PX);
+        // Task 7, item 3: settleBatch now REJECTS the individual under-margined order and
+        // continues, because reverting the whole batch was a settlement denial of service (one
+        // account's poison order stopped every other account's fills, permanently). This test's
+        // assertion — the margin gate is a real gate, not a vacuous one — is unchanged and is worth
+        // keeping in its sharpest form, so it runs in strict mode rather than being softened into
+        // "an event was emitted". Nothing about the gate's threshold or its inputs changed.
+        bareLighter.setStrictMode(true);
         usdg.mint(address(this), 1e6);
         usdg.approve(address(bareLighter), 1e6);
         bareLighter.deposit(address(this), ASSET_IDX, 0, 1e6); // ~$1 dust margin, no real backing

@@ -80,21 +80,24 @@ contract MockLighterTest is Test {
     }
 
     function test_equityTracksMarkToMarketGain() public {
-        _openTenLongAtHundred();
+        uint48 idx = _openTenLongAtHundred();
 
         lighter.setMarkPrice(16, 150e18); // +50%
         // 100_000 ticks * (150 - 100) / 10**4 = 500e18 -> 500 USDG
         assertEq(lighter.unrealisedPnl(), 500e6);
-        assertEq(lighter.equity(), 1_500e6);
+        // Task 7: equity() takes the account whose equity is being asked about. There is only one
+        // account here, so the figure is unchanged; what changed is that it can no longer be
+        // anybody else's.
+        assertEq(lighter.equity(idx), 1_500e6);
         assertEq(lighter.marginBalance(), 1_000e6); // cash itself is untouched
     }
 
     function test_equityTracksMarkToMarketLoss() public {
-        _openTenLongAtHundred();
+        uint48 idx = _openTenLongAtHundred();
 
         lighter.setMarkPrice(16, 50e18); // -50%
         assertEq(lighter.unrealisedPnl(), -500e6);
-        assertEq(lighter.equity(), 500e6);
+        assertEq(lighter.equity(idx), 500e6);
     }
 
     /// @notice The mechanism C1's fix depends on: a withdrawal larger than the cash balance but
@@ -107,7 +110,7 @@ contract MockLighterTest is Test {
 
         assertEq(lighter.getPendingBalance(address(this), 3), 1_400e6);
         assertEq(lighter.marginBalance(), 0); // all cash drawn
-        assertEq(lighter.equity(), 100e6); // 500 gain less the 400 realised into the payout
+        assertEq(lighter.equity(idx), 100e6); // 500 gain less the 400 realised into the payout
 
         uint256 before = usdg.balanceOf(address(this));
         lighter.withdrawPendingBalance(address(this), 3, 1_400e6);
@@ -138,7 +141,7 @@ contract MockLighterTest is Test {
         lighter.withdraw(idx, 3, 0, 5_000e6); // far above equity: must not revert
 
         assertEq(lighter.getPendingBalance(address(this), 3), 1_500e6); // min(request, equity)
-        assertEq(lighter.equity(), 0);
+        assertEq(lighter.equity(idx), 0);
     }
 
     /// @notice M1's fixture hook: the venue refusing to drain an already-credited pending balance.

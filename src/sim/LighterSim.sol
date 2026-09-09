@@ -23,7 +23,9 @@ import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 ///        `setDepositCapTicks`) are `onlyOwner`, each emitting before/after values.
 ///      * `requiredMarginBps` can be RAISED but never lowered below `VENUE_IMF_BPS`, in the
 ///        constructor as well as in the setter, so a misconfigured sim cannot be deployed at all.
-///      * `settleBatch` fails closed on an unset mark instead of margining a position at zero.
+///      * `settleBatch` fails closed on an unset mark instead of margining a position at zero,
+///        and (Task 7) is callable only by the owner or a nominated `keeper`.
+///      * `strictMode` and the registration allowlist are `onlyOwner` too.
 ///
 ///      Still deliberately absent, and still for Global Constraint 5:
 ///
@@ -46,13 +48,33 @@ contract LighterSim is LighterCore {
     /// @dev `deposit(to, ...)` named an address the owner has not approved for registration. See
     ///      `depositorAllowed`.
     error LighterSim_DepositorNotAllowed(address to);
+    /// @dev Task 7, item 2. `settleBatch` was called by neither the owner nor the keeper.
+    ///
+    ///      Leaving settlement permissionless was defensible while there was a single global
+    ///      position and `setMarkPrice` was owner-only: a caller timing a fill had no counterparty
+    ///      leg to profit from. Task 7 gives accounts SEPARATE positions, and at that point a
+    ///      caller choosing which block — and therefore which mark — someone else's queued order
+    ///      fills at is a real griefing vector against that account. Rate-limiting was considered
+    ///      and rejected: it adds a liveness hazard for no gain.
+    error LighterSim_OnlyOwnerOrKeeper();
+    /// @dev Task 7, item 5. `ownerCancelAccountOrders(0)` is refused because `accountIndex == 0` is
+    ///      the reserved `OperatorCancelledOrders` topic for a whole-queue purge, and index 0 is
+    ///      never a real account. Without this, a scoped drop of the (non-existent) account 0 would
+    ///      emit an indexed topic indistinguishable from a real purge.
+    error LighterSim_AccountIndexZeroIsReservedForPurge();
 
     event RequiredMarginBpsSet(uint256 previous, uint256 current);
     event MarkPriceSet(uint16 indexed marketIndex, uint256 previous, uint256 current);
     event DepositCapTicksSet(uint256 previous, uint256 current);
     event DepositorAllowedSet(address indexed depositor, bool allowed);
-    /// @dev Emitted by the queue escape hatch. `accountIndex == 0` means the whole queue was purged.
+    /// @dev Emitted by the queue escape hatch. `accountIndex == 0` means the whole queue was
+    ///      purged, and Task 7's `LighterSim_AccountIndexZeroIsReservedForPurge` is what makes that
+    ///      convention TRUE rather than merely documented.
     event OperatorCancelledOrders(uint48 indexed accountIndex, uint256 cancelled);
+    /// @dev Task 7, item 2. The address allowed to settle batches alongside the owner.
+    event KeeperSet(address indexed previous, address indexed current);
+    /// @dev Task 7, item 3. `settleBatch`'s compatibility switch. See `LighterCore.strictMode`.
+    event StrictModeSet(bool previous, bool current);
 
     /// @notice The initial-margin fraction floor, in bps of the resulting notional.
     ///
@@ -85,7 +107,7 @@ contract LighterSim is LighterCore {
     ///      registers first, and registering was free: `deposit(self, _, _, 0)` is a zero-value
     ///      `transferFrom`, which OpenZeppelin permits with no allowance and no balance, so the
     ///      caller got an index and `_requireCallerOwnsAccount` was then satisfied. `withdraw`'s
-    ///      ceiling is `equity()`, which is GLOBAL — `marginBalance` and `positionBase` are not
+    ///      ceiling WAS `equity()`, which WAS GLOBAL — `marginBalance` and `positionBase` were not
     ///      per-account — so a self-registered address with zero collateral could take every
     ///      depositor's balance. Reproduced against this artefact before this mapping existed; see
     ///      `test/sim/DrainPoC.t.sol`.
@@ -97,21 +119,70 @@ contract LighterSim is LighterCore {
     ///      approval it earns here is one the venue would withhold. That is the direction Global
     ///      Constraint 5 explicitly allows.
     ///
-    ///      What it actually buys. On the single-vault testnet deployment Task 9 performs, the
+    ///      What it actually buys. On the single-vault testnet deployment Task 10 performs, the
     ///      approved set is `{vault}`. That reduces the account set to one, which closes Critical 1
     ///      (no attacker account can exist to name) AND Critical 2's entry condition (no attacker
     ///      account can queue the poison order) at once.
     ///
-    ///      SIMULATOR-ONLY, AND INTERIM. This restriction has no counterpart on the real venue and
-    ///      must never be read as modelling one. Task 7 supersedes it with per-account collateral
-    ///      isolation, which makes an open registration harmless rather than merely impossible —
-    ///      at which point this mapping should be deleted, not kept as defence in depth, because
-    ///      keeping it would leave the simulator permanently diverged from the venue on who may
-    ///      hold an account.
+    ///      SIMULATOR-ONLY. This restriction has no counterpart on the real venue and must never be
+    ///      read as modelling one.
+    ///
+    ///      TASK 7 REWROTE THE NOTE THAT USED TO STAND HERE, and the rewrite is the point. The old
+    ///      note told a future implementer that Task 7 "supersedes" this mapping and that it
+    ///      "should be deleted, not kept as defence in depth". That was wrong in one way and
+    ///      imprecise in another, and the Task 5 fix-round re-review found both:
+    ///
+    ///        * WRONG, because the allowlist was load-bearing for INTEGRITY, not merely for
+    ///          liveness. `settleBatch` read `previous = positionBase[o.marketIndex]` with NO
+    ///          account scoping, and `baseAmount == 0` means "the full position size on the side
+    ///          the caller named" — so a SECOND ALLOWLISTED ADDRESS on a live deployment was a
+    ///          hedge-destruction path, not merely a second depositor. Deleting the allowlist on
+    ///          the strength of the equity half alone would have opened that path deliberately.
+    ///        * IMPRECISE, because "when Task 7 lands" had to be read as "when BOTH halves of
+    ///          Task 7 land": per-account `equity()` AND per-order rejection in `settleBatch`.
+    ///          Either one without the other leaves a second account able to reach the first one's
+    ///          pool or its settlement.
+    ///
+    ///      Both halves have now landed. `marginBalanceOf`, `positionBaseOf` and `entryPriceOf` are
+    ///      keyed by account, `equity(accountIndex)` takes an account and has no global overload,
+    ///      the initial-margin check reads the submitting account's own cash, and `settleBatch`
+    ///      rejects one order rather than the batch. A second registered account can no longer
+    ///      reach the first one's collateral, its position, or its settlement.
+    ///
+    ///      SO THIS MAPPING STAYS, and now genuinely as defence in depth rather than as the only
+    ///      gate. Three reasons, none of them "it was already here":
+    ///
+    ///        1. It is HARDER than the venue, never easier, which Global Constraint 5 explicitly
+    ///           allows: it refuses registrations the venue would accept and refuses nothing the
+    ///           venue refuses. A vault certified here is certified against a strictly more
+    ///           restrictive counterparty than the one it will meet.
+    ///        2. The residual multi-tenant hazards are LIVENESS, and the allowlist is what keeps
+    ///           them out of a stranger's reach: an order on a market with no mark still trips the
+    ///           whole-batch `LighterSim_MarkPriceUnset` pre-pass below, and `MAX_QUEUE` is a
+    ///           shared resource. Both need a second account to be reachable at all.
+    ///        3. Three rounds on this contract have each shipped a remedy that held on the paths
+    ///           that had been tested and nowhere else. Removing a live gate in the very change
+    ///           that claims to replace it is how that pattern continues.
     ///
     ///      Deliberately on `LighterSim` and NOT on `LighterCore`: `MockLighter` must stay
     ///      unrestricted so the existing suite runs against the venue's real registration model.
     mapping(address => bool) public depositorAllowed;
+
+    /// @notice The one address besides the owner that may call `settleBatch`.
+    ///
+    /// @dev Task 7, item 2. Settlement used to be permissionless, which the Task 5 review judged
+    ///      defensible only because there was a SINGLE GLOBAL POSITION and `setMarkPrice` was
+    ///      owner-only, so a caller timing a fill had no counterparty leg to profit from. This task
+    ///      gives accounts separate positions and that stops being true: whoever calls
+    ///      `settleBatch` chooses which block, and therefore which mark, someone else's queued
+    ///      order fills at. Rate-limiting was considered and rejected — it adds a liveness hazard
+    ///      for no gain.
+    ///
+    ///      A keeper as well as the owner because Task 12's batch advancer is a bot with its own
+    ///      key while the owner is a person; making the owner the only settler would put a liveness
+    ///      requirement on a human. Zero by default, and zero means "owner only" rather than
+    ///      "anyone" — the fail-closed reading, and the one a forgotten deployment step gets.
+    address public keeper;
 
     /// @param _requiredMarginBps The initial-margin fraction to run with. Must be >=
     ///        `VENUE_IMF_BPS`; pass `VENUE_IMF_BPS` to match the live venue exactly.
@@ -153,9 +224,31 @@ contract LighterSim is LighterCore {
         emit DepositCapTicksSet(previous, cap);
     }
 
+    /// @notice Nominate (or clear, with the zero address) the keeper allowed to settle batches.
+    /// @dev Task 7, item 2. Clearing it leaves the owner as the only settler, which is the
+    ///      fail-closed direction: settlement stops, nothing is mis-settled.
+    function setKeeper(address newKeeper) external onlyOwner {
+        address previous = keeper;
+        keeper = newKeeper;
+        emit KeeperSet(previous, newKeeper);
+    }
+
+    /// @notice Turn `settleBatch`'s revert-on-first-failure behaviour on or off.
+    /// @dev Task 7, item 3. See `LighterCore.strictMode`. Owner-gated and default OFF: reverting a
+    ///      whole batch because one account's order is under-margined is not venue behaviour, and
+    ///      it is the denial of service fix round 1 had to ship an owner hatch for. This exists so
+    ///      the three pre-Task-7 tests that pin the margin gate as a REVERT keep asserting exactly
+    ///      what they asserted, instead of being softened to match the new default.
+    function setStrictMode(bool on) external onlyOwner {
+        bool previous = strictMode;
+        strictMode = on;
+        emit StrictModeSet(previous, on);
+    }
+
     /// @notice Approve, or revoke, an address's permission to hold an account on this simulator.
     /// @dev See `depositorAllowed` for why a registration allowlist exists on a contract that
-    ///      stands in for a venue which registers anyone, and why Task 7 removes it.
+    ///      stands in for a venue which registers anyone, and why Task 7 KEPT it — as defence in
+    ///      depth once per-account isolation landed, rather than as the only gate it used to be.
     ///
     ///      Revoking does NOT unregister an already-registered address: `addressToAccountIndex` is
     ///      on the core and is the venue's own state. Revocation only stops further deposits to
@@ -186,38 +279,57 @@ contract LighterSim is LighterCore {
 
     /// @notice Drop every queued order belonging to `accountIndex`, as the operator.
     ///
-    /// @dev FIX ROUND 1, CRITICAL 2 — a liveness escape hatch, and an INTERIM one.
+    /// @dev FIX ROUND 1, CRITICAL 2 — a liveness escape hatch, kept by Task 7 as a narrower one.
     ///
-    ///      `settleBatch` refuses a batch as a WHOLE: on `InsufficientMargin` in
-    ///      `LighterCore.settleBatch`, and on the `LighterSim_MarkPriceUnset` pre-pass above. One
-    ///      unsettleable order therefore blocks every other account's fills, and Task 5's
-    ///      per-account `cancelAllOrders` binding means only that order's own account can withdraw
-    ///      it. An account with zero collateral queueing one oversized market order made settlement
-    ///      revert for everyone — including the vault and the owner — permanently, with no operator
-    ///      path to clear it and no way back short of redeploying. `requiredMarginBps` can only be
-    ///      raised, so it is no help either. Reproduced in `test/sim/DrainPoC.t.sol` before this
-    ///      function existed; Task 9's `BatchAdvancer` would have reverted forever.
+    ///      WHY IT EXISTED. `settleBatch` used to refuse a batch as a WHOLE: on
+    ///      `InsufficientMargin` in `LighterCore.settleBatch`, and on the
+    ///      `LighterSim_MarkPriceUnset` pre-pass below. One unsettleable order therefore blocked
+    ///      every other account's fills, and Task 5's per-account `cancelAllOrders` binding meant
+    ///      only that order's own account could withdraw it. An account with zero collateral
+    ///      queueing one oversized market order made settlement revert for everyone — including the
+    ///      vault and the owner — permanently, with no operator path to clear it and no way back
+    ///      short of redeploying. `requiredMarginBps` can only be raised, so it was no help either.
+    ///      Reproduced in `test/sim/DrainPoC.t.sol` before this function existed; Task 12's batch
+    ///      advancer would have reverted forever.
+    ///
+    ///      TASK 7 SHIPPED THE STRUCTURAL FIX, so the `InsufficientMargin` half of that jam can no
+    ///      longer form: `LighterCore.settleBatch` rejects the individual order, emits
+    ///      `OrderRejected` naming it, and continues. What remains reachable is the
+    ///      `LighterSim_MarkPriceUnset` pre-pass, which is deliberately still whole-batch — an
+    ///      unset mark is an OPERATOR misconfiguration rather than an account's doing, and settling
+    ///      any order while the price book is incomplete is the silent state that hid a Critical in
+    ///      this project's external audit. So the hatch STAYS, for exactly that case and for
+    ///      anything the next round finds: the owner's two ways out of a markless jam are to set
+    ///      the mark the log names, or to drop the order that should not fill at all.
     ///
     ///      This is ADDITIONAL, not a relaxation: `cancelAllOrders` keeps its per-account scoping
     ///      for every non-owner caller, and this path is reachable only by `owner`. It also has no
     ///      counterpart on the real venue, so — like the allowlist — it errs in the direction of a
     ///      more privileged, more restrictive counterparty rather than a more permissive one.
     ///
-    ///      TASK 7 OWNS THE STRUCTURAL FIX: `settleBatch` rejecting an individual order and
-    ///      continuing rather than reverting wholesale, at which point a stuck queue cannot form
-    ///      and this hatch should go.
+    /// @dev Task 7, item 5. `accountIndex == 0` is REFUSED. `OperatorCancelledOrders` documents
+    ///      index 0 as meaning "the whole queue was purged", and index 0 is never a real account,
+    ///      so a scoped drop naming it would emit an indexed topic a log reader could not tell from
+    ///      a real purge. One line makes the documented convention true.
     function ownerCancelAccountOrders(uint48 accountIndex) external onlyOwner {
+        if (accountIndex == 0) revert LighterSim_AccountIndexZeroIsReservedForPurge();
         emit OperatorCancelledOrders(accountIndex, _cancelOrdersOf(accountIndex));
     }
 
     /// @notice Drop the entire queue, as the operator. The blunt instrument, for a queue that is
     ///         stuck for a reason the operator cannot attribute to one account.
     /// @dev Same rationale as `ownerCancelAccountOrders`. Emitted with `accountIndex == 0`, which
-    ///      is never a real account index, so a log reader can tell a purge from a scoped drop.
+    ///      is never a real account index — and which `ownerCancelAccountOrders` now refuses — so a
+    ///      log reader can tell a purge from a scoped drop.
+    ///
+    ///      Task 7 routes it through `LighterCore._purgeQueue` rather than doing `delete _queue`
+    ///      here. Two reasons, both from the re-review's item 4: `queuedOrdersOf` has to come down
+    ///      with the orders it counts, or a purge would lock every purged account out of
+    ///      `createOrder` up to `MAX_ORDERS_PER_ACCOUNT` forever; and the cost of the walk is now
+    ///      bounded by `MAX_QUEUE`, so the hatch meant to rescue an oversized queue cannot itself
+    ///      be priced out of a block by one.
     function ownerPurgeQueue() external onlyOwner {
-        uint256 cancelled = _queue.length;
-        delete _queue;
-        emit OperatorCancelledOrders(0, cancelled);
+        emit OperatorCancelledOrders(0, _purgeQueue());
     }
 
     // ---------------------------------------------------------------------- fail-closed settle
@@ -252,9 +364,35 @@ contract LighterSim is LighterCore {
     ///      about a price. A core-level guard would force marks into tests that are not about
     ///      marks; a front-end override binds only the artefact that actually gets deployed.
     /// @dev Stays `virtual`: Task 6 makes settlement asynchronous and needs to extend this.
+    ///
+    /// @dev TASK 7 CHANGED TWO THINGS, and left the third alone on purpose.
+    ///
+    ///      GATED (item 2). `owner` or `keeper` only. Settlement was permissionless, which the
+    ///      Task 5 review judged defensible only while there was a single global position: a
+    ///      caller timing a fill had no counterparty leg to profit from. Accounts now have separate
+    ///      positions, so whoever calls this picks which block — and therefore which mark —
+    ///      someone else's queued order fills at. See `keeper`.
+    ///
+    ///      WINDOWED (item 4). The pre-pass scans only the orders this call will actually settle,
+    ///      `[settleCursor, settleCursor + SETTLE_BATCH_MAX)`, not the whole array. Two
+    ///      consequences, both wanted: the pre-pass stays O(SETTLE_BATCH_MAX) like the settlement
+    ///      loop it guards, and a markless order sitting beyond the window no longer refuses a
+    ///      window it is not part of.
+    ///
+    ///      STILL WHOLE-BATCH within that window, and that is deliberate. An unset mark is an
+    ///      OPERATOR misconfiguration, not an account's action, so unlike `InsufficientMargin` it
+    ///      is not something to attribute to one order and skip: at a zero mark the entry-price
+    ///      book is corrupted for every order in the window, which is the silent state the guard
+    ///      exists for. The residual liveness cost — one markless order refuses its window until
+    ///      the owner sets the mark or drops the order — is what `ownerCancelAccountOrders` and the
+    ///      registration allowlist are the answer to, and it is recorded as a known residual in
+    ///      this task's report rather than left implied.
     function settleBatch() public virtual override {
+        if (msg.sender != owner && msg.sender != keeper) revert LighterSim_OnlyOwnerOrKeeper();
         uint256 n = _queue.length;
-        for (uint256 i = 0; i < n; ++i) {
+        uint256 from = settleCursor;
+        uint256 stop = n - from > SETTLE_BATCH_MAX ? from + SETTLE_BATCH_MAX : n;
+        for (uint256 i = from; i < stop; ++i) {
             uint16 m = _queue[i].marketIndex;
             if (markPrice[m] == 0) revert LighterSim_MarkPriceUnset(m);
         }

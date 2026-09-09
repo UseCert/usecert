@@ -9,9 +9,15 @@ import {MockERC20} from "../mocks/MockERC20.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 
 /// @notice Task 4 acceptance tests (`MockLighter` and `LighterSim` are two front ends onto one
-///         behaviour implementation, and the deployable one fits EIP-170) plus Task 5's three
-///         closures: caller-bound account operations, a gated and floored operator surface, and a
-///         `settleBatch` that fails closed on an unset mark.
+///         behaviour implementation, and the deployable one fits EIP-170), Task 5's three closures
+///         (caller-bound account operations, a gated and floored operator surface, and a
+///         `settleBatch` that fails closed on an unset mark), and TASK 7's per-account state
+///         isolation.
+///
+/// @dev The Task 7 section is the first multi-account venue coverage in this repo. Every venue test
+///      written before it ran with one account holding collateral and one account holding a
+///      position, which is why a global `marginBalance`, a global `positionBase[market]` and an
+///      account-less `equity()` were indistinguishable from per-account ones for three fix rounds.
 ///
 /// @dev Task 5 deleted this file's `LighterSimHarness`. It existed only because `LighterSim` had no
 ///      `setMarkPrice` and a zero mark makes the initial-margin check vacuous, so the harness
@@ -134,11 +140,13 @@ contract LighterSimTest is Test {
         mockL.setMarkPrice(MARKET, 120e18);
         sim.setMarkPrice(MARKET, 120e18);
         assertEq(mockL.unrealisedPnl(), sim.unrealisedPnl(), "pnl");
-        assertEq(mockL.equity(), sim.equity(), "equity");
-        assertGt(sim.equity(), sim.marginBalance(), "gain not modelled");
+        // Task 7: `equity` takes an account index and has no global overload. One account here, so
+        // every figure below is unchanged.
+        assertEq(mockL.equity(mockIdx), sim.equity(simIdx), "equity");
+        assertGt(sim.equity(simIdx), sim.marginBalance(), "gain not modelled");
 
         // Draw the whole of equity, which forces the gain to be realised and entryPrice rewritten.
-        uint64 all = uint64(sim.equity());
+        uint64 all = uint64(sim.equity(simIdx));
         mockL.withdraw(mockIdx, ASSET_IDX, 0, all);
         sim.withdraw(simIdx, ASSET_IDX, 0, all);
 
@@ -162,9 +170,17 @@ contract LighterSimTest is Test {
     }
 
     /// @notice The initial-margin gate is the same gate on both front ends, and it is not vacuous.
+    /// @dev Task 7, item 3: `settleBatch` now rejects the individual under-margined order and
+    ///      continues rather than reverting the batch, because a whole-batch revert was fix round
+    ///      1's Critical 2. This test's assertion is unchanged and runs in STRICT MODE, which is
+    ///      the compatibility path that exists precisely so the three pre-Task-7 tests pinning the
+    ///      gate as a revert keep pinning it as a revert. The non-strict behaviour has its own
+    ///      test: `test_oneAccountsBadOrderCannotBrickSettlement`.
     function test_simRejectsUnderMarginedFillLikeMock() public {
         mockL.setMarkPrice(MARKET, 100e18);
         sim.setMarkPrice(MARKET, 100e18);
+        mockL.setStrictMode(true);
+        sim.setStrictMode(true);
         mockL.deposit(address(this), ASSET_IDX, 0, 1e6);
         sim.deposit(address(this), ASSET_IDX, 0, 1e6);
 
@@ -482,6 +498,9 @@ contract LighterSimTest is Test {
         assertEq(sim.entryPrice(MARKET), 0, "an entry price was recorded at a zero mark");
 
         // With the mark set, the same batch is refused for the RIGHT reason: the gate is live.
+        // Task 7, item 3: in strict mode, which is where this assertion belongs — see
+        // `test_simRejectsUnderMarginedFillLikeMock`.
+        sim.setStrictMode(true);
         sim.setMarkPrice(MARKET, 35586e16);
         vm.expectRevert(LighterCore.InsufficientMargin.selector);
         sim.settleBatch();
@@ -589,14 +608,22 @@ contract LighterSimTest is Test {
     ///      and the two halves of Critical 2's stuck-queue escape hatch. Leaving them out would
     ///      have reproduced §5.3's defect exactly — a green test that stays green through the
     ///      change it exists to guard against.
+    ///
+    ///      Task 7 added two more: `setStrictMode` and `setKeeper`. `settleBatch` is now gated too,
+    ///      but it is not a knob and its refusal is `LighterSim_OnlyOwnerOrKeeper`, so it is
+    ///      asserted separately in `test_settleBatchIsGatedToOwnerOrKeeper`.
     function test_theOperatorKnobsThatDoExistAreAllGated() public {
-        bytes[6] memory knobs = [
+        bytes[8] memory knobs = [
             abi.encodeWithSignature("setMarkPrice(uint16,uint256)", MARKET, uint256(100e18)),
             abi.encodeWithSignature("setRequiredMarginBps(uint256)", uint256(9_000)),
             abi.encodeWithSignature("setDepositCapTicks(uint256)", uint256(1_000)),
             abi.encodeWithSignature("setDepositorAllowed(address,bool)", depositorA, true),
             abi.encodeWithSignature("ownerCancelAccountOrders(uint48)", uint48(3)),
-            abi.encodeWithSignature("ownerPurgeQueue()")
+            abi.encodeWithSignature("ownerPurgeQueue()"),
+            // Task 7 added these two. The enumeration is only as good as its completeness, which is
+            // this test's whole point.
+            abi.encodeWithSignature("setStrictMode(bool)", true),
+            abi.encodeWithSignature("setKeeper(address)", depositorA)
         ];
         for (uint256 i = 0; i < knobs.length; ++i) {
             vm.prank(stranger);
@@ -619,10 +646,661 @@ contract LighterSimTest is Test {
     }
 
     // ---------------------------------------------------------------------------------------
+    // TASK 7: per-account state isolation.
+    //
+    // THIS IS THE FIRST MULTI-ACCOUNT VENUE COVERAGE IN THE REPO, and that absence is why three
+    // Criticals survived three fix rounds. Every venue test written before this task ran with
+    // exactly one account holding collateral and one account holding a position, so a global
+    // `marginBalance`, a global `positionBase[market]` and an account-less `equity()` were
+    // indistinguishable from per-account ones. Each of the tests below was written by first
+    // reproducing the hole against the pre-fix artefact and watching the assertion fail.
+    // ---------------------------------------------------------------------------------------
 
-    /// @dev Two funded, registered accounts on the sim: 600_000 and 400_000 USDG. `marginBalance`
-    ///      is global in `LighterCore` (per-account isolation is Task 7), which is exactly why the
-    ///      unbound `withdraw` was a total drain rather than a single-account one.
+    /// @notice **THE REGRESSION TEST FOR THE MISS.** A stranger who registers cannot draw the pool.
+    ///
+    ///         The two prior rounds both closed this at the door: bind the call to its caller
+    ///         (round 0), then restrict who may register (round 1). Neither touched the fact that
+    ///         `withdraw`'s ceiling was the WHOLE POOL, so both were one successful registration
+    ///         away from being no defence at all. This test therefore opens BOTH earlier gates
+    ///         deliberately — the stranger is allowlisted, and it registers with a real deposit
+    ///         rather than the zero-value one that is separately refused — and asserts the ceiling
+    ///         itself.
+    ///
+    /// @dev Measured against the pre-fix artefact with exactly this fixture: the stranger deposited
+    ///      1 USDG and withdrew 1_000_001 USDG, leaving the simulator holding 0. It now takes back
+    ///      its own 1 USDG and not one unit more.
+    function test_selfRegisteredStrangerCannotDrainThePool() public {
+        _fundTwoDepositors();
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        uint48 bIdx = sim.addressToAccountIndex(depositorB);
+
+        // Gate 1 opened on purpose: the operator approves the attacker.
+        sim.setDepositorAllowed(stranger, true);
+        usdgSim.mint(stranger, 1e6);
+        vm.startPrank(stranger);
+        usdgSim.approve(address(sim), type(uint256).max);
+        // The cheapest registration the venue permits. A literally-zero deposit is refused on the
+        // core (`LighterCore_ZeroDepositAmount`, pinned in test/sim/DrainPoC.t.sol), so registering
+        // for 1 unit is the strongest version of the attack that is actually reachable — and the
+        // point of this test is that even a SUCCESSFUL registration buys nothing.
+        sim.deposit(stranger, ASSET_IDX, 0, 1e6);
+        uint48 sIdx = sim.addressToAccountIndex(stranger);
+        assertGt(sIdx, 0, "the attacker did not register, so this test proves nothing");
+
+        // The exact pre-fix drain call, and the ceiling is now the caller's own balance.
+        sim.withdraw(sIdx, ASSET_IDX, 0, type(uint64).max);
+        vm.stopPrank();
+
+        assertEq(sim.getPendingBalance(stranger, ASSET_IDX), 1e6, "the ceiling was not the caller's own balance");
+
+        // Every other account's money is exactly where it was.
+        assertEq(sim.marginBalanceOf(aIdx), 600_000e6, "A's margin moved");
+        assertEq(sim.marginBalanceOf(bIdx), 400_000e6, "B's margin moved");
+        assertEq(sim.equity(aIdx), 600_000e6, "A's equity moved");
+        assertEq(sim.equity(bIdx), 400_000e6, "B's equity moved");
+        assertEq(sim.marginBalanceOf(sIdx), 0, "the attacker still has a margin balance");
+
+        // And the collateral the simulator holds is down by the attacker's own deposit only.
+        vm.prank(stranger);
+        sim.withdrawPendingBalance(stranger, ASSET_IDX, 1e6);
+        assertEq(usdgSim.balanceOf(stranger), 1e6, "the attacker took more than it put in");
+        assertEq(usdgSim.balanceOf(address(sim)), 1_000_000e6, "the depositors' collateral left the venue");
+    }
+
+    /// @notice An account that holds NOTHING claims nothing, which is the same statement as above
+    ///         with the attacker's own stake removed. Registered by a third party's deposit, then
+    ///         emptied, then asking for the pool.
+    function test_anAccountHoldingNothingClaimsNothing() public {
+        _fundTwoDepositors();
+        sim.setDepositorAllowed(stranger, true);
+        sim.deposit(stranger, ASSET_IDX, 0, 1e6); // funded by this contract, registers the stranger
+        uint48 sIdx = sim.addressToAccountIndex(stranger);
+
+        vm.startPrank(stranger);
+        sim.withdraw(sIdx, ASSET_IDX, 0, 1e6);
+        sim.withdrawPendingBalance(stranger, ASSET_IDX, 1e6);
+        assertEq(sim.equity(sIdx), 0, "the account still has equity");
+
+        // Holding nothing, asking for everything.
+        sim.withdraw(sIdx, ASSET_IDX, 0, type(uint64).max);
+        vm.stopPrank();
+
+        assertEq(sim.getPendingBalance(stranger, ASSET_IDX), 0, "an empty account was credited");
+        assertEq(usdgSim.balanceOf(address(sim)), 1_000_000e6, "the depositors' collateral moved");
+    }
+
+    /// @notice `equity` is a question about ONE account, and there is no way left to ask it about
+    ///         the pool.
+    function test_equityIsPerAccount() public {
+        _fundTwoDepositors();
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        uint48 bIdx = sim.addressToAccountIndex(depositorB);
+
+        assertEq(sim.equity(aIdx), 600_000e6, "A sees the wrong equity");
+        assertEq(sim.equity(bIdx), 400_000e6, "B sees the wrong equity");
+        assertEq(sim.marginBalance(), 1_000_000e6, "the aggregate view stopped summing");
+
+        // A's position gains; B's equity must not move by one unit.
+        sim.setMarkPrice(MARKET, 100e18);
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 100_000, 10_000, 0, 1); // 10 units long at 100
+        sim.settleBatch();
+        sim.setMarkPrice(MARKET, 120e18); // +20 -> 10 units * 20 = 200 USDG of gain
+
+        assertEq(sim.unrealisedPnl(aIdx), 200e6, "A's gain is wrong");
+        assertEq(sim.unrealisedPnl(bIdx), 0, "B was credited with A's gain");
+        assertEq(sim.equity(aIdx), 600_200e6, "A's equity did not include its own gain");
+        assertEq(sim.equity(bIdx), 400_000e6, "B's equity moved on A's position");
+    }
+
+    /// @notice There is deliberately NO no-argument `equity()`.
+    /// @dev The global figure was `withdraw`'s ceiling for two fix rounds and it is the single line
+    ///      that turned every one of this simulator's holes into a total drain. Asserting its
+    ///      ABSENCE is what stops the next `withdraw`-shaped entry point reintroducing it by
+    ///      autocomplete. Probed with correct encoding, both halves asserted — see
+    ///      `test_simDoesNotInheritTestConveniences` for why a bare-selector probe is vacuous.
+    function test_thereIsNoGlobalEquityOverload() public {
+        (bool globalOk,) = address(sim).call(abi.encodeWithSignature("equity()"));
+        assertFalse(globalOk, "a global equity() is still callable");
+        (bool mockGlobalOk,) = address(mockL).call(abi.encodeWithSignature("equity()"));
+        assertFalse(mockGlobalOk, "a global equity() is still callable on the test front end");
+
+        // Sanity: the per-account one exists on both, so the assertions above fail for the right
+        // reason rather than because the encoding is wrong.
+        (bool simOk,) = address(sim).call(abi.encodeWithSignature("equity(uint48)", uint48(3)));
+        assertTrue(simOk, "equity(uint48) is missing");
+        (bool mockOk,) = address(mockL).call(abi.encodeWithSignature("equity(uint48)", uint48(3)));
+        assertTrue(mockOk, "equity(uint48) is missing on the test front end");
+    }
+
+    /// @notice Vault A cannot open a position on vault B's margin.
+    ///
+    /// @dev The initial-margin check read the GLOBAL cash balance, so an account holding 1 USDG
+    ///      could open whatever the pool covered. Reproduced before the fix with exactly this
+    ///      fixture: the poor account's $10,000 notional position filled.
+    function test_marginIsIsolatedPerAccount() public {
+        _fundTwoDepositors();
+        sim.setMarkPrice(MARKET, 100e18);
+
+        // A third account with a dollar, next to 1_000_000 USDG of other people's collateral.
+        sim.setDepositorAllowed(stranger, true);
+        usdgSim.mint(stranger, 1e6);
+        vm.startPrank(stranger);
+        usdgSim.approve(address(sim), type(uint256).max);
+        sim.deposit(stranger, ASSET_IDX, 0, 1e6);
+        uint48 sIdx = sim.addressToAccountIndex(stranger);
+        // 1_000_000 base ticks at size_decimals 4 is 100 units => $10,000 notional against $1.
+        sim.createOrder(sIdx, MARKET, 1_000_000, 10_000, 0, 1);
+        vm.stopPrank();
+
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(sIdx, MARKET), 0, "an account opened a position on the pool's margin");
+        assertEq(sim.positionBase(MARKET), 0, "the venue took on the position anyway");
+
+        // The SAME order from an account that can actually cover it fills, so the gate is a gate
+        // and not a brick.
+        uint48 bIdx = sim.addressToAccountIndex(depositorB);
+        vm.prank(depositorB);
+        sim.createOrder(bIdx, MARKET, 1_000_000, 10_000, 0, 1);
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(bIdx, MARKET), 1_000_000, "a covered order was refused");
+        assertEq(sim.positionBaseOf(sIdx, MARKET), 0, "the poor account got a position after all");
+    }
+
+    /// @notice **THE HEDGE-DESTRUCTION REGRESSION TEST**, from the Task 5 fix-round re-review.
+    ///
+    ///         `settleBatch` read `previous = positionBase[o.marketIndex]` with NO account scoping,
+    ///         and `baseAmount == 0` means "the full position size on the side the caller named".
+    ///         So any second registered account could queue
+    ///         `createOrder(idx, market, 0, px, isAsk = 1, 1)` and, at settlement, zero out the
+    ///         vault's entire hedge. Same harm as the pre-Task-5 `delete _queue`, reached through
+    ///         settlement rather than cancellation, and `Order.account` did not touch it because
+    ///         that attribution governed CANCELLATION only.
+    ///
+    /// @dev Measured against the pre-fix artefact: the vault's 100_000-tick hedge went to 0 in one
+    ///      settled batch. The assertion below is the one that flipped.
+    function test_aSecondAccountCannotDestroyTheVaultsHedge() public {
+        _fundTwoDepositors();
+        sim.setMarkPrice(MARKET, 100e18);
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 100_000, 10_000, 0, 1);
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(aIdx, MARKET), 100_000, "the hedge did not open");
+
+        // The attack, verbatim from the amendment. B is a legitimately registered, funded account.
+        uint48 bIdx = sim.addressToAccountIndex(depositorB);
+        vm.prank(depositorB);
+        sim.createOrder(bIdx, MARKET, 0, 10_000, 1, 1);
+        sim.settleBatch();
+
+        assertEq(sim.positionBaseOf(aIdx, MARKET), 100_000, "a second account destroyed the vault's hedge");
+        assertEq(sim.positionBaseOf(bIdx, MARKET), 0, "the zero-amount order acted on an empty book");
+        assertEq(sim.positionBase(MARKET), 100_000, "the venue's net position moved");
+    }
+
+    /// @notice And the close-all primitive still works for its OWN position, which is why the fix
+    ///         is a scoping change rather than a rejection of `baseAmount == 0`.
+    ///
+    /// @dev `CertVault.closeAll()` is a real caller of Lighter's zero-amount "default to the full
+    ///      position size" primitive — governance's wind-down of last resort submits a literal 0 on
+    ///      the side its own ledger says it holds. Rejecting zero amounts at `createOrder` would
+    ///      have broken it, so Task 7 took the amendment's PREFERRED option: scope the reading to
+    ///      the submitting account. This test is what makes that choice safe to have made.
+    function test_zeroBaseAmountClosesTheSubmittersOwnPosition() public {
+        _fundTwoDepositors();
+        sim.setMarkPrice(MARKET, 100e18);
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        uint48 bIdx = sim.addressToAccountIndex(depositorB);
+
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 100_000, 10_000, 0, 1);
+        vm.prank(depositorB);
+        sim.createOrder(bIdx, MARKET, 700, 10_000, 0, 1);
+        sim.settleBatch();
+
+        // A closes its own long with the primitive. B's position must be untouched.
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 0, 10_000, 1, 1);
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(aIdx, MARKET), 0, "the close-all primitive stopped closing");
+        assertEq(sim.entryPriceOf(aIdx, MARKET), 0, "a flat position kept an entry price");
+        assertEq(sim.positionBaseOf(bIdx, MARKET), 700, "the close-all reached another account");
+
+        // And the M-3 reading is preserved: an ASK against a SHORT doubles it rather than closing
+        // it, on the submitter's own book.
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 500, 10_000, 1, 1); // open a short
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(aIdx, MARKET), -500);
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 0, 10_000, 1, 1); // full-size ASK against a SHORT
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(aIdx, MARKET), -1_000, "the wrong-side close-all stopped being harmful");
+    }
+
+    /// @notice **THE CRITICAL 2 REGRESSION TEST.** One account's unsettleable order is rejected
+    ///         individually and every other account still settles.
+    ///
+    /// @dev Fix round 1's Critical 2 was the liveness regression the caller binding INTRODUCED:
+    ///      once only an order's own account could cancel it, and `settleBatch` reverted as a
+    ///      whole, one under-margined order killed settlement for everyone — permanently, with no
+    ///      operator recourse and `requiredMarginBps` only raisable. Round 1 shipped an owner
+    ///      escape hatch. This is the structural fix, and it means the jam cannot form.
+    function test_oneAccountsBadOrderCannotBrickSettlement() public {
+        _fundTwoDepositors();
+        sim.setMarkPrice(MARKET, 100e18);
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 100, 10_000, 0, 1); // the vault's legitimate hedge
+
+        sim.setDepositorAllowed(stranger, true);
+        usdgSim.mint(stranger, 1e6);
+        vm.startPrank(stranger);
+        usdgSim.approve(address(sim), type(uint256).max);
+        sim.deposit(stranger, ASSET_IDX, 0, 1e6);
+        uint48 sIdx = sim.addressToAccountIndex(stranger);
+        sim.createOrder(sIdx, MARKET, type(uint48).max, 10_000, 0, 1); // the poison pill
+        vm.stopPrank();
+
+        // No revert, and the refusal is on the record naming the order and the reason.
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.OrderRejected(sIdx, MARKET, 1, LighterCore.InsufficientMargin.selector);
+        sim.settleBatch();
+
+        assertEq(sim.positionBaseOf(aIdx, MARKET), 100, "the honest hedge did not fill");
+        assertEq(sim.positionBaseOf(sIdx, MARKET), 0, "the poison pill filled");
+        assertEq(sim.queueLength(), 0, "the rejected order stayed in the queue");
+        assertEq(sim.queuedOrdersOf(sIdx), 0, "the rejected order still counts against its account");
+
+        // And settlement keeps working afterwards, which is the half round 1 could not deliver.
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 50, 10_000, 0, 1);
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(aIdx, MARKET), 150, "settlement did not survive the rejection");
+    }
+
+    /// @notice The compatibility path: `strictMode` restores revert-on-first-failure.
+    /// @dev Three pre-Task-7 tests pin the margin gate AS A REVERT, which is still the sharpest
+    ///      available proof that the gate is not vacuous. Rather than soften them, they run in
+    ///      strict mode; this test is what keeps the mode itself honest.
+    function test_strictModeStillRevertsOnInsufficientMargin() public {
+        _fundTwoDepositors();
+        sim.setMarkPrice(MARKET, 100e18);
+        sim.setDepositorAllowed(stranger, true);
+        usdgSim.mint(stranger, 1e6);
+        vm.startPrank(stranger);
+        usdgSim.approve(address(sim), type(uint256).max);
+        sim.deposit(stranger, ASSET_IDX, 0, 1e6);
+        uint48 sIdx = sim.addressToAccountIndex(stranger);
+        sim.createOrder(sIdx, MARKET, type(uint48).max, 10_000, 0, 1);
+        vm.stopPrank();
+
+        // Default is OFF, so the same queue settles.
+        assertFalse(sim.strictMode(), "strict mode must not be the deployed default");
+
+        sim.setStrictMode(true);
+        assertTrue(sim.strictMode());
+        vm.expectRevert(LighterCore.InsufficientMargin.selector);
+        sim.settleBatch();
+
+        // Off again, and the order is rejected instead. Nothing about the THRESHOLD changed
+        // between the two runs — only what the venue does about it.
+        sim.setStrictMode(false);
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(sIdx, MARKET), 0, "the order filled in non-strict mode");
+    }
+
+    function test_setStrictModeIsOwnerOnlyAndEvented() public {
+        vm.prank(stranger);
+        vm.expectRevert(LighterSim.LighterSim_OnlyOwner.selector);
+        sim.setStrictMode(true);
+
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterSim.StrictModeSet(false, true);
+        sim.setStrictMode(true);
+    }
+
+    /// @notice `cancelAllOrders(accountIndex)` affects only the caller's account, asserted on the
+    ///         PER-ACCOUNT books this task introduced rather than on a global net figure.
+    /// @dev The pre-existing `test_cancelAllOrdersOnlyTouchesTheCallersQueue` asserts the same
+    ///      property through `positionBase(market)`, which on a two-account venue is a NET figure —
+    ///      A's +500 and B's -500 would have summed to the same 0 as "nothing filled". This one
+    ///      cannot be fooled that way, which is the whole difference multi-account coverage makes.
+    function test_cancelAllOrdersOnlyAffectsCallerAccount() public {
+        _fundTwoDepositors();
+        sim.setMarkPrice(MARKET, 100e18);
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        uint48 bIdx = sim.addressToAccountIndex(depositorB);
+
+        // Deliberately opposite sides of the SAME market and the same size, so a net-position
+        // assertion could not tell "both filled" from "neither filled".
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 500, 10_000, 0, 1); // long
+        vm.prank(depositorB);
+        sim.createOrder(bIdx, MARKET, 500, 10_000, 1, 1); // short
+
+        vm.prank(depositorB);
+        sim.cancelAllOrders(bIdx);
+        assertEq(sim.queuedOrdersOf(bIdx), 0, "B's counter did not come down with its orders");
+        assertEq(sim.queuedOrdersOf(aIdx), 1, "A's counter came down with B's cancellation");
+
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(aIdx, MARKET), 500, "A's order was cancelled by B");
+        assertEq(sim.positionBaseOf(bIdx, MARKET), 0, "B's own order was not cancelled");
+    }
+
+    /// @notice Item 4: `settleBatch` processes at most `SETTLE_BATCH_MAX` orders, in bounded gas,
+    ///         and repeated calls drain the queue.
+    function test_settleBatchCursorBoundsGas() public {
+        _fundTwoDepositors();
+        sim.setMarkPrice(MARKET, 100e18);
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+
+        uint256 total = 100; // > SETTLE_BATCH_MAX (64), < MAX_ORDERS_PER_ACCOUNT (128)
+        vm.startPrank(depositorA);
+        for (uint256 i = 0; i < total; ++i) {
+            sim.createOrder(aIdx, MARKET, 1, 10_000, 0, 1);
+        }
+        vm.stopPrank();
+        assertEq(sim.queuedOrdersOf(aIdx), total);
+
+        uint256 before = gasleft();
+        sim.settleBatch();
+        uint256 used = before - gasleft();
+
+        assertEq(sim.positionBaseOf(aIdx, MARKET), int256(sim.SETTLE_BATCH_MAX()), "the whole queue settled at once");
+        assertEq(sim.settleCursor(), sim.SETTLE_BATCH_MAX(), "the cursor did not advance");
+        // A generous ceiling: the point is that it is a CONSTANT in the queue's length, not that it
+        // is small. The pre-fix loop was O(queue) with no bound at all.
+        assertLt(used, 15_000_000, "one settleBatch call is not gas-bounded");
+
+        // Called again, it drains the rest and resets.
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(aIdx, MARKET), int256(total), "the queue did not drain");
+        assertEq(sim.settleCursor(), 0, "the cursor did not reset");
+        assertEq(sim.queueLength(), 0, "the queue was not cleared");
+        assertEq(sim.queuedOrdersOf(aIdx), 0, "the per-account counter did not drain");
+    }
+
+    /// @notice A cancellation between two halves of a drain cannot rewind or re-settle a fill.
+    /// @dev `_cancelOrdersOf` compacts from `settleCursor`, not from 0. Compacting over the settled
+    ///      prefix would either replay a fill or drop an unsettled order.
+    function test_cancellationCannotRewindASettledPrefix() public {
+        _fundTwoDepositors();
+        sim.setMarkPrice(MARKET, 100e18);
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        uint48 bIdx = sim.addressToAccountIndex(depositorB);
+
+        vm.startPrank(depositorA);
+        for (uint256 i = 0; i < 70; ++i) {
+            sim.createOrder(aIdx, MARKET, 1, 10_000, 0, 1);
+        }
+        vm.stopPrank();
+        vm.prank(depositorB);
+        sim.createOrder(bIdx, MARKET, 5, 10_000, 0, 1);
+
+        sim.settleBatch(); // settles the first 64, all A's
+        assertEq(sim.positionBaseOf(aIdx, MARKET), 64);
+
+        // A cancels what it has left. Its 64 filled ticks must stay filled, and B's order must
+        // still be there to settle.
+        vm.prank(depositorA);
+        sim.cancelAllOrders(aIdx);
+        assertEq(sim.positionBaseOf(aIdx, MARKET), 64, "a cancellation rewound a settled fill");
+        assertEq(sim.queuedOrdersOf(aIdx), 0);
+
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(aIdx, MARKET), 64, "a settled prefix was replayed");
+        assertEq(sim.positionBaseOf(bIdx, MARKET), 5, "another account's order was lost");
+        assertEq(sim.queueLength(), 0);
+    }
+
+    /// @notice Item 4: the queue is bounded per account, so no one account can monopolise it.
+    function test_queueIsCappedPerAccount() public {
+        _fundTwoDepositors();
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        uint256 cap = sim.MAX_ORDERS_PER_ACCOUNT();
+
+        vm.startPrank(depositorA);
+        for (uint256 i = 0; i < cap; ++i) {
+            sim.createOrder(aIdx, MARKET, 1, 10_000, 0, 1);
+        }
+        vm.expectRevert(LighterCore.LighterCore_AccountOrderCapReached.selector);
+        sim.createOrder(aIdx, MARKET, 1, 10_000, 0, 1);
+        vm.stopPrank();
+
+        // A different account is unaffected: the per-account cap is not a global lockout.
+        uint48 bIdx = sim.addressToAccountIndex(depositorB);
+        vm.prank(depositorB);
+        sim.createOrder(bIdx, MARKET, 1, 10_000, 0, 1);
+        assertEq(sim.queuedOrdersOf(bIdx), 1, "the per-account cap locked out another account");
+    }
+
+    /// @notice Item 4: and the queue is bounded globally, which is what makes the operator hatch's
+    ///         cost a number rather than an unknown.
+    /// @dev `MAX_QUEUE / MAX_ORDERS_PER_ACCOUNT` accounts are needed to reach it, which is the
+    ///      point: the global bound exists for the hatch's gas, the per-account bound exists so the
+    ///      global one cannot be weaponised.
+    function test_queueIsCappedGlobally() public {
+        sim.setMarkPrice(MARKET, 100e18);
+        uint256 perAccount = sim.MAX_ORDERS_PER_ACCOUNT();
+        uint256 accounts = sim.MAX_QUEUE() / perAccount;
+
+        for (uint256 a = 0; a < accounts; ++a) {
+            address who = address(uint160(0xC0DE00 + a));
+            sim.setDepositorAllowed(who, true);
+            usdgSim.mint(who, 1_000e6);
+            vm.startPrank(who);
+            usdgSim.approve(address(sim), type(uint256).max);
+            sim.deposit(who, ASSET_IDX, 0, 1_000e6);
+            uint48 idx = sim.addressToAccountIndex(who);
+            for (uint256 i = 0; i < perAccount; ++i) {
+                sim.createOrder(idx, MARKET, 1, 10_000, 0, 1);
+            }
+            vm.stopPrank();
+        }
+        assertEq(sim.queueLength(), sim.MAX_QUEUE(), "the fixture did not fill the queue");
+
+        address extra = address(uint160(0xC0DEFF));
+        sim.setDepositorAllowed(extra, true);
+        usdgSim.mint(extra, 1_000e6);
+        vm.startPrank(extra);
+        usdgSim.approve(address(sim), type(uint256).max);
+        sim.deposit(extra, ASSET_IDX, 0, 1_000e6);
+        uint48 extraIdx = sim.addressToAccountIndex(extra);
+        vm.expectRevert(LighterCore.LighterCore_QueueFull.selector);
+        sim.createOrder(extraIdx, MARKET, 1, 10_000, 0, 1);
+        vm.stopPrank();
+
+        // And the hatch that has to rescue a full queue still fits in a block.
+        uint256 before = gasleft();
+        sim.ownerPurgeQueue();
+        assertLt(before - gasleft(), 25_000_000, "the escape hatch is priced out by a full queue");
+        assertEq(sim.queueLength(), 0, "the purge left orders behind");
+    }
+
+    /// @notice A purge must release the per-account order counters with the orders it drops.
+    /// @dev Otherwise the hatch meant to unstick an account would lock it out of `createOrder` up
+    ///      to `MAX_ORDERS_PER_ACCOUNT` forever — a rescue that bricks what it rescues.
+    function test_ownerPurgeQueueReleasesTheAccountOrderCounters() public {
+        _fundTwoDepositors();
+        sim.setMarkPrice(MARKET, 100e18);
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        uint48 bIdx = sim.addressToAccountIndex(depositorB);
+
+        vm.startPrank(depositorA);
+        sim.createOrder(aIdx, MARKET, 1, 10_000, 0, 1);
+        sim.createOrder(aIdx, MARKET, 2, 10_000, 0, 1);
+        vm.stopPrank();
+        vm.prank(depositorB);
+        sim.createOrder(bIdx, MARKET, 3, 10_000, 0, 1);
+
+        vm.expectEmit(true, false, false, true, address(sim));
+        emit LighterSim.OperatorCancelledOrders(0, 3);
+        sim.ownerPurgeQueue();
+
+        assertEq(sim.queuedOrdersOf(aIdx), 0, "A stayed counted after the purge");
+        assertEq(sim.queuedOrdersOf(bIdx), 0, "B stayed counted after the purge");
+        assertEq(sim.settleCursor(), 0);
+
+        // And both accounts can queue again.
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 1, 10_000, 0, 1);
+        vm.prank(depositorB);
+        sim.createOrder(bIdx, MARKET, 1, 10_000, 0, 1);
+        assertEq(sim.queueLength(), 2);
+    }
+
+    /// @notice Item 5: `ownerCancelAccountOrders(0)` is refused, so the documented log convention
+    ///         (`accountIndex == 0` means "the whole queue was purged") is TRUE and not just
+    ///         written down.
+    function test_ownerCancelAccountOrdersRejectsIndexZero() public {
+        vm.expectRevert(LighterSim.LighterSim_AccountIndexZeroIsReservedForPurge.selector);
+        sim.ownerCancelAccountOrders(0);
+
+        // A real index still works, so this is a guard and not a brick.
+        _fundTwoDepositors();
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 1, 10_000, 0, 1);
+        vm.expectEmit(true, false, false, true, address(sim));
+        emit LighterSim.OperatorCancelledOrders(aIdx, 1);
+        sim.ownerCancelAccountOrders(aIdx);
+    }
+
+    /// @notice Item 2: `settleBatch` is owner-or-keeper only.
+    /// @dev Permissionless settlement was judged defensible while there was a single global
+    ///      position, because a caller timing a fill had no counterparty leg to profit from.
+    ///      Accounts now have separate positions, so whoever settles picks which block — and
+    ///      therefore which mark — someone else's queued order fills at.
+    function test_settleBatchIsGatedToOwnerOrKeeper() public {
+        _fundTwoDepositors();
+        sim.setMarkPrice(MARKET, 100e18);
+
+        vm.prank(stranger);
+        vm.expectRevert(LighterSim.LighterSim_OnlyOwnerOrKeeper.selector);
+        sim.settleBatch();
+
+        // Not even a registered, funded depositor.
+        vm.prank(depositorA);
+        vm.expectRevert(LighterSim.LighterSim_OnlyOwnerOrKeeper.selector);
+        sim.settleBatch();
+
+        sim.settleBatch(); // owner
+    }
+
+    function test_keeperCanSettleAndIsOwnerSettable() public {
+        _fundTwoDepositors();
+        sim.setMarkPrice(MARKET, 100e18);
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 100, 10_000, 0, 1);
+
+        vm.prank(stranger);
+        vm.expectRevert(LighterSim.LighterSim_OnlyOwner.selector);
+        sim.setKeeper(stranger);
+
+        vm.expectEmit(true, true, false, true, address(sim));
+        emit LighterSim.KeeperSet(address(0), depositorB);
+        sim.setKeeper(depositorB);
+        assertEq(sim.keeper(), depositorB);
+
+        vm.prank(depositorB);
+        sim.settleBatch();
+        assertEq(sim.positionBaseOf(aIdx, MARKET), 100, "the keeper could not settle");
+
+        // Clearing the keeper leaves the owner as the only settler — the fail-closed direction.
+        sim.setKeeper(address(0));
+        vm.prank(depositorB);
+        vm.expectRevert(LighterSim.LighterSim_OnlyOwnerOrKeeper.selector);
+        sim.settleBatch();
+    }
+
+    /// @notice The aggregate views really are sums of the per-account books, so a log reader or an
+    ///         invariant that asks a venue-level question gets a true answer.
+    /// @dev They are the only remaining consumers of the old global names. Asserting they SUM is
+    ///      what stops them silently becoming a second, drifting source of truth — which is the
+    ///      failure mode the two-book design would otherwise invite.
+    function test_aggregateViewsSumThePerAccountBooks() public {
+        _fundTwoDepositors();
+        sim.setMarkPrice(MARKET, 100e18);
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        uint48 bIdx = sim.addressToAccountIndex(depositorB);
+
+        assertEq(sim.accountCount(), 2, "the account list is wrong");
+        assertEq(sim.marginBalance(), sim.marginBalanceOf(aIdx) + sim.marginBalanceOf(bIdx), "margin sum");
+
+        // A long 400, B short 100: the NET is 300 and neither account's own figure is 300.
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 400, 10_000, 0, 1);
+        vm.prank(depositorB);
+        sim.createOrder(bIdx, MARKET, 100, 10_000, 1, 1);
+        sim.settleBatch();
+
+        assertEq(sim.positionBaseOf(aIdx, MARKET), 400);
+        assertEq(sim.positionBaseOf(bIdx, MARKET), -100);
+        assertEq(sim.positionBase(MARKET), 300, "the net view is not a sum");
+        // Both entered at the same mark, so the size-weighted mean is that mark.
+        assertEq(sim.entryPrice(MARKET), 100e18, "the weighted entry view is wrong");
+
+        sim.setMarkPrice(MARKET, 120e18);
+        assertEq(
+            sim.unrealisedPnl(),
+            sim.unrealisedPnl(aIdx) + sim.unrealisedPnl(bIdx),
+            "the aggregate pnl view is not a sum"
+        );
+        assertGt(sim.unrealisedPnl(aIdx), 0, "the long did not gain");
+        assertLt(sim.unrealisedPnl(bIdx), 0, "the short did not lose");
+    }
+
+    /// @notice `queuedOrdersOf` matches a direct scan of the queue after every kind of mutation.
+    /// @dev The counter is maintained in four places (`createOrder` up; `settleBatch`,
+    ///      `_cancelOrdersOf` and `_purgeQueue` down) and a cap enforced off a drifting counter is
+    ///      a lockout waiting to happen, so it is pinned against the queue itself rather than
+    ///      trusted.
+    function test_queuedOrderCountersTrackTheQueue() public {
+        _fundTwoDepositors();
+        sim.setMarkPrice(MARKET, 100e18);
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        uint48 bIdx = sim.addressToAccountIndex(depositorB);
+
+        vm.startPrank(depositorA);
+        for (uint256 i = 0; i < 5; ++i) {
+            sim.createOrder(aIdx, MARKET, 1, 10_000, 0, 1);
+        }
+        vm.stopPrank();
+        vm.startPrank(depositorB);
+        for (uint256 i = 0; i < 3; ++i) {
+            sim.createOrder(bIdx, MARKET, 1, 10_000, 0, 1);
+        }
+        vm.stopPrank();
+        assertEq(sim.queuedOrdersOf(aIdx), 5);
+        assertEq(sim.queuedOrdersOf(bIdx), 3);
+        assertEq(sim.queueLength(), 8);
+
+        vm.prank(depositorA);
+        sim.cancelAllOrders(aIdx);
+        assertEq(sim.queuedOrdersOf(aIdx), 0, "cancel left A counted");
+        assertEq(sim.queuedOrdersOf(bIdx), 3, "cancel decremented B");
+        assertEq(sim.queueLength(), 3, "compaction lost or kept the wrong entries");
+
+        sim.settleBatch();
+        assertEq(sim.queuedOrdersOf(bIdx), 0, "settlement left B counted");
+        assertEq(sim.queueLength(), 0);
+    }
+
+    // ---------------------------------------------------------------------------------------
+
+    /// @dev Two funded, registered accounts on the sim: 600_000 and 400_000 USDG.
+    ///
+    ///      The note that used to stand here said `marginBalance` is GLOBAL in `LighterCore`, which
+    ///      "is exactly why the unbound `withdraw` was a total drain rather than a single-account
+    ///      one". Task 7 made that false: `marginBalanceOf`, `positionBaseOf` and `entryPriceOf`
+    ///      are keyed by account index and `equity(accountIndex)` takes an account. This fixture is
+    ///      now the base for the multi-account tests above, which are what prove it.
     function _fundTwoDepositors() internal {
         // Fix round 1, Critical 1: both recipients must be owner-approved before they can register.
         sim.setDepositorAllowed(depositorA, true);
@@ -645,7 +1323,11 @@ contract LighterSimTest is Test {
         assertEq(mockL.entryPrice(MARKET), sim.entryPrice(MARKET), string.concat("entryPrice ", tag));
         assertEq(mockL.markPrice(MARKET), sim.markPrice(MARKET), string.concat("markPrice ", tag));
         assertEq(mockL.unrealisedPnl(), sim.unrealisedPnl(), string.concat("unrealisedPnl ", tag));
-        assertEq(mockL.equity(), sim.equity(), string.concat("equity ", tag));
+        assertEq(
+            mockL.equity(mockL.addressToAccountIndex(address(this))),
+            sim.equity(sim.addressToAccountIndex(address(this))),
+            string.concat("equity ", tag)
+        );
         assertEq(mockL.requiredMarginBps(), sim.requiredMarginBps(), string.concat("requiredMarginBps ", tag));
         assertEq(mockL.depositCapTicks(), sim.depositCapTicks(), string.concat("depositCapTicks ", tag));
         assertEq(
