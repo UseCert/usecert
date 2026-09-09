@@ -89,6 +89,10 @@ contract DeployTestnet is Script {
     error DeployTestnet_WrongChain(uint256 actual, uint256 expected);
     /// @dev Task 8's artefact is missing; see the contract NatSpec.
     error DeployTestnet_MissingCollateral();
+    /// @dev Task 7 gated `LighterSim.settleBatch` to `owner` or `keeper`; an unregistered keeper
+    ///      leaves no address on file for the bot that has to call it after deployment, and
+    ///      `settleBatch` would revert `LighterSim_OnlyOwnerOrKeeper` for it the first time it did.
+    error DeployTestnet_MissingBatchKeeper();
 
     // ------------------------------------------------------------------------------- the chain
 
@@ -286,6 +290,7 @@ contract DeployTestnet is Script {
     // shared addresses
     address internal collateral;
     address internal testFaucet;
+    address internal batchKeeper;
     address internal lighter;
     address internal registry;
     address internal capacity;
@@ -376,6 +381,14 @@ contract DeployTestnet is Script {
         return vm.envOr("COLLATERAL", address(0));
     }
 
+    /// @dev The address Task 12's `BatchAdvancer` keeper signs with. Injected for the same reason as
+    ///      `_collateralAddress()` — a test overrides it by SUBCLASSING rather than mutating the
+    ///      process environment. Registered on `LighterSim` in phase 5 (Task 7's gate) and recorded
+    ///      in the address book so the keeper process and the deployment agree on it.
+    function _batchKeeperAddress() internal view virtual returns (address) {
+        return vm.envOr("BATCH_KEEPER", address(0));
+    }
+
     // ------------------------------------------------------------------------------------- run
 
     function run() external {
@@ -400,6 +413,12 @@ contract DeployTestnet is Script {
         collateral = _collateralAddress();
         if (collateral == address(0)) revert DeployTestnet_MissingCollateral();
         testFaucet = vm.envOr("TEST_FAUCET", address(0));
+
+        // Task 7 gated `LighterSim.settleBatch` to `owner` or `keeper`. Registered in phase 5, by
+        // the deployer (who is also the simulator's owner); loaded and validated here so a missing
+        // key aborts before anything is broadcast, exactly like the collateral check above.
+        batchKeeper = _batchKeeperAddress();
+        if (batchKeeper == address(0)) revert DeployTestnet_MissingBatchKeeper();
 
         // ------------------------------------------------------------------- phase 1: deployer
         vm.startBroadcast(deployerPk);
@@ -500,8 +519,10 @@ contract DeployTestnet is Script {
         );
 
         // The venue. `_owner` is the deployer, standing in for the venue operator: the allowlist,
-        // the mark prices and the stuck-queue hatches are all `onlyOwner`, and `settleBatch()` is
-        // deliberately NOT (Task 12's `BatchAdvancer` is permissionless, as the real venue is).
+        // the mark prices and the stuck-queue hatches are all `onlyOwner`. `settleBatch()` is gated
+        // to `owner` or `keeper` too (Task 7, item 2) — a permissionless settler picks the block,
+        // and therefore the mark, at which someone else's queued order fills. Phase 5 registers
+        // Task 12's `BatchAdvancer` bot as `keeper` on this simulator.
         //
         // `sizeDecimals` is taken from the FIRST asset because it is a per-simulator field while
         // the venue has it per-market. Both C1 markets are `size_decimals 4` (verified live), so
@@ -679,6 +700,17 @@ contract DeployTestnet is Script {
             CertVault(deployed[i].vault).bootstrap();
         }
 
+        // ============================== PLAN STEP 3b — DO NOT REMOVE =============================
+        // TASK 7 INTEGRATION POINT. `settleBatch()` is gated to `owner` or `keeper` (Task 7, item
+        // 2): a permissionless settler picks the block, and therefore the mark, someone else's
+        // queued order fills at. Sent by the DEPLOYER, who is also `LighterSim.owner` (see
+        // `_phase1_simulators`), so this call needs no keeper registration to succeed itself — but
+        // without it, Task 12's `BatchAdvancer` keeper has no address on file and reverts
+        // `LighterSim_OnlyOwnerOrKeeper` the first time IT calls in, which reads identically to a
+        // dead keeper. Read back in `_verifyAssetGate` and recorded in the address book.
+        // =====================================================================================
+        LighterSim(lighter).setKeeper(batchKeeper);
+
         // §6 step 8 / plan step 3: THE BATCH ADVANCE, and it is MANDATORY.
         //
         // `createOrder` reverts `AccountIsNotRegistered` until `addressToAccountIndex[vault]` is
@@ -688,8 +720,9 @@ contract DeployTestnet is Script {
         // empty, so it is called unconditionally rather than conditioned on the simulator's current
         // sync-or-async behaviour.
         //
-        // Permissionless by design — Task 12's `BatchAdvancer` keeper calls exactly this on an
-        // interval, and on mainnet Lighter advances its own batches.
+        // Task 12's `BatchAdvancer` keeper calls exactly this on an interval, signing with the
+        // `batchKeeper` address registered just above, and on mainnet Lighter advances its own
+        // batches.
         LighterSim(lighter).settleBatch();
     }
 
@@ -925,6 +958,14 @@ contract DeployTestnet is Script {
         require(LighterSim(lighter).markPrice(a.marketIndex) != 0, "S9: venue mark unset - settleBatch would revert");
         require(LighterSim(lighter).owner() == deployerAddr, "S9: sim owner != DEPLOYER");
 
+        // ---- Task 7 / Task 10: the keeper registered above is the one on file. A mismatch here is
+        //      the exact failure mode integration missed: every settleBatch from that bot's key
+        //      reverts LighterSim_OnlyOwnerOrKeeper, indistinguishable from a dead keeper.
+        require(
+            LighterSim(lighter).keeper() == batchKeeper,
+            "S9: sim keeper != BATCH_KEEPER - settleBatch will revert for that key"
+        );
+
         // ---- §9: the live price is inside the uint32 tick domain at the configured priceDecimals
         require(o.toTickPrice(o.px()) != 0, "S9: toTickPrice(px) == 0");
 
@@ -992,6 +1033,15 @@ contract DeployTestnet is Script {
         out = string.concat(out, _jAddr("    ", "lighterSim", lighter));
         out = string.concat(out, _jAddr("    ", "solvencyRegistry", registry));
         out = string.concat(out, _jAddr("    ", "capacityOracle", capacity));
+        out = string.concat(out, _jAddr("    ", "batchKeeper", batchKeeper));
+        out = string.concat(
+            out,
+            _jStr(
+                "    ",
+                "_batchKeeperNote",
+                "Task 12's BatchAdvancer keeper must sign with this exact address, registered via LighterSim.setKeeper - otherwise every settleBatch reverts LighterSim_OnlyOwnerOrKeeper, indistinguishable from a dead keeper"
+            )
+        );
         out = string.concat(out, _jAddrLast("    ", "certFactory", factory));
         out = string.concat(out, "  },\n");
 
@@ -1118,6 +1168,7 @@ contract DeployTestnet is Script {
         console2.log("LighterSim     ", lighter);
         console2.log("SolvencyRegistry", registry);
         console2.log("CapacityOracle ", capacity);
+        console2.log("batchKeeper    ", batchKeeper);
         console2.log("CertFactory    ", factory);
         for (uint256 i = 0; i < assets.length; ++i) {
             console2.log("---", assets[i].symbol, "market", assets[i].marketIndex);

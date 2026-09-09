@@ -218,6 +218,16 @@ run first and only then sends what it collected. Section 9 is discharged on-chai
    open registration *harmless* rather than merely impossible — at which point this row and the
    mapping should both be deleted rather than kept as defence in depth, because keeping it would
    leave the simulator permanently diverged from the venue on who may hold an account.
+6b. **`LighterSim.setKeeper(batchKeeper)` — the simulator's `owner`, from an env-supplied address
+   (`BATCH_KEEPER`), and read back with a `require()` like every other item on this list.** Task 7
+   gated `settleBatch()` to `owner` or `keeper`: a permissionless settler picks the block, and
+   therefore the mark, at which someone else's queued order fills. The address that will run
+   Task 12's `BatchAdvancer` keeper has to be on file **before** that bot ever calls in, and it is
+   also recorded in `deployments/<chainId>.json`, because the keeper process and the deployment
+   have to agree on it and nothing on-chain will tell you they disagree.
+
+   **Failure mode:** every `settleBatch` reverts `LighterSim_OnlyOwnerOrKeeper` → the address in the
+   book is not the one the keeper is signing with.
 7. `bootstrap()` — one-time, permissionless, sets `bootstrapped`.
 8. **Wait for the rollup to execute the registering deposit.** `createOrder` reverts
    `AccountIsNotRegistered` until `addressToAccountIndex[vault]` is populated, so every mint reverts
@@ -290,6 +300,12 @@ Read these back on-chain before funding:
       `LighterSim.requiredMarginBps() >= VENUE_IMF_BPS` (5000, verified live across all 57 markets):
       a simulator more permissive than the venue is how this project shipped three defects a green
       suite could not see. **Not applicable to a mainnet deployment against Lighter itself**
+- [ ] `LighterSim.keeper()` equals the `batchKeeper` address recorded in `deployments/<chainId>.json`
+      (section 6, step 6b) — this is the address Task 12's `BatchAdvancer` must sign with. **Failure
+      mode:** every `settleBatch` reverts `LighterSim_OnlyOwnerOrKeeper` → the address in the book is
+      not the one the keeper is signing with, which is indistinguishable on-chain from a dead
+      keeper. **Not applicable to a mainnet deployment against Lighter itself**, same as the row
+      above
 - [ ] `oracle.toTickPrice(oracle.px())` returns a sane tick, i.e. the live price is inside the
       uint32 domain at the configured `priceDecimals`
 - [ ] a `forceExit` of a dust position succeeds on the live deployment — this is Law 2 and it is

@@ -93,6 +93,12 @@ contract DeployTestnetTest is Test {
     address internal attesterAddr;
     address internal alice = makeAddr("alice");
 
+    /// @dev Task 7 gated `LighterSim.settleBatch` to `owner` or `keeper`. This is the address the
+    ///      script registers as `keeper` (env `BATCH_KEEPER`), standing in for Task 12's
+    ///      `BatchAdvancer` bot — a distinct key from all three senders, same as the real deployment
+    ///      would use.
+    address internal batchKeeperAddr = makeAddr("batchKeeper");
+
     function setUp() public {
         // A real-ish wall clock: `ReplayAggregator`'s constructor stamps round 1 at
         // `block.timestamp`, and `CertOracle`'s constructor rejects a feed whose observation is
@@ -123,6 +129,7 @@ contract DeployTestnetTest is Test {
         vm.setEnv("GOV_PK", vm.toString(bytes32(GOV_PK)));
         vm.setEnv("ATTESTER_PK", vm.toString(bytes32(ATTESTER_PK)));
         vm.setEnv("COLLATERAL", vm.toString(address(collateral)));
+        vm.setEnv("BATCH_KEEPER", vm.toString(batchKeeperAddr));
         vm.setEnv("COMMIT", "test-run-not-a-real-commit");
 
         script = new DeployTestnet();
@@ -289,6 +296,10 @@ contract DeployTestnetTest is Test {
             LighterSim(lighter_).requiredMarginBps() >= LighterSim(lighter_).VENUE_IMF_BPS(), "sim below venue floor"
         );
         assertEq(LighterSim(lighter_).owner(), deployerAddr, "sim owner");
+        // Task 7 / Task 10: the keeper the script registered is the one the address book must agree
+        // with, or Task 12's BatchAdvancer reverts LighterSim_OnlyOwnerOrKeeper the first time it
+        // calls in - indistinguishable from a dead keeper.
+        assertEq(LighterSim(lighter_).keeper(), batchKeeperAddr, "sim keeper != BATCH_KEEPER");
         // The venue mark, without which `settleBatch` refuses the batch and the whole
         // mark-to-market layer would be dead (zero notional, zero PnL, vacuous margin gate).
         assertEq(LighterSim(lighter_).markPrice(a.marketIndex), a.seedPx18, "venue markPrice");
@@ -344,7 +355,11 @@ contract DeployTestnetTest is Test {
             assertEq(cert.totalSupply(), certOut, "totalSupply != certOut");
 
             // The hedge was submitted, not merely intended. It settles on the next batch, exactly
-            // as the real venue's asynchronous fills do.
+            // as the real venue's asynchronous fills do. Task 7 gates `settleBatch` to `owner` or
+            // `keeper`; called here as the keeper the script registered (env `BATCH_KEEPER`), the
+            // same key Task 12's `BatchAdvancer` would sign with - not the owner, so this also
+            // exercises the keeper path the deployment wires up rather than only the owner's.
+            vm.prank(batchKeeperAddr);
             LighterSim(lighter_).settleBatch();
             assertTrue(LighterSim(lighter_).positionBase(script.paramsOf(i).marketIndex) != 0, "no hedge opened");
 
@@ -359,7 +374,8 @@ contract DeployTestnetTest is Test {
 
             // The closing order reaches the venue and the venue accepts it. A revert here would
             // mean the exit hedge was unsettleable, which is the failure mode Global Constraint 5
-            // exists to make visible.
+            // exists to make visible. Again as the registered keeper, not the owner.
+            vm.prank(batchKeeperAddr);
             LighterSim(lighter_).settleBatch();
 
             // The receipt is real. Receipt ids are per-vault and start at 1, so this also pins that
