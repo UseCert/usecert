@@ -292,15 +292,29 @@ It reads `deployments/46630.json` and re-asserts `docs/DEPLOYMENT-CHECKLIST.md` 
 chain. Read-only; no `--broadcast`. **Run it before starting the keepers and after every
 redeployment.**
 
+`script/VerifyTestnet.s.sol` is read-only by design, so it cannot discharge §9's one row that
+requires a real transaction: **"a `forceExit` of a dust position succeeds on the live
+deployment — this is Law 2 and it is worth one real transaction."** That row's discharge is
+`script/smoke/SmokeTest.s.sol`, a separate, deliberately non-read-only entrypoint. Run it after the
+verify script is green:
+
+```bash
+forge script script/smoke/SmokeTest.s.sol --rpc-url robinhood_testnet --broadcast --slow
+```
+
+It mints a dust amount, redeems half of it instantly, `forceExit`s the remainder, then settles the
+batch and claims — exercising §9's live dust-`forceExit` row end to end rather than reading state
+that cannot prove it.
+
 Also run the size gate at least once per deployed commit — `forge test` does **not** enforce
 EIP-170, so a green suite is not evidence:
 
 ```bash
-forge build --sizes     # every deployable contract must show a positive runtime margin
+bash script/check-sizes.sh     # exits non-zero on a negative margin, or on an empty/unparsable table
 ```
 
-If `script/VerifyTestnet.s.sol` is not in the tree yet, the equivalent minimum by hand is the
-health check in §7 — but the verify script is the discharge of §9 and the health check is not.
+The equivalent minimum by hand, if you need it, is the health check in §7 — but the verify script
+is the discharge of §9's read-back rows and the health check is not.
 
 ---
 

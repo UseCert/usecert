@@ -56,7 +56,7 @@ contract VerifyFixture is DeployTestnet {
         return (_dPk, _gPk, _aPk);
     }
 
-    function _collateralAddress() internal view override returns (address) {
+    function _deployCollateral() internal override returns (address) {
         return _collat;
     }
 
@@ -71,7 +71,7 @@ contract VerifyFixture is DeployTestnet {
         attesterAddr = vm.addr(attesterPk);
 
         _loadAssets();
-        collateral = _collateralAddress();
+        collateral = _deployCollateral();
         batchKeeper = _batchKeeperAddress();
 
         vm.startBroadcast(deployerPk);
