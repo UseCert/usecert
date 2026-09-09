@@ -71,6 +71,29 @@ path reads it, at any value:
 - **`basisBandBps = 150`** on mainnet — three times the measured 49.3 bps worst case, so ordinary
   basis does not pause minting while a real dislocation still does. Testnet: `500`, for reachability.
 
+### DELIVERED 2026-09-09 — the coupling is gone
+
+Task 1 shipped the `roundId` fix described below (commits `bff7514`, `3843da9`).
+`pokeConfirmationSeconds` is now a separate immutable constructor parameter, and `pokeLastGood()`
+proves round distinctness from `roundId > pendingRoundId` instead of inferring it from the
+timestamp inequality. **`stalenessSeconds` is no longer doubly loaded**, so the 4.3-day
+minting-shut consequence computed below no longer applies: the breaker's rate limit and the
+feed-freshness bound are independent knobs.
+
+Two consequences to carry forward:
+
+- The testnet `stalenessSeconds = 900` chosen below was justified *partly* by the coupling. That
+  justification is void, but the value survives on its own merit — on testnet we own the
+  aggregator, so a tight bound is what makes the staleness edge reachable inside a test run rather
+  than requiring a real weekend.
+- **New operational constraint:** the feed keeper's push interval must sit comfortably below
+  `stalenessSeconds`, or minting pauses between pushes. At 900 s that means pushing at most every
+  ~300 s. This belongs in the runbook's troubleshooting table alongside the attester cadence,
+  because the symptom (minting stops, nothing obviously broken) is identical to the
+  `maxAttestationAgeSec` starvation case and the two would be easy to confuse.
+
+The mainnet reasoning below stands unchanged: 26 hours, failing closed off-hours.
+
 ### The coupling, and the fix that dissolves it
 
 `stalenessSeconds` is doubly loaded: H-1 reuses it as `pokeLastGood`'s confirmation window. That
