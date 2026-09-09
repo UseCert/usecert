@@ -44,6 +44,13 @@ contract LighterSimTest is Test {
         usdgSim.mint(address(this), 1_000_000e6);
         usdgMock.approve(address(mockL), type(uint256).max);
         usdgSim.approve(address(sim), type(uint256).max);
+
+        // Fix round 1, Critical 1. `LighterSim.deposit` now refuses a `to` the owner has not
+        // approved, so every sim deposit below needs its recipient allowlisted first. This test
+        // contract is the sim's owner and its main depositor. `mockL` needs nothing: the allowlist
+        // is deliberately on `LighterSim` only, so `MockLighter` still registers anyone — which is
+        // why no test outside this file needed a line changed.
+        sim.setDepositorAllowed(address(this), true);
     }
 
     // ---------------------------------------------------------------------------------------
@@ -344,6 +351,7 @@ contract LighterSimTest is Test {
     ///         registers another address, which is how a vault gets an account index at all — the
     ///         vault is registered by whoever funds it.
     function test_depositStillRegistersAThirdParty() public {
+        sim.setDepositorAllowed(depositorA, true); // fix round 1: the recipient must be approved
         sim.deposit(depositorA, ASSET_IDX, 0, 1_000e6); // funded by this contract, registers A
         assertGt(sim.addressToAccountIndex(depositorA), 0, "third-party registration broke");
         assertEq(sim.addressToAccountIndex(address(this)), 0, "the funder got registered instead");
@@ -573,13 +581,22 @@ contract LighterSimTest is Test {
         }
     }
 
-    /// @notice The three knobs `LighterSim` does expose are unreachable by a stranger. This is the
-    ///         assertion that replaces the vacuous half of the probe above.
+    /// @notice Every privileged entry point `LighterSim` exposes is unreachable by a stranger. This
+    ///         is the assertion that replaces the vacuous half of the probe above, and it is the
+    ///         one place the operator surface is ENUMERATED — so it must grow with the surface.
+    ///
+    /// @dev Fix round 1 added three: `setDepositorAllowed` (Critical 1's registration allowlist)
+    ///      and the two halves of Critical 2's stuck-queue escape hatch. Leaving them out would
+    ///      have reproduced §5.3's defect exactly — a green test that stays green through the
+    ///      change it exists to guard against.
     function test_theOperatorKnobsThatDoExistAreAllGated() public {
-        bytes[3] memory knobs = [
+        bytes[6] memory knobs = [
             abi.encodeWithSignature("setMarkPrice(uint16,uint256)", MARKET, uint256(100e18)),
             abi.encodeWithSignature("setRequiredMarginBps(uint256)", uint256(9_000)),
-            abi.encodeWithSignature("setDepositCapTicks(uint256)", uint256(1_000))
+            abi.encodeWithSignature("setDepositCapTicks(uint256)", uint256(1_000)),
+            abi.encodeWithSignature("setDepositorAllowed(address,bool)", depositorA, true),
+            abi.encodeWithSignature("ownerCancelAccountOrders(uint48)", uint48(3)),
+            abi.encodeWithSignature("ownerPurgeQueue()")
         ];
         for (uint256 i = 0; i < knobs.length; ++i) {
             vm.prank(stranger);
@@ -607,6 +624,9 @@ contract LighterSimTest is Test {
     ///      is global in `LighterCore` (per-account isolation is Task 7), which is exactly why the
     ///      unbound `withdraw` was a total drain rather than a single-account one.
     function _fundTwoDepositors() internal {
+        // Fix round 1, Critical 1: both recipients must be owner-approved before they can register.
+        sim.setDepositorAllowed(depositorA, true);
+        sim.setDepositorAllowed(depositorB, true);
         usdgSim.mint(depositorA, 600_000e6);
         usdgSim.mint(depositorB, 400_000e6);
         vm.prank(depositorA);
