@@ -80,6 +80,11 @@ contract LighterSimTest is Test {
         // deposit
         mockL.deposit(address(this), ASSET_IDX, 0, 1_000e6);
         sim.deposit(address(this), ASSET_IDX, 0, 1_000e6);
+        // TASK 6b: the registering deposit is a priority request, so the index resolves on the next
+        // batch rather than in this transaction. Settled on BOTH front ends, because the deferral
+        // is on the shared core and `_assertSameState` compares `batchesSettled`.
+        mockL.settleBatch();
+        sim.settleBatch();
 
         uint48 mockIdx = mockL.addressToAccountIndex(address(this));
         uint48 simIdx = sim.addressToAccountIndex(address(this));
@@ -99,9 +104,14 @@ contract LighterSimTest is Test {
         _assertSameState("after settle");
         assertEq(sim.positionBase(MARKET), 100, "sim position");
 
-        // withdraw — asynchronous credit to pending, no synchronous transfer
+        // withdraw — TASK 6a: the request is ENQUEUED here and executed by the next batch, on both
+        // front ends. 400e6 is inside the account's cash, so once executed it is credited in full
+        // and the two front ends stay in lockstep.
         mockL.withdraw(mockIdx, ASSET_IDX, 0, 400e6);
         sim.withdraw(simIdx, ASSET_IDX, 0, 400e6);
+        assertEq(sim.getPendingBalance(address(this), ASSET_IDX), 0, "sim credited in the calling transaction");
+        mockL.settleBatch();
+        sim.settleBatch();
         _assertSameState("after withdraw");
         assertEq(sim.getPendingBalance(address(this), ASSET_IDX), 400e6, "sim pending");
 
@@ -124,6 +134,9 @@ contract LighterSimTest is Test {
 
         mockL.deposit(address(this), ASSET_IDX, 0, 1_000e6);
         sim.deposit(address(this), ASSET_IDX, 0, 1_000e6);
+        // TASK 6b: registration resolves on the next batch, on both front ends.
+        mockL.settleBatch();
+        sim.settleBatch();
 
         uint48 mockIdx = mockL.addressToAccountIndex(address(this));
         uint48 simIdx = sim.addressToAccountIndex(address(this));
@@ -150,21 +163,35 @@ contract LighterSimTest is Test {
         uint64 all = uint64(sim.equity(simIdx));
         mockL.withdraw(mockIdx, ASSET_IDX, 0, all);
         sim.withdraw(simIdx, ASSET_IDX, 0, all);
+        // TASK 6a: executed by a batch, not by the calling transaction.
+        mockL.settleBatch();
+        sim.settleBatch();
 
-        assertEq(mockL.marginBalance(), sim.marginBalance(), "margin after realising gain");
-        assertEq(mockL.entryPrice(MARKET), sim.entryPrice(MARKET), "entry after realising gain");
-        assertEq(mockL.entryPrice(MARKET), 120e18, "gain fully realised");
-        assertEq(mockL.unrealisedPnl(), sim.unrealisedPnl(), "residual pnl");
-        assertEq(
-            mockL.getPendingBalance(address(this), ASSET_IDX),
-            sim.getPendingBalance(address(this), ASSET_IDX),
-            "pending credit"
-        );
+        // TASK 6a MOVED THE ONE DELIBERATE FRONT-END DIFFERENCE EARLIER, and that is finding I2's
+        // fix rather than a weakening of this test. `MockLighter._fundPending` mints the
+        // counterparty collateral a gain-drawing withdrawal needs, because a one-account mock has
+        // no losing counterparty — so the mock credits in full and realises the gain.
+        // `LighterSim` has no such override, so the credit it cannot back is now REFUSED WHOLE at
+        // the decision point: nothing credited, and margin, entryPrice and the pending total all
+        // left exactly where they were.
+        //
+        // BEFORE THIS TASK BOTH FRONT ENDS HALF-APPLIED IT — margin debited, entryPrice rewritten,
+        // `_pendingTotal` bumped — and only the later drain reverted on the sim, which is why the
+        // four parity assertions that used to stand here passed. They are replaced by two
+        // per-front-end groups, and both are strictly sharper: they pin what each front end does
+        // rather than only that the two agree up to the drain.
+        assertEq(mockL.marginBalance(), 0, "the mock did not draw the whole of equity");
+        assertEq(mockL.entryPrice(MARKET), 120e18, "the mock did not fully realise the gain");
+        assertEq(mockL.unrealisedPnl(), 0, "the mock left a residual gain behind");
+        assertEq(mockL.getPendingBalance(address(this), ASSET_IDX), all, "the mock credited nothing");
 
-        // The ONE deliberate front-end difference, and it fails in the conservative direction:
-        // MockLighter mints the counterparty collateral a gain-drawing withdrawal needs, because a
-        // one-account mock has no losing counterparty. LighterSim does not, so the same receipt is
-        // unpayable on the simulator. Global Constraint 5 — never easier than mainnet.
+        assertEq(sim.marginBalance(), 1_000e6, "the sim's margin moved on a refused withdrawal");
+        assertEq(sim.entryPrice(MARKET), 100e18, "the sim's entry price moved on a refused withdrawal");
+        assertEq(sim.getPendingBalance(address(this), ASSET_IDX), 0, "the sim credited what it cannot back");
+        assertEq(sim.pendingTotal(), 0, "the sim's pending total moved on a refused withdrawal");
+
+        // The mock's credit is drainable. The sim never made one, so the same receipt is unpayable
+        // there and nothing about it is half-done. Global Constraint 5 — never easier than mainnet.
         mockL.withdrawPendingBalance(address(this), ASSET_IDX, uint128(all));
         vm.expectRevert();
         sim.withdrawPendingBalance(address(this), ASSET_IDX, uint128(all));
@@ -184,6 +211,10 @@ contract LighterSimTest is Test {
         sim.setStrictMode(true);
         mockL.deposit(address(this), ASSET_IDX, 0, 1e6);
         sim.deposit(address(this), ASSET_IDX, 0, 1e6);
+        // TASK 6b: registration resolves on the next batch. Both queues are empty here, so these
+        // two settlements fill nothing and `strictMode` has nothing to refuse yet.
+        mockL.settleBatch();
+        sim.settleBatch();
 
         // 1_000_000 base ticks at size_decimals 4 is 100 units => $10,000 notional against $1.
         mockL.createOrder(mockL.addressToAccountIndex(address(this)), MARKET, 1_000_000, 35586, 0, 1);
@@ -244,6 +275,9 @@ contract LighterSimTest is Test {
         uint48 aIdx = sim.addressToAccountIndex(depositorA);
         vm.prank(depositorA);
         sim.withdraw(aIdx, ASSET_IDX, 0, 100e6);
+        // TASK 6a: the request is executed by a batch, not by the calling transaction. The
+        // assertion is unchanged — the account's own withdrawal is still fulfilled in full.
+        sim.settleBatch();
         assertEq(sim.getPendingBalance(depositorA, ASSET_IDX), 100e6, "own withdrawal refused");
     }
 
@@ -349,6 +383,7 @@ contract LighterSimTest is Test {
     ///         Task 4 in the first place.
     function test_theBindingIsOnTheCoreSoTheMockInheritsIt() public {
         mockL.deposit(address(this), ASSET_IDX, 0, 1_000e6);
+        mockL.settleBatch(); // TASK 6b: registration resolves on the next batch
         uint48 idx = mockL.addressToAccountIndex(address(this));
 
         vm.prank(stranger);
@@ -370,6 +405,7 @@ contract LighterSimTest is Test {
     function test_depositStillRegistersAThirdParty() public {
         sim.setDepositorAllowed(depositorA, true); // fix round 1: the recipient must be approved
         sim.deposit(depositorA, ASSET_IDX, 0, 1_000e6); // funded by this contract, registers A
+        sim.settleBatch(); // TASK 6b: the registration resolves on the next batch
         assertGt(sim.addressToAccountIndex(depositorA), 0, "third-party registration broke");
         assertEq(sim.addressToAccountIndex(address(this)), 0, "the funder got registered instead");
     }
@@ -486,6 +522,9 @@ contract LighterSimTest is Test {
     ///         mark: the batch must be refused rather than filling an unmargined position.
     function test_settleBatchRevertsOnUnsetMarkPrice() public {
         sim.deposit(address(this), ASSET_IDX, 0, 1e6); // $1 of margin
+        // TASK 6b: registration resolves on the next batch. Safe to settle before the mark is set —
+        // the queue is empty, so the mark pre-pass has nothing to scan.
+        sim.settleBatch();
         uint48 idx = sim.addressToAccountIndex(address(this));
 
         // $10,000 of notional at a real mark — 10_000x the posted margin.
@@ -514,6 +553,7 @@ contract LighterSimTest is Test {
     ///         hid a Critical in this project's external audit.
     function test_settleBatchRevertsOnAnUnsetMarkForAnyMarketInTheBatch() public {
         sim.deposit(address(this), ASSET_IDX, 0, 100_000e6);
+        sim.settleBatch(); // TASK 6b: registration resolves on the next batch
         uint48 idx = sim.addressToAccountIndex(address(this));
         sim.setMarkPrice(MARKET, 100e18); // MARKET priced, MARKET_B not
 
@@ -548,6 +588,7 @@ contract LighterSimTest is Test {
     ///         decision on the record rather than an accident.
     function test_theMarkGuardIsOnTheDeployableFrontEndOnly() public {
         mockL.deposit(address(this), ASSET_IDX, 0, 1_000e6);
+        mockL.settleBatch(); // TASK 6b: registration resolves on the next batch
         uint48 idx = mockL.addressToAccountIndex(address(this));
         mockL.createOrder(idx, MARKET, 100, 35586, 0, 1);
         mockL.settleBatch(); // no mark set, and that stays legal on the test front end
@@ -582,6 +623,7 @@ contract LighterSimTest is Test {
         // The mock needs one queued order, or its own `lastOrder()` reverts on an empty array and
         // the sanity probe below would fail for a reason that has nothing to do with the leak.
         mockL.deposit(address(this), ASSET_IDX, 0, 1_000e6);
+        mockL.settleBatch(); // TASK 6b: registration resolves on the next batch
         mockL.createOrder(mockL.addressToAccountIndex(address(this)), MARKET, 100, 35586, 0, 1);
 
         bytes[5] memory leaks = [
@@ -693,12 +735,19 @@ contract LighterSimTest is Test {
         // for 1 unit is the strongest version of the attack that is actually reachable — and the
         // point of this test is that even a SUCCESSFUL registration buys nothing.
         sim.deposit(stranger, ASSET_IDX, 0, 1e6);
+        vm.stopPrank();
+        // TASK 6b: the registration resolves on the next batch, and `settleBatch` is owner-or-keeper
+        // gated — so it cannot be called from inside the attacker's prank, which is why the prank
+        // ends here rather than after the withdrawal.
+        sim.settleBatch();
         uint48 sIdx = sim.addressToAccountIndex(stranger);
         assertGt(sIdx, 0, "the attacker did not register, so this test proves nothing");
 
         // The exact pre-fix drain call, and the ceiling is now the caller's own balance.
+        vm.prank(stranger);
         sim.withdraw(sIdx, ASSET_IDX, 0, type(uint64).max);
-        vm.stopPrank();
+        // TASK 6a: a withdrawal request is executed by a batch, not by the calling transaction.
+        sim.settleBatch();
 
         assertEq(sim.getPendingBalance(stranger, ASSET_IDX), 1e6, "the ceiling was not the caller's own balance");
 
@@ -723,16 +772,20 @@ contract LighterSimTest is Test {
         _fundTwoDepositors();
         sim.setDepositorAllowed(stranger, true);
         sim.deposit(stranger, ASSET_IDX, 0, 1e6); // funded by this contract, registers the stranger
+        sim.settleBatch(); // TASK 6b: the registration resolves on the next batch
         uint48 sIdx = sim.addressToAccountIndex(stranger);
 
-        vm.startPrank(stranger);
+        vm.prank(stranger);
         sim.withdraw(sIdx, ASSET_IDX, 0, 1e6);
+        sim.settleBatch(); // TASK 6a: the batch executes the request
+        vm.startPrank(stranger);
         sim.withdrawPendingBalance(stranger, ASSET_IDX, 1e6);
         assertEq(sim.equity(sIdx), 0, "the account still has equity");
 
         // Holding nothing, asking for everything.
         sim.withdraw(sIdx, ASSET_IDX, 0, type(uint64).max);
         vm.stopPrank();
+        sim.settleBatch(); // TASK 6a: and the batch is where the venue credits nothing
 
         assertEq(sim.getPendingBalance(stranger, ASSET_IDX), 0, "an empty account was credited");
         assertEq(usdgSim.balanceOf(address(sim)), 1_000_000e6, "the depositors' collateral moved");
@@ -797,10 +850,14 @@ contract LighterSimTest is Test {
         vm.startPrank(stranger);
         usdgSim.approve(address(sim), type(uint256).max);
         sim.deposit(stranger, ASSET_IDX, 0, 1e6);
+        vm.stopPrank();
+        // TASK 6b: the registration resolves on the next batch, and `settleBatch` is owner-gated,
+        // so the prank has to end before it.
+        sim.settleBatch();
         uint48 sIdx = sim.addressToAccountIndex(stranger);
         // 1_000_000 base ticks at size_decimals 4 is 100 units => $10,000 notional against $1.
+        vm.prank(stranger);
         sim.createOrder(sIdx, MARKET, 1_000_000, 10_000, 0, 1);
-        vm.stopPrank();
 
         sim.settleBatch();
         assertEq(sim.positionBaseOf(sIdx, MARKET), 0, "an account opened a position on the pool's margin");
@@ -900,19 +957,28 @@ contract LighterSimTest is Test {
     function test_oneAccountsBadOrderCannotBrickSettlement() public {
         _fundTwoDepositors();
         sim.setMarkPrice(MARKET, 100e18);
-        uint48 aIdx = sim.addressToAccountIndex(depositorA);
 
-        vm.prank(depositorA);
-        sim.createOrder(aIdx, MARKET, 100, 10_000, 0, 1); // the vault's legitimate hedge
-
+        // TASK 6b REORDERED THIS SETUP, and the reason is worth stating: the attacker's
+        // registration now needs a `settleBatch` of its own, and if the hedge were already queued
+        // that batch would SETTLE it — so the batch under test would have nothing left to observe.
+        // Registering the attacker first keeps both orders in the same batch, which is the thing
+        // this test is about. Order ids are unchanged (the hedge is still enqueued first, so it is
+        // still order 1 and the poison pill is still order 2).
         sim.setDepositorAllowed(stranger, true);
         usdgSim.mint(stranger, 1e6);
         vm.startPrank(stranger);
         usdgSim.approve(address(sim), type(uint256).max);
         sim.deposit(stranger, ASSET_IDX, 0, 1e6);
-        uint48 sIdx = sim.addressToAccountIndex(stranger);
-        sim.createOrder(sIdx, MARKET, type(uint48).max, 10_000, 0, 1); // the poison pill
         vm.stopPrank();
+        sim.settleBatch(); // batch 2: empty, and resolves the attacker's registration
+
+        uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        uint48 sIdx = sim.addressToAccountIndex(stranger);
+
+        vm.prank(depositorA);
+        sim.createOrder(aIdx, MARKET, 100, 10_000, 0, 1); // the vault's legitimate hedge, order 1
+        vm.prank(stranger);
+        sim.createOrder(sIdx, MARKET, type(uint48).max, 10_000, 0, 1); // the poison pill, order 2
 
         // No revert, and the refusal is on the record naming the order and the reason.
         //
@@ -920,10 +986,11 @@ contract LighterSimTest is Test {
         // order's slot in the queue (1: second of two); it is now `Order.id`, monotonic from 1, so
         // the poison pill is order 2 — the honest hedge was enqueued first and is order 1. The
         // queue slot was never an identifier, because `_cancelOrdersOf` compacts the array in
-        // place. The fourth argument is the batch that refused it: this is the first `settleBatch`
-        // on this simulator, so batch 1.
+        // place. The fourth argument is the batch that refused it: TASK 6b makes this the THIRD
+        // settlement on this simulator (one to register the two depositors, one to register the
+        // attacker), so batch 3.
         vm.expectEmit(true, true, true, true, address(sim));
-        emit LighterCore.OrderRejected(sIdx, MARKET, 2, 1, LighterCore.InsufficientMargin.selector);
+        emit LighterCore.OrderRejected(sIdx, MARKET, 2, 3, LighterCore.InsufficientMargin.selector);
         sim.settleBatch();
 
         assertEq(sim.positionBaseOf(aIdx, MARKET), 100, "the honest hedge did not fill");
@@ -950,9 +1017,11 @@ contract LighterSimTest is Test {
         vm.startPrank(stranger);
         usdgSim.approve(address(sim), type(uint256).max);
         sim.deposit(stranger, ASSET_IDX, 0, 1e6);
-        uint48 sIdx = sim.addressToAccountIndex(stranger);
-        sim.createOrder(sIdx, MARKET, type(uint48).max, 10_000, 0, 1);
         vm.stopPrank();
+        sim.settleBatch(); // TASK 6b: the registration resolves on the next batch
+        uint48 sIdx = sim.addressToAccountIndex(stranger);
+        vm.prank(stranger);
+        sim.createOrder(sIdx, MARKET, type(uint48).max, 10_000, 0, 1);
 
         // Default is OFF, so the same queue settles.
         assertFalse(sim.strictMode(), "strict mode must not be the deployed default");
@@ -1012,6 +1081,7 @@ contract LighterSimTest is Test {
     function test_initialMarginGateReadsCashAfterTheClosedLegIsRealised() public {
         sim.setMarkPrice(MARKET, 100e18);
         sim.deposit(address(this), ASSET_IDX, 0, 1_000_010_000); // 1000.01 USDG
+        sim.settleBatch(); // TASK 6b: the registration resolves on the next batch (batch 1, empty)
         uint48 idx = sim.addressToAccountIndex(address(this));
 
         // Step 1: the short fills. required 500e18 <= 1000.01e18.
@@ -1034,8 +1104,9 @@ contract LighterSimTest is Test {
         // Task 8's `OrderRejected` names the monotonic `Order.id`, not the queue index: the flip is
         // the second order this test creates, so id 2 — even though the first `settleBatch` drained
         // and deleted the queue, leaving it at queue index 0. That is the whole point of the id.
-        // `batchId` 2: this is the venue's second settlement.
-        emit LighterCore.OrderRejected(idx, MARKET, 2, 2, LighterCore.InsufficientMargin.selector);
+        // `batchId` 3: TASK 6b adds a registration settlement in front, so this is the venue's
+        // THIRD settlement rather than its second.
+        emit LighterCore.OrderRejected(idx, MARKET, 2, 3, LighterCore.InsufficientMargin.selector);
         sim.settleBatch();
 
         // Step 4, as it must now be: nothing was applied. The gate rejected without mutating.
@@ -1052,6 +1123,7 @@ contract LighterSimTest is Test {
         sim.setStrictMode(true);
         sim.setMarkPrice(MARKET, 100e18);
         sim.deposit(address(this), ASSET_IDX, 0, 1_000_010_000);
+        sim.settleBatch(); // TASK 6b: the registration resolves on the next batch
         uint48 idx = sim.addressToAccountIndex(address(this));
 
         sim.createOrder(idx, MARKET, 100_000, 10_000, 1, 1);
@@ -1074,6 +1146,7 @@ contract LighterSimTest is Test {
     function test_aProfitableClosedLegIsCreditedBeforeTheGateRuns() public {
         sim.setMarkPrice(MARKET, 200e18);
         sim.deposit(address(this), ASSET_IDX, 0, 1_000_010_000);
+        sim.settleBatch(); // TASK 6b: the registration resolves on the next batch
         uint48 idx = sim.addressToAccountIndex(address(this));
 
         // Short 100_000 at 200e18: notional 2000e18, required 1000e18 <= 1000.01e18.
@@ -1106,6 +1179,7 @@ contract LighterSimTest is Test {
     function test_aFlipAffordableOnlyOnTheRealisedGainStillFills() public {
         sim.setMarkPrice(MARKET, 200e18);
         sim.deposit(address(this), ASSET_IDX, 0, 1_000_000_000); // 1000 USDG exactly
+        sim.settleBatch(); // TASK 6b: the registration resolves on the next batch
         uint48 idx = sim.addressToAccountIndex(address(this));
 
         // Short 100_000 at 200e18: notional 2000e18, required 1000e18 == cash. Fills.
@@ -1135,6 +1209,7 @@ contract LighterSimTest is Test {
     function test_aZeroMarkCorruptsOnlyItsOwnMarketsEntryBook() public {
         mockL.setMarkPrice(MARKET, 100e18); // MARKET priced, MARKET_B deliberately not
         mockL.deposit(address(this), ASSET_IDX, 0, 100_000e6);
+        mockL.settleBatch(); // TASK 6b: the registration resolves on the next batch
         uint48 idx = mockL.addressToAccountIndex(address(this));
 
         mockL.createOrder(idx, MARKET, 100, 10_000, 0, 1);
@@ -1294,6 +1369,15 @@ contract LighterSimTest is Test {
         uint256 perAccount = sim.MAX_ORDERS_PER_ACCOUNT();
         uint256 accounts = sim.MAX_QUEUE() / perAccount;
 
+        // TASK 6b SPLIT THIS INTO TWO PASSES, and it had to be split rather than have a
+        // `settleBatch` added inside the loop: a registration now needs a settlement, and a
+        // settlement run mid-loop would FILL the orders already queued and the queue would never
+        // reach `MAX_QUEUE`. So every account registers first, in one batch, and only then does
+        // anyone queue an order. The `extra` account is registered in the same pass, for the same
+        // reason. Nothing about what the test measures changed.
+        address extra = address(uint160(0xC0DEFF));
+        sim.setDepositorAllowed(extra, true);
+        usdgSim.mint(extra, 1_000e6);
         for (uint256 a = 0; a < accounts; ++a) {
             address who = address(uint160(0xC0DE00 + a));
             sim.setDepositorAllowed(who, true);
@@ -1301,7 +1385,18 @@ contract LighterSimTest is Test {
             vm.startPrank(who);
             usdgSim.approve(address(sim), type(uint256).max);
             sim.deposit(who, ASSET_IDX, 0, 1_000e6);
+            vm.stopPrank();
+        }
+        vm.startPrank(extra);
+        usdgSim.approve(address(sim), type(uint256).max);
+        sim.deposit(extra, ASSET_IDX, 0, 1_000e6);
+        vm.stopPrank();
+        sim.settleBatch(); // one empty batch resolves every registration above
+
+        for (uint256 a = 0; a < accounts; ++a) {
+            address who = address(uint160(0xC0DE00 + a));
             uint48 idx = sim.addressToAccountIndex(who);
+            vm.startPrank(who);
             for (uint256 i = 0; i < perAccount; ++i) {
                 sim.createOrder(idx, MARKET, 1, 10_000, 0, 1);
             }
@@ -1309,13 +1404,8 @@ contract LighterSimTest is Test {
         }
         assertEq(sim.queueLength(), sim.MAX_QUEUE(), "the fixture did not fill the queue");
 
-        address extra = address(uint160(0xC0DEFF));
-        sim.setDepositorAllowed(extra, true);
-        usdgSim.mint(extra, 1_000e6);
-        vm.startPrank(extra);
-        usdgSim.approve(address(sim), type(uint256).max);
-        sim.deposit(extra, ASSET_IDX, 0, 1_000e6);
         uint48 extraIdx = sim.addressToAccountIndex(extra);
+        vm.startPrank(extra);
         vm.expectRevert(LighterCore.LighterCore_QueueFull.selector);
         sim.createOrder(extraIdx, MARKET, 1, 10_000, 0, 1);
         vm.stopPrank();
@@ -1522,13 +1612,21 @@ contract LighterSimTest is Test {
     function test_eventsEmittedForFullMintLifecycle() public {
         sim.setMarkPrice(MARKET, 100e18);
 
-        // ---- deposit: the registration resolves, then the credit lands.
-        // Account indices start at 3 on the real venue and this simulator matches it.
+        // ---- deposit: the registration is RESERVED and the credit lands. TASK 6b: the index does
+        // NOT resolve here — the event names the batch that will resolve it (batch 1, the next
+        // one), because on the real venue a registering deposit is a priority request the rollup
+        // executes later.
         vm.expectEmit(true, true, true, true, address(sim));
-        emit LighterCore.AccountRegistered(address(this), 3);
+        emit LighterCore.AccountRegistered(address(this), 3, 1);
         vm.expectEmit(true, true, true, true, address(sim));
         emit LighterCore.Deposited(address(this), 3, ASSET_IDX, 1_000e6, 1_000e6, 1_000e6);
         sim.deposit(address(this), ASSET_IDX, 0, 1_000e6);
+
+        // ---- settleBatch #1: executes the registering deposit. Empty of orders, so it settles
+        // nothing else — which is itself the venue's clock ticking (see `batchesSettled`).
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.BatchSettled(1, 0, 0, 0, 0, true);
+        sim.settleBatch();
 
         uint48 idx = sim.addressToAccountIndex(address(this));
         assertEq(idx, 3, "the announced account index is not the one recorded");
@@ -1539,20 +1637,30 @@ contract LighterSimTest is Test {
         sim.createOrder(idx, MARKET, 100, 10_000, 0, 1);
         assertEq(sim.positionBaseOf(idx, MARKET), 0, "filled in the calling transaction");
 
-        // ---- settleBatch: the fill carries the price and the filled size, then the batch closes.
-        // sizeDelta is +100 and resultingBase is 100: flat to long 100 ticks at a mark of 100e18.
+        // ---- settleBatch #2: the fill carries the price and the filled size, then the batch
+        // closes. sizeDelta is +100 and resultingBase is 100: flat to long 100 ticks at 100e18.
         vm.expectEmit(true, true, true, true, address(sim));
-        emit LighterCore.OrderFilled(idx, MARKET, 1, 1, 100e18, 100, 100);
+        emit LighterCore.OrderFilled(idx, MARKET, 1, 2, 100e18, 100, 100);
         vm.expectEmit(true, true, true, true, address(sim));
-        emit LighterCore.BatchSettled(1, 0, 1, 1, 0, true);
+        emit LighterCore.BatchSettled(2, 0, 1, 1, 0, true);
         sim.settleBatch();
-        assertEq(sim.batchesSettled(), 1, "the settlement clock did not advance");
+        assertEq(sim.batchesSettled(), 2, "the settlement clock did not advance");
 
-        // ---- withdraw: a CREDIT to pending, not a payment, and inside the account's equity so
-        // there is no shortfall to announce.
+        // ---- withdraw: TASK 6a. The request is ENQUEUED and nothing is credited. The real
+        // `AdditionalZkLighter.withdraw` performs no balance check and defers sufficiency to the
+        // rollup, so this transaction can only ever produce the request.
         vm.expectEmit(true, true, true, true, address(sim));
-        emit LighterCore.WithdrawalEnqueued(address(this), idx, ASSET_IDX, 400e6, 400e6, 400e6);
+        emit LighterCore.WithdrawalRequested(address(this), idx, ASSET_IDX, 400e6, 1, 0);
         sim.withdraw(idx, ASSET_IDX, 0, 400e6);
+        assertEq(sim.getPendingBalance(address(this), ASSET_IDX), 0, "credited in the calling transaction");
+
+        // ---- settleBatch #3: the request executes and the CREDIT lands. Inside the account's
+        // equity, so there is no shortfall to announce.
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.WithdrawalCredited(address(this), idx, ASSET_IDX, 400e6, 400e6, 400e6, 3);
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.WithdrawalsSettled(3, 0, 1, 1, 0, true);
+        sim.settleBatch();
 
         // ---- withdrawPendingBalance: the one point at which collateral leaves the venue.
         vm.expectEmit(true, true, true, true, address(sim));
@@ -1583,10 +1691,14 @@ contract LighterSimTest is Test {
         // And a batch that actually settles carries the same id into its fill.
         sim.setMarkPrice(MARKET, 100e18);
         sim.deposit(address(this), ASSET_IDX, 0, 1_000e6);
+        // TASK 6b: batch 3 resolves the registration — itself another empty settlement, and one
+        // more tick of the clock — so the fill lands in batch 4 rather than batch 3.
+        sim.settleBatch();
+        assertEq(sim.batchesSettled(), 3, "the registration batch did not tick the clock");
         uint48 idx = sim.addressToAccountIndex(address(this));
         sim.createOrder(idx, MARKET, 100, 10_000, 0, 1);
         vm.expectEmit(true, true, true, true, address(sim));
-        emit LighterCore.OrderFilled(idx, MARKET, 1, 3, 100e18, 100, 100);
+        emit LighterCore.OrderFilled(idx, MARKET, 1, 4, 100e18, 100, 100);
         sim.settleBatch();
     }
 
@@ -1602,19 +1714,28 @@ contract LighterSimTest is Test {
     function test_orderRejectionNamesTheOrderNotTheQueueSlot() public {
         _fundTwoDepositors();
         sim.setMarkPrice(MARKET, 100e18);
+
+        // TASK 6b: the attacker's registration needs a batch of its own, and it has to happen
+        // BEFORE any order is queued — a batch run after A's hedge was enqueued would settle that
+        // hedge, and the cancellation-and-compaction this test is about could not happen. Order
+        // ids and slots are unchanged.
+        sim.setDepositorAllowed(stranger, true);
+        usdgSim.mint(stranger, 1e6);
+        vm.startPrank(stranger);
+        usdgSim.approve(address(sim), type(uint256).max);
+        sim.deposit(stranger, ASSET_IDX, 0, 1e6);
+        vm.stopPrank();
+        sim.settleBatch(); // batch 2: empty, and resolves the attacker's registration
+
         uint48 aIdx = sim.addressToAccountIndex(depositorA);
+        uint48 sIdx = sim.addressToAccountIndex(stranger);
 
         // A's order is enqueued first and gets id 1 in slot 0.
         vm.prank(depositorA);
         sim.createOrder(aIdx, MARKET, 100, 10_000, 0, 1);
 
         // The poison pill is order 2 in slot 1.
-        sim.setDepositorAllowed(stranger, true);
-        usdgSim.mint(stranger, 1e6);
         vm.startPrank(stranger);
-        usdgSim.approve(address(sim), type(uint256).max);
-        sim.deposit(stranger, ASSET_IDX, 0, 1e6);
-        uint48 sIdx = sim.addressToAccountIndex(stranger);
         vm.expectEmit(true, true, true, true, address(sim));
         emit LighterCore.OrderEnqueued(sIdx, MARKET, 2, type(uint48).max, 10_000, 0, 1, 1);
         sim.createOrder(sIdx, MARKET, type(uint48).max, 10_000, 0, 1);
@@ -1627,10 +1748,12 @@ contract LighterSimTest is Test {
         emit LighterCore.OrdersCancelled(aIdx, 1, 1);
         sim.cancelAllOrders(aIdx);
 
+        // TASK 6b: batch 3, not batch 1 — one settlement registered the two depositors and one
+        // registered the attacker before either order existed.
         vm.expectEmit(true, true, true, true, address(sim));
-        emit LighterCore.OrderRejected(sIdx, MARKET, 2, 1, LighterCore.InsufficientMargin.selector);
+        emit LighterCore.OrderRejected(sIdx, MARKET, 2, 3, LighterCore.InsufficientMargin.selector);
         vm.expectEmit(true, true, true, true, address(sim));
-        emit LighterCore.BatchSettled(1, 0, 1, 0, 1, true);
+        emit LighterCore.BatchSettled(3, 0, 1, 0, 1, true);
         sim.settleBatch();
     }
 
@@ -1647,12 +1770,21 @@ contract LighterSimTest is Test {
 
         // Ask for 900_000 against an equity of 600_000: the venue credits 600_000 and strands
         // 300_000, without reverting.
-        vm.expectEmit(true, true, true, true, address(sim));
-        emit LighterCore.WithdrawalEnqueued(depositorA, aIdx, ASSET_IDX, 900_000e6, 600_000e6, 600_000e6);
-        vm.expectEmit(true, true, true, true, address(sim));
-        emit LighterCore.WithdrawalSilentlyRejected(depositorA, aIdx, ASSET_IDX, 900_000e6, 600_000e6, 300_000e6);
+        //
+        // TASK 6a: both events now fire in the `settleBatch` that EXECUTES the request rather than
+        // in the `withdraw` that submits it, and `WithdrawalEnqueued` is now `WithdrawalCredited`
+        // with the batch id appended — the enqueue and the credit are two different transactions,
+        // so one name could only be right about one of them. The substance of the assertion is
+        // unchanged: the same request, the same 600_000 credited, the same 300_000 shortfall
+        // announced, and still no revert.
         vm.prank(depositorA);
         sim.withdraw(aIdx, ASSET_IDX, 0, 900_000e6);
+
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.WithdrawalCredited(depositorA, aIdx, ASSET_IDX, 900_000e6, 600_000e6, 600_000e6, 2);
+        vm.expectEmit(true, true, true, true, address(sim));
+        emit LighterCore.WithdrawalSilentlyRejected(depositorA, aIdx, ASSET_IDX, 900_000e6, 600_000e6, 300_000e6);
+        sim.settleBatch();
 
         assertEq(sim.getPendingBalance(depositorA, ASSET_IDX), 600_000e6, "credited the wrong amount");
         assertEq(sim.equity(aIdx), 0, "the account was left with equity it should have drawn");
@@ -1699,6 +1831,7 @@ contract LighterSimTest is Test {
         // At the default tick, an arbitrary amount is fine — which is what makes the vault's
         // `netCollateral * targetMarginBps / 10_000` margin post depositable at all.
         sim.deposit(address(this), ASSET_IDX, 0, 3_202_740_000);
+        sim.settleBatch(); // TASK 6b: the registration resolves on the next batch
         assertEq(sim.depositTickSize(), 1, "the default tick is not the identity");
 
         // A coarse tick: deposits must now land on 1 USDG boundaries.
@@ -1735,6 +1868,7 @@ contract LighterSimTest is Test {
 
         // The cap itself is inclusive: at the ceiling, not above it.
         sim.deposit(address(this), ASSET_IDX, 0, 1_000e6);
+        sim.settleBatch(); // TASK 6b: the registration resolves on the next batch
         assertEq(sim.marginBalanceOf(sim.addressToAccountIndex(address(this))), 1_000e6);
 
         // And the cap is measured in TICKS, so a coarser tick raises the amount it permits.
@@ -1822,6 +1956,13 @@ contract LighterSimTest is Test {
         sim.deposit(depositorA, ASSET_IDX, 0, 600_000e6);
         vm.prank(depositorB);
         sim.deposit(depositorB, ASSET_IDX, 0, 400_000e6);
+        // TASK 6b: a registering deposit is a PRIORITY REQUEST, so `addressToAccountIndex` stays 0
+        // until a batch executes it — every caller of this helper reads the two indices. One
+        // settlement is what the deployment checklist's step 8 prescribes and what
+        // `test/helpers/VaultFixture.sol` already did; this helper simply had not caught up,
+        // because before Task 6 the index resolved inline. Nothing else about the fixture changed:
+        // the batch is empty of orders, so it settles nothing and only ticks the venue's clock.
+        sim.settleBatch();
     }
 
     function _assertSameState(string memory tag) internal view {

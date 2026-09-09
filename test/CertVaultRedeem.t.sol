@@ -191,6 +191,7 @@ contract CertVaultRedeemTest is VaultFixture {
         // Now make the funds arrive through permissionless paths only — no owner, no keeper.
         lighter.settleBatch(); // the close fills at the venue
         vault.recallMargin(); // submits
+        lighter.settleBatch(); // TASK 6a: the batch executes the withdrawal request
         vault.recallMargin(); // sweeps
         assertGt(vault.hotBuffer(), 0);
         // The recall alone is short by exactly what the drain removed (the mint's retained share

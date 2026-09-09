@@ -85,6 +85,13 @@ contract CertVaultRecallTest is VaultFixture {
         vault.recallMargin(); // submits successfully this time
         assertEq(vault.marginPendingRecall(), pendingRecall); // still unchanged: submission != arrival
 
+        // TASK 6a MADE "submission is not arrival" LITERALLY TRUE, which is what this test has
+        // always been about. Before it, the venue credited inside `withdraw` and the assertion
+        // above held only because `_sweepPending` runs at the TOP of `recallMargin` — the money
+        // was already at the venue, just not yet swept. Now the request is not even executed
+        // until a batch runs, so the counter is unchanged for the reason the comment claims.
+        lighter.settleBatch();
+
         vault.recallMargin(); // a later call sweeps what the prior call landed
         assertLt(vault.marginPendingRecall(), pendingRecall); // progress
         assertEq(vault.marginPendingRecall(), 0);
@@ -110,6 +117,8 @@ contract CertVaultRecallTest is VaultFixture {
 
         vm.prank(stranger);
         vault.recallMargin(); // submits — callable by anyone
+
+        lighter.settleBatch(); // TASK 6a: the venue executes the request in a batch
 
         vm.prank(stranger);
         vault.recallMargin(); // sweeps — the stranger's second call still lands the funds
@@ -173,6 +182,7 @@ contract CertVaultRecallTest is VaultFixture {
         uint256 oversized = pendingRecall * 3;
         vm.prank(address(vault));
         lighter.withdraw(accountIndex, ASSET_IDX, 0, uint64(oversized));
+        lighter.settleBatch(); // TASK 6a: the batch executes the request and credits the pending
         assertEq(lighter.getPendingBalance(address(vault), ASSET_IDX), oversized);
 
         vault.recallMargin(); // sweeps `oversized`, more than marginPendingRecall
@@ -222,7 +232,8 @@ contract CertVaultRecallTest is VaultFixture {
         uint256 id = vault.forceExit(bal);
         lighter.settleBatch(); // the close fills, freeing IMR
 
-        vault.recallMargin(); // submits: the venue credits a pending balance
+        vault.recallMargin(); // submits
+        lighter.settleBatch(); // TASK 6a: and the batch is where the venue credits the pending
         uint256 pendingAtVenue = lighter.getPendingBalance(address(vault), ASSET_IDX);
         assertGt(pendingAtVenue, 0);
         uint256 pendingRecall = vault.marginPendingRecall();
@@ -243,6 +254,7 @@ contract CertVaultRecallTest is VaultFixture {
 
         // Once the venue relents, the same sweep still lands — nothing was lost, only deferred.
         lighter.setShouldRevertDrain(false);
+        lighter.settleBatch(); // TASK 6a: execute the request the refused sweep re-submitted
         vault.recallMargin();
         assertEq(vault.marginPendingRecall(), 0);
         assertEq(lighter.getPendingBalance(address(vault), ASSET_IDX), 0);

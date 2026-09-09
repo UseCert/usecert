@@ -21,9 +21,21 @@ contract MockLighterTest is Test {
         usdg.approve(address(lighter), type(uint256).max);
     }
 
+    /// @dev TASK 6b sharpened this rather than only rescheduling it. A registering deposit is a
+    ///      PRIORITY REQUEST on the real venue: the collateral lands immediately but
+    ///      `addressToAccountIndex` stays 0 until the rollup executes the request, which is why
+    ///      `createOrder` reverts `AccountIsNotRegistered` in between. The test now asserts all
+    ///      three states — funded-and-unregistered, then registered — where before it could only
+    ///      assert the last one, because the index resolved inline.
     function test_depositRegistersAccount() public {
         assertEq(lighter.addressToAccountIndex(address(this)), 0);
         lighter.deposit(address(this), 3, 0, 1_000e6);
+
+        // Funded, and NOT yet registered.
+        assertEq(lighter.marginBalance(), 1_000e6);
+        assertEq(lighter.addressToAccountIndex(address(this)), 0, "the index resolved synchronously");
+
+        lighter.settleBatch();
         assertGt(lighter.addressToAccountIndex(address(this)), 0);
         assertEq(lighter.marginBalance(), 1_000e6);
     }
@@ -35,6 +47,7 @@ contract MockLighterTest is Test {
 
     function test_orderDoesNotFillUntilBatchSettles() public {
         lighter.deposit(address(this), 3, 0, 1_000e6);
+        lighter.settleBatch(); // TASK 6b: the registration resolves on the next batch
         uint48 idx = lighter.addressToAccountIndex(address(this));
         lighter.createOrder(idx, 16, 100, 35586, 0, 1);
 
@@ -49,6 +62,7 @@ contract MockLighterTest is Test {
 
     function test_zeroBaseAmountClosesEntirePosition() public {
         lighter.deposit(address(this), 3, 0, 1_000e6);
+        lighter.settleBatch(); // TASK 6b: the registration resolves on the next batch
         uint48 idx = lighter.addressToAccountIndex(address(this));
         lighter.createOrder(idx, 16, 500, 35586, 0, 1);
         lighter.settleBatch();
@@ -71,6 +85,7 @@ contract MockLighterTest is Test {
     ///      USDG of cash margin.
     function _openTenLongAtHundred() internal returns (uint48 idx) {
         lighter.deposit(address(this), 3, 0, 1_000e6);
+        lighter.settleBatch(); // TASK 6b: the registration resolves on the next batch
         idx = lighter.addressToAccountIndex(address(this));
         lighter.setMarkPrice(16, 100e18);
         lighter.createOrder(idx, 16, 100_000, 10_000, 0, 1);
@@ -107,6 +122,11 @@ contract MockLighterTest is Test {
         lighter.setMarkPrice(16, 150e18);
 
         lighter.withdraw(idx, 3, 0, 1_400e6); // > marginBalance (1_000e6), < equity (1_500e6)
+        // TASK 6a: the request is executed by a batch, not by the calling transaction. Every
+        // figure below is unchanged — the mechanism C1's fix depends on still fulfils in full out
+        // of the position's gain, it just does so one batch later.
+        assertEq(lighter.getPendingBalance(address(this), 3), 0, "credited in the calling transaction");
+        lighter.settleBatch();
 
         assertEq(lighter.getPendingBalance(address(this), 3), 1_400e6);
         assertEq(lighter.marginBalance(), 0); // all cash drawn
@@ -123,6 +143,7 @@ contract MockLighterTest is Test {
         uint48 idx = _openTenLongAtHundred();
         lighter.setMarkPrice(16, 150e18);
         lighter.withdraw(idx, 3, 0, 1_400e6);
+        lighter.settleBatch(); // TASK 6a: the batch executes the request
         lighter.withdrawPendingBalance(address(this), 3, 1_400e6);
 
         lighter.createOrder(idx, 16, 0, 15_000, 1, 1); // close everything
@@ -139,6 +160,10 @@ contract MockLighterTest is Test {
         lighter.setMarkPrice(16, 150e18);
 
         lighter.withdraw(idx, 3, 0, 5_000e6); // far above equity: must not revert
+        // TASK 6a: partial fulfilment is decided by the BATCH now, and it is still partial
+        // fulfilment — `min(request, equity)`, which is the property `CertVault.recallMargin`
+        // depends on and the one an all-or-nothing refusal would have destroyed.
+        lighter.settleBatch();
 
         assertEq(lighter.getPendingBalance(address(this), 3), 1_500e6); // min(request, equity)
         assertEq(lighter.equity(idx), 0);
@@ -148,6 +173,7 @@ contract MockLighterTest is Test {
     function test_drainCanBeMadeToRevert() public {
         uint48 idx = _openTenLongAtHundred();
         lighter.withdraw(idx, 3, 0, 100e6);
+        lighter.settleBatch(); // TASK 6a: the batch credits the pending balance this test drains
 
         lighter.setShouldRevertDrain(true);
         vm.expectRevert(MockLighter.DrainRefused.selector);
@@ -176,6 +202,7 @@ contract MockLighterTest is Test {
     ///      assertion with the position at 0 instead of -1_000.
     function test_zeroBaseAmountAskAgainstAShortDoublesIt() public {
         lighter.deposit(address(this), 3, 0, 1_000_000e6);
+        lighter.settleBatch(); // TASK 6b: the registration resolves on the next batch
         uint48 idx = lighter.addressToAccountIndex(address(this));
         lighter.setMarkPrice(16, 100e18);
 
@@ -193,6 +220,7 @@ contract MockLighterTest is Test {
     /// @notice And a full-size BID against a short is what actually closes it.
     function test_zeroBaseAmountBidAgainstAShortClosesIt() public {
         lighter.deposit(address(this), 3, 0, 1_000_000e6);
+        lighter.settleBatch(); // TASK 6b: the registration resolves on the next batch
         uint48 idx = lighter.addressToAccountIndex(address(this));
         lighter.setMarkPrice(16, 100e18);
 
@@ -208,6 +236,7 @@ contract MockLighterTest is Test {
     /// @notice The symmetric wrong-side case on a long, so the model is pinned in both directions.
     function test_zeroBaseAmountBidAgainstALongDoublesIt() public {
         lighter.deposit(address(this), 3, 0, 1_000_000e6);
+        lighter.settleBatch(); // TASK 6b: the registration resolves on the next batch
         uint48 idx = lighter.addressToAccountIndex(address(this));
         lighter.setMarkPrice(16, 100e18);
 

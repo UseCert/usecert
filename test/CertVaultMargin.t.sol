@@ -67,6 +67,9 @@ contract CertVaultMarginTest is VaultFixture {
         usdg.mint(address(this), 1e6);
         usdg.approve(address(bareLighter), 1e6);
         bareLighter.deposit(address(this), ASSET_IDX, 0, 1e6); // ~$1 dust margin, no real backing
+        // TASK 6b: a registering deposit is a priority request, so the index resolves on the next
+        // batch. The queue is empty here, so this settles nothing and `strictMode` refuses nothing.
+        bareLighter.settleBatch();
         uint48 idx = bareLighter.addressToAccountIndex(address(this));
         bareLighter.createOrder(idx, MARKET, 99_900, 35586, 0, 1); // same size as the vault's hedge
         vm.expectRevert(LighterCore.InsufficientMargin.selector);

@@ -395,6 +395,7 @@ contract CertVaultMintTest is VaultFixture {
         lighter.settleBatch();
         uint256 bufferBefore = vault.hotBuffer();
         vault.recallMargin(); // submits
+        lighter.settleBatch(); // TASK 6a: the venue executes the request in a batch, not inline
         vault.recallMargin(); // sweeps
         assertEq(vault.hotBuffer(), bufferBefore + expected);
         assertEq(vault.marginPendingRecall(), 0);

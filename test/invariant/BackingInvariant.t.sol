@@ -357,6 +357,7 @@ contract BackingInvariantTest is VaultFixture {
         // Now let the funds arrive through permissionless paths and claim the SAME receipt.
         lighter.settleBatch(); // the close fills at the venue
         handler.recallMargin(); // submits
+        lighter.settleBatch(); // TASK 6a: the batch executes the withdrawal request
         handler.recallMargin(); // sweeps
         vault.seedBuffer(1_000e6); // permissionless top-up for the drained remainder
 

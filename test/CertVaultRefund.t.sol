@@ -84,9 +84,12 @@ contract CertVaultRefundTest is VaultFixture {
         // ---- The escape route, every step of it permissionless and called by a stranger.
         vm.prank(stranger);
         vault.recallMargin(); // submits the withdrawal the staging made askable-for
-        assertEq(uint256(lighter.getPendingBalance(address(vault), ASSET_IDX)), POSTED);
 
-        lighter.settleBatch(); // the staged hedge close fills, flattening the position
+        // TASK 6a: this batch now does two things — it fills the staged hedge close, and it
+        // executes the withdrawal request `recallMargin` just submitted. Fills run first, so the
+        // withdrawal is fulfilled against the flattened book.
+        lighter.settleBatch();
+        assertEq(uint256(lighter.getPendingBalance(address(vault), ASSET_IDX)), POSTED);
 
         vm.prank(stranger);
         vault.recallMargin(); // sweeps what the venue actually released
@@ -295,6 +298,11 @@ contract CertVaultRefundTest is VaultFixture {
         vm.expectEmit(true, true, true, true, address(vault));
         emit CertVault.MarginRecallRequested(POSTED);
         vault.recallMargin();
+        // TASK 6a: `MarginRecallRequested` still fires in the `recallMargin` transaction — it is
+        // the SUBMISSION event and always was — but the venue now credits the pending balance when
+        // a batch executes the request. The assertion below is unchanged in substance: the staged
+        // refund share is what the venue was asked for, and it is what arrives.
+        lighter.settleBatch();
         assertEq(uint256(lighter.getPendingBalance(address(vault), ASSET_IDX)), POSTED);
     }
 
