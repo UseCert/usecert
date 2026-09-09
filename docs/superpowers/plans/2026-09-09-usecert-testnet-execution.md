@@ -679,7 +679,24 @@ new `script/check-sizes.sh`
 2. **`SmokeTest.s.sol`** performs the live dust `forceExit` that §9 asks for — "this is Law 2 and it
    is worth one real transaction" — plus a small instant mint and an instant redeem.
 3. **`check-sizes.sh`** runs `forge build --sizes`, fails non-zero on any negative margin, and is
-   the documented gate before any deploy. §9 requires it because **`forge test` does not enforce
+   the documented gate before any deploy.
+4. **The five simulator preconditions from Task 7's review must be asserted on-chain here**, because
+   every one is a configuration fact no contract checks and each has a silent failure mode:
+   - **`targetMarginBps >= LighterSim.requiredMarginBps()` for every registered vault.** A vault
+     below the simulator's requirement has **every hedge silently rejected** at settlement while its
+     own `venuePositionBase` keeps claiming the hedge — so it mints unhedged and believes otherwise.
+     This is the single most dangerous misconfiguration available on a multi-vault deployment. Our
+     own values are safe (9000 vs 5000) and `DeployTestnet.s.sol` asserts the simulator side, but
+     nothing asserts the *pairing* per vault.
+   - **`markPrice` non-zero for every market any allowlisted vault is configured for**, before the
+     first `settleBatch`. A single unmarked market refuses its whole settlement window.
+   - **`keeper` set and equal to the address in the address book.** Every `settleBatch` reverting
+     `LighterSim_OnlyOwnerOrKeeper` is indistinguishable from a dead keeper.
+   - **`strictMode == false`** — the deployed default, and a deployment that flipped it would revert
+     whole batches instead of rejecting single orders.
+   - **`depositorAllowed` restricted to the operator's own vaults**, and report the full allowed
+     set rather than just checking the vaults are in it. The gate is conditional on that set being
+     what the operator thinks it is, and nothing enforces its size. §9 requires it because **`forge test` does not enforce
    EIP-170** and a green suite is not evidence.
 
 ### Tests
