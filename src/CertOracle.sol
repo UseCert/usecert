@@ -50,6 +50,14 @@ contract CertOracle is ICertOracle {
     /// @dev Task 2: a single-source deployment configured with a deviation tolerance wider than
     ///      MAX_SINGLE_SOURCE_DEVIATION_BPS. Refused at construction — see that constant.
     error CertOracle_DeviationTooWideForSingleSource();
+    /// @dev Task 3: the feed reports more decimals than normalisation can represent. `_tryFeed`
+    ///      has bounded `decimals()` at 36 since Finding 2 and treats anything above as an
+    ///      unusable feed; `_readFeed`, which `px()` and the constructor use, did NOT, so a feed
+    ///      reporting `decimals() >= 96` overflowed `10 ** (d - 18)` and killed both mint paths
+    ///      with an anonymous panic (0x11) instead of an error a caller can switch on. Same bound,
+    ///      copied deliberately rather than re-derived; the asymmetry was recorded in
+    ///      docs/DEPLOYMENT-CHECKLIST.md §2 and this closes it.
+    error CertOracle_FeedDecimalsOutOfRange();
 
     /// @dev M-5 (Law 3): a rotation is a public commitment with a published effective time.
     event AttesterRotationProposed(address indexed attester, uint256 effectiveAt);
@@ -274,14 +282,36 @@ contract CertOracle is ICertOracle {
         emit AttesterRotated(previous, next);
     }
 
-    /// @dev Task 1: also returns the round id. Every guard is byte-for-byte the one that was here
-    ///      before — `answer <= 0` first, then the unchanged decimals normalisation. The round id
-    ///      is read, not validated: this function's callers (the constructor and px()) do not use
-    ///      it, and validating it here would silently add a new revert to px().
+    /// @dev Task 1: also returns the round id. The round id is read, not validated: this function's
+    ///      callers (the constructor and px()) do not use it, and validating it here would silently
+    ///      add a new revert to px().
+    /// @dev Task 3: the decimals bound below closes a documented asymmetry with `_tryFeed`. That
+    ///      function has bounded `d` at 36 since Finding 2, so pxUnguarded(), basisBps() and
+    ///      mintAllowed() were all safe against an absurd `decimals()`; THIS function had no bound,
+    ///      so a feed reporting `decimals() >= 96` overflowed `10 ** (d - 18)` and panicked (0x11)
+    ///      inside px(), taking both mint paths down with an anonymous arithmetic failure instead of
+    ///      a named error. px() is ALLOWED to revert on a malfunctioning feed — it backs minting,
+    ///      which must be gated — so the fix is not "return something", it is to revert with the
+    ///      error a caller can switch on, exactly as the CRITICAL B guard above does for a future
+    ///      timestamp.
+    ///
+    ///      The bound is 36, COPIED from `_tryFeed` rather than re-derived, because the two
+    ///      functions normalising the same feed by different rules is how this class of defect
+    ///      appears in the first place. 36 is far beyond any real aggregator and safely below the
+    ///      ~78 exponent at which the power itself overflows.
+    ///
+    ///      The constructor also reads through here, so a feed already reporting out-of-range
+    ///      decimals at deploy time is now refused by name instead of panicking — the same
+    ///      improvement L-4 made for an already-stale feed.
+    ///
+    ///      NOT a Law 2 concern, and asserted as a test: redemption prices off pxUnguarded(), which
+    ///      goes through `_tryFeed` and falls back to `lastGoodPx18`. `forceExit` never touches
+    ///      `_readFeed`. Verified against a feed reporting 96 decimals with a holder mid-position.
     function _readFeed() internal view returns (uint256 px18, uint256 updatedAt, uint80 roundId) {
         (uint80 r, int256 answer,, uint256 t,) = feed.latestRoundData();
         if (answer <= 0) revert CertOracle_NonPositivePrice();
         uint8 d = feed.decimals();
+        if (d > 36) revert CertOracle_FeedDecimalsOutOfRange();
         px18 = d <= 18 ? uint256(answer) * (10 ** (18 - d)) : uint256(answer) / (10 ** (d - 18));
         updatedAt = t;
         roundId = r;

@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import {CertVault} from "../src/CertVault.sol";
+import {CertOracle} from "../src/CertOracle.sol";
 import {VaultFixture} from "./helpers/VaultFixture.sol";
 
 contract CertVaultRedeemTest is VaultFixture {
@@ -503,5 +504,49 @@ contract CertVaultRedeemTest is VaultFixture {
         vm.prank(alice);
         vault.forceExit(bal);
         assertEq(cert.balanceOf(alice), 0);
+    }
+
+    /// @notice TASK 3, LAW 2. `_readFeed` had no bound on the feed's reported `decimals()`, so a
+    ///         feed reporting 96 or more overflowed `10 ** (d - 18)` and panicked px(). px() backs
+    ///         both MINT paths and nothing on the redemption path, so the fix is a named error
+    ///         there — and this test is the proof that the redemption path never went through it
+    ///         and still does not. A holder with a balance must be able to exit while the feed is
+    ///         this broken.
+    /// @dev The mint is deliberately the two-phase path, so real margin is posted and a real
+    ///      position is open when the feed breaks — the same shape as
+    ///      test_forceExitSurvivesFutureFeedTimestamp, which is the sibling defect in the same
+    ///      arithmetic-in-a-try's-success-block class.
+    function test_forceExitSurvivesAbsurdFeedDecimals() public {
+        vm.prank(alice);
+        uint256 mintId = vault.requestMint(50_000e6);
+        lighter.settleBatch();
+        vault.settleMint(mintId, PX);
+
+        uint256 bal = cert.balanceOf(alice);
+        assertGt(bal, 0);
+        assertGt(vault.postedMargin(), 0, "no real margin was posted");
+        assertNotEq(lighter.positionBase(MARKET), int256(0), "no real position is open");
+
+        // The feed starts reporting 96 decimals. Everything on the mint path now refuses BY NAME
+        // where it used to panic; everything on the redemption path falls back, as it always did.
+        feed.setDecimals(96);
+        vm.expectRevert(CertOracle.CertOracle_FeedDecimalsOutOfRange.selector);
+        oracle.px();
+        assertFalse(oracle.mintAllowed(), "an unusable feed must not permit minting");
+        (uint256 px18,) = oracle.pxUnguarded();
+        assertEq(px18, PX, "pxUnguarded did not fall back to the last-good snapshot");
+
+        vm.prank(alice);
+        uint256 id = vault.forceExit(bal); // must not revert, and must not panic
+
+        assertEq(cert.balanceOf(alice), 0, "certificates were not burned");
+        assertEq(cert.totalSupply(), 0);
+        (address user, uint256 owed18,,, bool paid) = vault.redeemReceipts(id);
+        assertEq(user, alice);
+        assertFalse(paid);
+        // Priced off the last-good snapshot (PX), not off the malfunctioning feed.
+        uint256 expectedOwed18 = bal * PX / 1e18;
+        expectedOwed18 -= expectedOwed18 * 10 / 10_000; // redeemFeeBps = 10
+        assertEq(owed18, expectedOwed18, "the exit did not price off the last-good snapshot");
     }
 }

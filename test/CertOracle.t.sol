@@ -1094,4 +1094,50 @@ contract CertOracleTest is Test {
         assertEq(ss.lastGoodPx18(), PX);
         assertTrue(ss.mintAllowed(), "a bootstrapped reference must reopen minting");
     }
+
+    // =======================================================================================
+    // Task 3: `_readFeed` had no decimals bound, so px() panicked where _tryFeed returned.
+    //
+    // _tryFeed has bounded decimals() at 36 since Finding 2, which made pxUnguarded(), basisBps()
+    // and mintAllowed() safe. _readFeed — which px() and the constructor use, and therefore both
+    // mint paths — did not, so a feed reporting decimals() >= 96 overflowed `10 ** (d - 18)` and
+    // killed minting with an anonymous panic (0x11) instead of an error a caller can switch on.
+    // Recorded as a known asymmetry in docs/DEPLOYMENT-CHECKLIST.md §2; closed here with the SAME
+    // bound, copied rather than re-derived.
+    // =======================================================================================
+
+    /// @notice px() is allowed to refuse a malfunctioning feed — it backs minting, which must be
+    ///         gated — but it must refuse by NAME. `vm.expectRevert` with a selector does not match
+    ///         a Panic, so this assertion is what makes the guard load-bearing: revert the
+    ///         `d > 36` line in _readFeed and this fails with
+    ///         `panic: arithmetic underflow or overflow (0x11)`.
+    function test_readFeedRevertsNamedOnAbsurdDecimals() public {
+        feed.setDecimals(96); // >= 96 -> 10 ** (d - 18) overflows uint256
+        vm.expectRevert(CertOracle.CertOracle_FeedDecimalsOutOfRange.selector);
+        oracle.px();
+
+        // The bound is exactly _tryFeed's, inclusive: 36 is usable, 37 is not. (At d = 36 the
+        // answer normalises to zero, which is a separate, already-guarded condition — px() is not
+        // the function that screens for it, so what matters here is only that it does not revert.)
+        feed.setDecimals(36);
+        oracle.px();
+        feed.setDecimals(37);
+        vm.expectRevert(CertOracle.CertOracle_FeedDecimalsOutOfRange.selector);
+        oracle.px();
+
+        // The three documented-never-reverts readers are unaffected, as they were before: they go
+        // through _tryFeed, which has always treated this feed as simply unusable.
+        feed.setDecimals(96);
+        (uint256 p,) = oracle.pxUnguarded();
+        assertEq(p, PX, "pxUnguarded must fall back to last-good, not revert");
+        assertEq(oracle.basisBps(), 0);
+        assertFalse(oracle.mintAllowed());
+
+        // The constructor reads through _readFeed too, so a feed already this broken at deploy time
+        // is now refused by name instead of panicking — the same improvement L-4 made for an
+        // already-stale feed.
+        MockAggregatorV3 born = new MockAggregatorV3(96, 355_86000000);
+        vm.expectRevert(CertOracle.CertOracle_FeedDecimalsOutOfRange.selector);
+        new CertOracle(address(born), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false);
+    }
 }
