@@ -4,9 +4,9 @@
   "_warning": "GENERATED PER DEPLOYMENT. NEVER HAND-EDIT: each mirror is a new vault AND a new certificate token, and an edited map repoints a UI at a new token while balances sit in the old one. Re-run the script.",
   "_marketIndexVerifiedNote": "Per mirror: was marketIndex READ from the venue's api/v1/orderBookDetails, or CHOSEN? true for TSLA 16 and NVDA 15 only (WHITEPAPER.md 4.4, measured 2026-09-07). false is a WORK ITEM, not a disclaimer - uSPY's 26 and uQQQ's 27 are placeholders. On LighterSim setMarkPrice implicitly creates any index, so an unverified one deploys clean; on a real venue it pushes the WRONG market's mark. Re-read market_id and redeploy the mirror before pointing it at a real venue.",
   "chainId": 46630,
-  "blockNumber": 11677074,
-  "timestamp": 1789069723,
-  "commit": "9fe136a534b5ca8314136bc4ef6eb8e1f2b3e578",
+  "blockNumber": 11677150,
+  "timestamp": 1789070697,
+  "commit": "39bf62b01789dc522ed350517c29b438a95fd26b",
   "senders": {
     "deployer": "0xD657b2315f84f612643e8aC232e81D829beA0f4a",
     "governance": "0x687bd6D66665ebE245c148Bf150a08E0620515FA",
@@ -99,6 +99,22 @@
       "seedPrice18": "716310000000000000000",
       "absoluteCap18": "3050000000000000000000000",
       "seedOpenInterest18": "30500000000000000000000000"
+    },
+    {
+      "symbol": "uNVDA",
+      "name": "UseCert NVDA",
+      "marketIndex": 15,
+      "marketIndexVerified": true,
+      "priceDecimals": 2,
+      "sizeDecimals": 4,
+      "vault": "0x5236d54728671929a25Bc9492D70202c450Db5d0",
+      "certificate": "0x35Db6d51D7f69544B0905e23D3774ad38BC31Df9",
+      "bufferBook": "0x1B98315dA4D17e091bCC089d4Fdd8875A0CD56ab",
+      "certOracle": "0x30919d07FC83a6BA27426a03778790F03142639A",
+      "replayAggregator": "0x5c175b774C54af656a4150BBD501A54b546FF8F4",
+      "seedPrice18": "223670000000000000000",
+      "absoluteCap18": "311000000000000000000000",
+      "seedOpenInterest18": "3110000000000000000000000"
     }
   ]
 }

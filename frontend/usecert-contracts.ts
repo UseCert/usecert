@@ -2,7 +2,7 @@
 // Regenerate:  forge build && python scripts/gen-frontend-abi.py
 //
 // UseCert - Robinhood Chain testnet (chain 46630)
-// Deployment: block 11677074, commit 9fe136a534b5
+// Deployment: block 11677150, commit 39bf62b01789
 //
 // Functions are filtered to the front-end surface. ALL errors and events are kept:
 // errors so a UI can decode a revert into a sentence, events because receipt ids are
@@ -62,6 +62,15 @@ export const MIRRORS = [
     certOracle: '0x86D13ecD46D7218FCC9B6AF709844D064D657209' as const,
     bufferBook: '0xa71772e25DCBb365BeA8b002b6a6e7338d5431E7' as const,
     replayAggregator: '0xE8C2e06e4e8d0d6310F813ff903f19E11D842Bc3' as const,
+  },
+  {
+    symbol: 'uNVDA' as const,
+    marketIndex: 15,
+    vault: '0x5236d54728671929a25Bc9492D70202c450Db5d0' as const,
+    certificate: '0x35Db6d51D7f69544B0905e23D3774ad38BC31Df9' as const,
+    certOracle: '0x30919d07FC83a6BA27426a03778790F03142639A' as const,
+    bufferBook: '0x1B98315dA4D17e091bCC089d4Fdd8875A0CD56ab' as const,
+    replayAggregator: '0x5c175b774C54af656a4150BBD501A54b546FF8F4' as const,
   },
 ] as const;
 
