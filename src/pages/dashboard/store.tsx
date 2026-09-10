@@ -49,9 +49,20 @@
  * 300 s limit past which capacity is zero and minting is off.
  *
  * HISTORY. There is no on-chain source for the 60-point solvency series or the 48 funding
- * bars, and none for a 24h change, an 8h funding rate, or the flow list. `historyUnavailable`
- * / `change24hUnavailable` / `funding8hUnavailable` / `flowsUnavailable` are on, the arrays
- * are empty, and the views render an honest empty state. Nothing is interpolated.
+ * bars, and none for a 24h change or an 8h funding rate. `historyUnavailable` /
+ * `change24hUnavailable` / `funding8hUnavailable` are on, the arrays are empty, and the
+ * views render an honest empty state. Nothing is interpolated.
+ *
+ * FLOWS ARE NO LONGER HERE, AND NO LONGER ABSENT. `flows` / `flowsUnavailable` /
+ * `loadMoreFlows` and the `Flow` / `FlowType` shapes are gone from this provider. The flow
+ * list is not a contract read, so it does not belong in a provider whose contract is "every
+ * number published here came from a contract read": it comes from the chain's public
+ * Blockscout index over HTTP — a THIRD provenance class, neither a chain read nor an
+ * attester claim. It lives in `src/chain/useFlows.ts`, is consumed directly by the views
+ * through react-query (one shared cache entry, no prop threading), and is rendered under
+ * `ExplorerSourcedTag` / `ExplorerSourceNote`. Do not re-export it from here: keeping it
+ * out is what stops an explorer-sourced figure sharing a register with a `useReadContracts`
+ * one.
  *
  * NOTHING IS MOCKED ANY MORE. The staking state (`tokenLiquid`, `tokenStaked`,
  * `totalStaked`, `rewards`, `cooldowns`) and the keeper list (`keepers`, `runKeeper`) were
@@ -95,7 +106,10 @@ export type VaultId = "utsla" | "uspy" | "unvda" | "uspx" | "uqqq";
  * render them ran entirely on invented figures.
  */
 export type ViewId = "overview" | "vaults" | "mint" | "activity" | "risk";
-export type FlowType = "MINT" | "REDEEM" | "CLAIM";
+/* `FlowType` ("MINT" | "REDEEM" | "CLAIM") is gone. Three values cannot describe these
+ * contracts: the two-step paths have a request, a settle and a refund, and `ForceExited`
+ * is a fourth outcome. The eight real event kinds live in `FlowKind`
+ * (`src/chain/useFlows.ts`), next to the code that decodes them. */
 export type Timeframe = "1H" | "24H" | "7D" | "ALL";
 
 /**
@@ -246,17 +260,11 @@ export function isChainVaultId(id: VaultId): id is ChainVaultId {
   return id === "utsla" || id === "uspy";
 }
 
-export interface Flow {
-  id: number;
-  type: FlowType;
-  vault: VaultId | "token";
-  amount: number;
-  usdc: number;
-  price: number;
-  feeBps: number;
-  time: number;
-  tx: string;
-}
+/* The `Flow` shape is gone too, and would have been wrong for real data: it required a
+ * non-null `price` on every row (`RedeemClaimed` carries none), carried `feeBps` when the
+ * events emit a fee AMOUNT in 6-decimal collateral, and had a numeric `id` with no relation
+ * to a log. `FlowEvent` in `src/chain/useFlows.ts` replaces it, with every optional leg
+ * nullable and the decimal domain of each field named. */
 
 export interface Toast {
   id: number;
@@ -454,11 +462,9 @@ interface DashboardCtx {
   faucet: { nextAvailableAt: number; balance: number; drip: number } | null;
   refetchBalances: () => void;
 
-  /* ---- flows (absent) ----------------------------------------------- */
-  flows: Flow[];
-  /** Always true: receipt ids are not enumerable on-chain and there is no indexer. */
-  flowsUnavailable: boolean;
-  loadMoreFlows: () => void;
+  /* ---- flows -------------------------------------------------------- */
+  /* Deliberately absent. Flow history is not a contract read; call `useFlows()` from
+   * `src/chain/useFlows.ts` directly. See the file header. */
 
   /* ---- toasts ------------------------------------------------------- */
   toasts: Toast[];
@@ -642,11 +648,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   /* ---------------------------------------------------------------- flows */
 
-  // Receipt ids are not enumerable on-chain and there is no `receiptsOf(user)`; a flow
-  // list can only come from indexed events. None are indexed yet, so this is empty rather
-  // than invented, and `flowsUnavailable` tells the views to say why.
-  const flows = useMemo<Flow[]>(() => [], []);
-  const loadMoreFlows = useCallback(() => {}, []);
+  // Nothing here. Receipt ids are still not enumerable on-chain and there is still no
+  // `receiptsOf(user)` — that half of the old caveat was always true — but the chain's
+  // Blockscout instance indexes and decodes the events, so the list exists. It is fetched
+  // by `useFlows()` in the views, not published from this provider, because it is a
+  // third-party HTTP index and not a contract read. See the file header.
 
   /* --------------------------------------------------------------- value */
 
@@ -695,10 +701,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     positions,
     faucet,
     refetchBalances: balances.refetch,
-
-    flows,
-    flowsUnavailable: true,
-    loadMoreFlows,
 
     toasts,
     pushToast,

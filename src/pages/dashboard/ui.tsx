@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { motion } from "framer-motion";
 import { ChevronDown } from "lucide-react";
 import { capacityLegsLabel, type CapacityView, type DeltaView } from "@/chain/useVaults";
-import { EM_DASH, NO_POSITION, fmtNum, fmtUSD } from "./format";
+import { EM_DASH, NO_POSITION, fmtAge, fmtNum, fmtUSD } from "./format";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------ primitives */
@@ -410,6 +410,183 @@ export function PriceUnavailable({ className }: { className?: string }) {
     >
       Price unavailable · minting paused
     </span>
+  );
+}
+
+/* ------------------------------------------------- provenance: third class */
+
+/*
+ * There are THREE provenance classes on this dashboard, and the flow history introduced
+ * the third:
+ *
+ *   1. CHAIN READ         a guarded view function through wagmi. Ground truth. No tag —
+ *                         it is the default register everything else is measured against.
+ *   2. ATTESTER CLAIM     relayed into the contract, nothing on-chain verifies it.
+ *                         `UnverifiedTag`, in `warn`. (`solvency.accrual18`.)
+ *   3. THIRD-PARTY INDEX  an HTTP response from an explorer this project does not run.
+ *                         `ExplorerSourcedTag`, below.
+ *
+ * Class 3 is not class 2 and must not borrow its colour: an explorer-decoded `Minted` log
+ * is not somebody's unverified assertion about a balance, it is a real event relayed by a
+ * trusted intermediary. It is also not class 1, because the app did not read it from a
+ * node. So it gets its own neutral register — silver, not warn, not the plain white the
+ * chain reads use.
+ */
+
+/**
+ * Marks a figure that came from the chain's public block explorer rather than a contract read.
+ *
+ * See `src/chain/useFlows.ts` for why the flow list can only come from an index at all
+ * (receipt ids are not enumerable on-chain) and why a full-history `eth_getLogs` scan is
+ * not an option (~104M blocks).
+ */
+export function ExplorerSourcedTag({ className }: { className?: string }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 border border-silver/40 px-1.5 py-px font-mono text-[9px] uppercase tracking-[0.08em] text-silver",
+        className,
+      )}
+      title="Decoded from the chain's public Blockscout index over HTTP. The events are real and decoded from the contract ABI, but this is a third-party index, not a chain read performed by this app."
+    >
+      Explorer index
+    </span>
+  );
+}
+
+/**
+ * The prose that has to sit next to an explorer-sourced list.
+ *
+ * `fetchedAt` is the age of the HTTP response, not the age of an attestation — a different
+ * clock from `AgeLine`, which is why this does not reuse it. Both answer "how old is what I
+ * am looking at", and neither list should ever be on screen without its answer.
+ */
+export function ExplorerSourceNote({
+  detail,
+  url,
+  fetchedAt,
+  now,
+  className,
+}: {
+  detail: string;
+  url: string;
+  /** ms epoch of the last successful index read, or `0` when there has not been one. */
+  fetchedAt: number;
+  /** Wall clock, from the dashboard store, so the age ticks with everything else. */
+  now: number;
+  className?: string;
+}) {
+  const ageSec = fetchedAt > 0 ? Math.max(0, (now - fetchedAt) / 1000) : null;
+  return (
+    <div className={cn("flex flex-col gap-1.5", className)}>
+      <div className="flex flex-wrap items-center gap-2">
+        <ExplorerSourcedTag />
+        <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-white-60">
+          {ageSec === null ? "index not read yet" : `index read ${fmtAge(ageSec)}`}
+        </span>
+      </div>
+      <p className="max-w-[86ch] font-mono text-[10px] leading-[1.7] tracking-[0.04em] text-white-60/70">
+        {detail}{" "}
+        <a
+          href={url}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="underline decoration-white/20 underline-offset-2 transition-colors hover:text-green-bright"
+        >
+          {url.replace(/^https?:\/\//, "")}
+        </a>
+      </p>
+    </div>
+  );
+}
+
+/**
+ * What the flow list renders when the index cannot be read.
+ *
+ * This component is the reason the feature is worth having. An empty table on a failed
+ * HTTP call reads as "you have no activity" — a false statement about somebody's money,
+ * produced by a third party being down. So a failure gets a louder register than an empty
+ * state, and it names the failure rather than the data.
+ */
+export function IndexUnavailable({
+  message,
+  rateLimited,
+  onRetry,
+  className,
+}: {
+  message: string;
+  rateLimited: boolean;
+  onRetry?: () => void;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "flex flex-col items-center justify-center gap-3 border border-dashed border-warn/40 px-6 py-10 text-center",
+        className,
+      )}
+    >
+      <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-warn">
+        Flow index unavailable — this is not an empty history
+      </p>
+      <p className="max-w-[62ch] font-mono text-[10px] leading-[1.7] tracking-[0.04em] text-white-60">
+        {message} Your mints and redemptions are on chain either way; this app simply could
+        not read the explorer index that lists them.{" "}
+        {rateLimited
+          ? "The index is rate-limiting this browser — wait a moment before retrying."
+          : "Retry, or open the vault on the explorer directly."}
+      </p>
+      {onRetry && (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="border border-warn/40 px-5 py-2 font-mono text-[10px] uppercase tracking-[0.08em] text-warn transition-colors hover:bg-warn/10"
+        >
+          Retry
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The last index read failed, but an earlier one succeeded.
+ *
+ * The sibling of `IndexUnavailable` for the case where there IS a list. Discarding good
+ * history because a refresh failed would hide events the user has already been shown;
+ * showing it without saying the read failed would imply it is current. So: keep the list,
+ * say it may be behind.
+ */
+export function IndexStaleNotice({
+  message,
+  onRetry,
+  className,
+}: {
+  message: string;
+  onRetry?: () => void;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "flex flex-wrap items-center gap-x-3 gap-y-1 border border-warn/40 px-4 py-2.5",
+        className,
+      )}
+    >
+      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-warn">
+        Index read failed — list may be behind
+      </span>
+      <span className="font-mono text-[10px] tracking-[0.04em] text-white-60">{message}</span>
+      {onRetry && (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="ml-auto font-mono text-[10px] uppercase tracking-[0.08em] text-warn underline underline-offset-2"
+        >
+          Retry
+        </button>
+      )}
+    </div>
   );
 }
 

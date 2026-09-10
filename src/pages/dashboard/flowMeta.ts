@@ -1,4 +1,4 @@
-import type { Flow, VaultId } from "./store";
+import type { VaultId } from "./store";
 
 /**
  * Per-vault presentation metadata.
@@ -45,7 +45,8 @@ export const FLOW_META: Record<
   },
 };
 
-export function flowVaultLabel(flow: Flow): string {
-  if (flow.vault === "token") return "TOKEN";
-  return FLOW_META[flow.vault].name;
-}
+/* `flowVaultLabel(flow)` is gone with the `Flow` shape it took. It mapped a
+ * `VaultId | "token"` to a label, and "token" was the mock staking row — there is no
+ * protocol token on this deployment, so no real flow can ever be one. A `FlowEvent`
+ * (`src/chain/useFlows.ts`) carries `vaultSymbol` from the deployed mirror it was read
+ * from, so there is nothing left to look up. */

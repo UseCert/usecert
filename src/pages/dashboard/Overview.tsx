@@ -14,6 +14,7 @@ import {
   UnverifiedTag,
   ViewHeader,
 } from "./ui";
+import { RecentFlows } from "./flows";
 import { useCountUp } from "./hooks";
 import { EM_DASH, NO_POSITION, fmtCompactUSD, fmtNum, fmtOrDash, fmtUSD } from "./format";
 import { TickerStrip, BackingComposition, FundingMonitor, NetworkStrip, PegMonitor } from "./OverviewExtras";
@@ -179,7 +180,6 @@ export default function Overview() {
     block,
     blockKnown,
     maxAttestationAgeSec,
-    flowsUnavailable,
     isLoading,
     isError,
   } = useDashboard();
@@ -538,7 +538,14 @@ export default function Overview() {
         </Panel>
       </Stagger>
 
-      {/* Recent activity strip: nothing to show without an indexer */}
+      {/* Recent activity strip.
+       *
+       * This panel used to say "No flow history yet: needs an indexer". The premise was
+       * right — receipt ids are not enumerable on-chain and there is no `receiptsOf(user)`,
+       * so a list can only come from logs — but the conclusion was not: the chain's own
+       * Blockscout instance indexes and decodes these events and answers the browser
+       * directly. `RecentFlows` reads it, and carries the provenance note that says the
+       * rows are a third-party index rather than a chain read. */}
       <Stagger index={6}>
         <Panel className="mt-3">
           <div className="flex items-center justify-between border-b hairline-dark px-5 py-4">
@@ -551,13 +558,7 @@ export default function Overview() {
               View all <ArrowUpRight size={13} />
             </button>
           </div>
-          {flowsUnavailable && (
-            <EmptyState
-              className="border-0"
-              title="No flow history yet: needs an indexer"
-              detail="Receipt ids are not enumerable on-chain and there is no receiptsOf(user); a flow list can only be built from indexed events. None are indexed yet."
-            />
-          )}
+          <RecentFlows limit={5} onViewAll={() => setView("activity")} />
         </Panel>
       </Stagger>
     </div>

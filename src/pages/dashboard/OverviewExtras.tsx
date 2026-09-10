@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useFlows } from "@/chain/useFlows";
 import { useDashboard } from "./store";
 import { AgeLine, EmptyState, Flash, MicroLabel, Panel, PulseDot, UnverifiedTag } from "./ui";
 import { EM_DASH, fmtCompactUSD, fmtNum, fmtOrDash, fmtUSD } from "./format";
@@ -203,8 +204,12 @@ export function FundingMonitor() {
 
 /** Chain vitals. Every cell is either a read or a documented deployment constant. */
 export function NetworkStrip() {
-  const { block, blockKnown, liveVaults, vaults, totals, maxAttestationAgeSec, flowsUnavailable } =
-    useDashboard();
+  const { block, blockKnown, liveVaults, vaults, totals, maxAttestationAgeSec } = useDashboard();
+  /* The flow index is a THIRD-PARTY HTTP index, not a chain read like every other cell in
+   * this strip, so the chip names the source rather than saying a bare "connected". It
+   * stays `warn`-toned whatever it says: a reader should not take an explorer-sourced cell
+   * for a contract-sourced one just because it is working. */
+  const history = useFlows();
 
   const mintable = liveVaults.filter((v) => v.mintAllowed).length;
   const basisKnownCount = liveVaults.filter((v) => v.basisKnown).length;
@@ -227,7 +232,15 @@ export function NetworkStrip() {
       label: "Independent basis",
       value: liveVaults.length ? `${basisKnownCount}/${liveVaults.length}` : EM_DASH,
     },
-    { label: "Indexer", value: flowsUnavailable ? "none" : "connected", tone: "warn" },
+    {
+      label: "Flow index (3rd party)",
+      value: history.indexUnavailable
+        ? "unavailable"
+        : history.isLoading
+          ? "reading…"
+          : `explorer · ${history.flows.length} events`,
+      tone: "warn",
+    },
   ];
 
   return (

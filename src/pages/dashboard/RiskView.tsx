@@ -1,4 +1,5 @@
 import { AlertTriangle, Check, FileText, Layers, Lock, Radio } from "lucide-react";
+import { useFlows } from "@/chain/useFlows";
 import { useDashboard } from "./store";
 import { AgeLine, EmptyState, MicroLabel, Panel, PulseDot, Stagger, UnverifiedTag, ViewHeader } from "./ui";
 import { EM_DASH, NO_POSITION, fmtCompactUSD, fmtOrDash } from "./format";
@@ -173,8 +174,9 @@ function Waterfall({
 /* ------------------------------------------------------------------ view */
 
 export default function RiskView() {
-  const { totals, liveVaults, vaults, vaultConfig, maxAttestationAgeSec, flowsUnavailable } =
-    useDashboard();
+  const { totals, liveVaults, vaults, vaultConfig, maxAttestationAgeSec } = useDashboard();
+  // Flow history is a third-party HTTP index, not a contract read — see `useFlows`.
+  const history = useFlows();
 
   const bufferHeld = totals ? totals.buffer : null;
 
@@ -325,8 +327,15 @@ export default function RiskView() {
       state: "warn",
     },
     {
-      label: "Event indexer",
-      value: flowsUnavailable ? "none — no receipt or flow history" : "connected",
+      /* Receipt ids are STILL not enumerable on-chain and there is STILL no
+       * `receiptsOf(user)` — a flow list can only come from logs. What changed is that the
+       * chain's own Blockscout instance indexes and decodes them and answers the browser
+       * directly, so the history exists. It stays `warn` because it is a third-party HTTP
+       * index, not a guarded chain read, and the row says which. */
+      label: "Receipt & flow history",
+      value: history.indexUnavailable
+        ? "explorer index unavailable — history cannot be read right now"
+        : "read from the chain's public explorer index (third party, not a chain read)",
       state: "warn",
     },
   ];
