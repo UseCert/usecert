@@ -1,10 +1,12 @@
 {
   "_generatedBy": "script/DeployTestnet.s.sol",
+  "_amendedBy": "script/AddMirror.s.sol",
   "_warning": "GENERATED PER DEPLOYMENT. NEVER HAND-EDIT: each mirror is a new vault AND a new certificate token, and an edited map repoints a UI at a new token while balances sit in the old one. Re-run the script.",
+  "_marketIndexVerifiedNote": "Per mirror: was marketIndex READ from the venue's api/v1/orderBookDetails, or CHOSEN? true for TSLA 16 and NVDA 15 only (WHITEPAPER.md 4.4, measured 2026-09-07). false is a WORK ITEM, not a disclaimer - uSPY's 26 and uQQQ's 27 are placeholders. On LighterSim setMarkPrice implicitly creates any index, so an unverified one deploys clean; on a real venue it pushes the WRONG market's mark. Re-read market_id and redeploy the mirror before pointing it at a real venue.",
   "chainId": 46630,
-  "blockNumber": 11667691,
-  "timestamp": 1788953741,
-  "commit": "d75114fc03028c4726c8b032da53a6f36742b94b",
+  "blockNumber": 11677074,
+  "timestamp": 1789069723,
+  "commit": "9fe136a534b5ca8314136bc4ef6eb8e1f2b3e578",
   "senders": {
     "deployer": "0xD657b2315f84f612643e8aC232e81D829beA0f4a",
     "governance": "0x687bd6D66665ebE245c148Bf150a08E0620515FA",
@@ -54,6 +56,7 @@
       "symbol": "uTSLA",
       "name": "UseCert TSLA",
       "marketIndex": 16,
+      "marketIndexVerified": true,
       "priceDecimals": 2,
       "sizeDecimals": 4,
       "vault": "0x76A76B1dbc252C2c17698A9aB0a0143dAabCE9Cc",
@@ -69,6 +72,7 @@
       "symbol": "uSPY",
       "name": "UseCert SPY",
       "marketIndex": 26,
+      "marketIndexVerified": false,
       "priceDecimals": 2,
       "sizeDecimals": 4,
       "vault": "0xc640348F977425A7cc4A38f4e4f0CADc69eB5a98",
@@ -79,6 +83,22 @@
       "seedPrice18": "650000000000000000000",
       "absoluteCap18": "5000000000000000000000000",
       "seedOpenInterest18": "50000000000000000000000000"
+    },
+    {
+      "symbol": "uQQQ",
+      "name": "UseCert QQQ",
+      "marketIndex": 27,
+      "marketIndexVerified": false,
+      "priceDecimals": 2,
+      "sizeDecimals": 4,
+      "vault": "0x21053C638c3ec96690EBc53392e02062a1A06ae8",
+      "certificate": "0x3d3cCc8E11dEC5690F366077ADF74659f064Ef54",
+      "bufferBook": "0xa71772e25DCBb365BeA8b002b6a6e7338d5431E7",
+      "certOracle": "0x86D13ecD46D7218FCC9B6AF709844D064D657209",
+      "replayAggregator": "0xE8C2e06e4e8d0d6310F813ff903f19E11D842Bc3",
+      "seedPrice18": "716310000000000000000",
+      "absoluteCap18": "3050000000000000000000000",
+      "seedOpenInterest18": "30500000000000000000000000"
     }
   ]
 }
