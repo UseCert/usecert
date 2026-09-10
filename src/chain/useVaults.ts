@@ -7,7 +7,7 @@
  * is `Omit<Vault, "id">` plus the fields the chain forces us to be honest about, so the
  * compiler fails here — not in a component — if the store's shape drifts.
  *
- * Three things this file is deliberate about (INTEGRATION-NOTES.md §0):
+ * Four things this file is deliberate about (INTEGRATION-NOTES.md §0):
  *
  *  1. `solvency()` returns EIGHT fields, and two of them are not the same kind of number.
  *     `buffer18` is the vault's own ERC-20 balance — ground truth. `accrual18` is an
@@ -24,6 +24,15 @@
  *     point. `basisKnown === false` means there is NO independent basis to compute, which
  *     is categorically different from `basisBps === 0` ("two independent sources agree
  *     exactly"). `basisBps` is therefore `number | null`, not `0`.
+ *
+ *     ON THIS DEPLOYMENT `known` is `true` and `bps` is `0` on every mirror, and neither
+ *     half is a measurement: see `BASIS_ON_THIS_DEPLOYMENT`, which is the sentence the UI
+ *     must render next to the number.
+ *
+ *  4. `marketIndex` is not equally trustworthy across mirrors. `MARKET_INDEX_VERIFIED`
+ *     records which indices were read back from the venue (TSLA 16, NVDA 15) and which were
+ *     chosen (uSPY 26, uQQQ 27). It is hand-maintained because the generator drops the
+ *     field; it is published because on a real venue a wrong index hedges a wrong market.
  *
  * And two things it refuses to do:
  *
@@ -64,21 +73,60 @@ import type { FundingBar, SeriesPoint, Vault } from "@/pages/dashboard/store";
 /* ────────────────────────────────────────────────────────────────────────── ids */
 
 /**
- * The vaults that actually exist in this deployment.
+ * The vaults that actually exist in this deployment — DERIVED FROM THE ADDRESS BOOK.
  *
- * This is the subset of the store's `VaultId` that has contracts. The store's union now
- * reads `"utsla" | "uspy" | "unvda" | "uspx" | "uqqq"`: `uspy` was added because it is
- * deployed (market 26), and `unvda` / `uspx` / `uqqq` were kept because the UI still shows
- * them — greyed, non-interactive and carrying no figures, since there is no vault, no
- * certificate token and no oracle for them on chain 46630. Anything crossing from the UI
- * into this layer goes through `isChainVaultId` in the store.
+ * Not a hand-written union any more. `MIRRORS` is generated from the deployment, so
+ * `Lowercase<Mirror["symbol"]>` is the set of ids that provably have a vault, a certificate
+ * token and an oracle on chain 46630, and it cannot fall behind the address book. Adding a
+ * mirror to `contracts.ts` therefore widens this type immediately, which is what makes the
+ * compiler — rather than a reader — find every site that has to learn about it:
+ * `MIRROR_META` and `MARKET_INDEX_VERIFIED` are `Record<Mirror["symbol"], …>` and stop
+ * compiling until the new mirror has an entry in each.
+ *
+ * The store's `VaultId` is this type plus whatever ids the UI shows WITHOUT contracts.
+ * That second set is currently empty (see `store.tsx`), so anything crossing from the UI
+ * into this layer still goes through `isChainVaultId` — the door stays, and re-arms the
+ * moment an unrouted id is added back.
  */
-export type ChainVaultId = "utsla" | "uspy";
+export type ChainVaultId = Lowercase<Mirror["symbol"]>;
 
-export const CHAIN_VAULT_IDS: readonly ChainVaultId[] = ["utsla", "uspy"];
+/**
+ * Every deployed mirror's id, IN `MIRRORS` ORDER.
+ *
+ * The order matters beyond presentation: `useLiveVaults` decodes its multicall by index
+ * against `MIRRORS`, so a separately maintained literal list could put a routed vault's
+ * figures under another vault's name. Derived, so it cannot.
+ */
+export const CHAIN_VAULT_IDS: readonly ChainVaultId[] = MIRRORS.map(
+  (m) => m.symbol.toLowerCase() as ChainVaultId,
+);
 
 /** Past this age the vault reports zero capacity and minting is off. */
 export const MAX_ATTESTATION_AGE_SEC = 300;
+
+/**
+ * What a basis reading MEANS on chain 46630. One sentence, rendered wherever basis is.
+ *
+ * `basisBpsChecked()` compares the `CertOracle`'s feed against the venue's mark, and
+ * `singleSource: false` on every mirror here declares those two independent. On this
+ * deployment they are not economically independent: there is no Chainlink on chain 46630,
+ * so every `CertOracle.feed` is a `ReplayAggregator` this project writes, and the keeper
+ * that writes it sets the simulator's mark in the SAME TRANSACTION. The two numbers are
+ * therefore equal by construction and the basis is 0 bps on every mirror at all times.
+ *
+ * That makes a green basis here a plumbing check — the guard is wired and reading — and not
+ * a second source confirming the price. It is the exact failure the deployment checklist
+ * warns about (`singleSource: false` against a feed that is not independent yields
+ * `known = true, bps = 0`: a healthy basis asserted, never computed), and the UI must not
+ * let a reader take it for the other thing. Zero here is also weaker than zero on a real
+ * feed pair in a second way: how much of a genuine reference price sits behind the replayed
+ * value differs per market, and this deployment publishes nothing about that either.
+ */
+export const BASIS_ON_THIS_DEPLOYMENT =
+  "Basis reads 0 bps on every mirror by construction, not by agreement: chain 46630 has no " +
+  "Chainlink, so each CertOracle reads a ReplayAggregator this project writes, and the same " +
+  "keeper sets the simulator's mark in the same transaction. Treat it as proof the guard is " +
+  "wired, never as an independent source confirming the price.";
 
 /**
  * `deltaBps === 10_000` means the hedge-to-obligation ratio is EXACTLY 1.0 — at target.
@@ -108,9 +156,8 @@ export interface MirrorMeta {
   img: string;
   /**
    * True when `img` is a stand-in rather than this certificate's own plate. There is no
-   * `cert-plate-uspy.jpg` in `public/`; pointing uSPY at `cert-plate-uspx.jpg` would put
-   * a uSPX plate under a uSPY heading, so it gets the neutral logo instead. Asset work
-   * belongs to the copy stage.
+   * `cert-plate-uspy.jpg` in `public/`, and uSPY must not borrow another certificate's
+   * plate, so it gets the neutral logo instead. Asset work belongs to the copy stage.
    */
   imgPlaceholder: boolean;
 }
@@ -130,7 +177,71 @@ const MIRROR_META: Record<Mirror["symbol"], MirrorMeta> = {
     img: "/logo.png",
     imgPlaceholder: true,
   },
+  uQQQ: {
+    id: "uqqq",
+    name: "uQQQ",
+    full: "Nasdaq 100 Certificate",
+    img: "/cert-plate-uqqq.jpg",
+    imgPlaceholder: false,
+  },
+  uNVDA: {
+    id: "unvda",
+    name: "uNVDA",
+    full: "Nvidia Certificate",
+    img: "/cert-plate-unvda.jpg",
+    imgPlaceholder: false,
+  },
 };
+
+/**
+ * Was this mirror's `marketIndex` READ from the venue, or CHOSEN?
+ *
+ * HAND-MAINTAINED, and it mirrors `marketIndexVerified` in `deployments/46630.json` — one
+ * entry per vault in that file, copied here. It is not read from `contracts.ts` because it
+ * is not in `contracts.ts`: `scripts/gen-frontend-abi.py` emits a fixed key list per mirror
+ * (symbol, marketIndex and the five addresses) and drops everything else in the address
+ * book, so there is nothing generated to read. Keep the two in step by hand until the
+ * generator carries the field; `Record<Mirror["symbol"], boolean>` at least guarantees that
+ * a new mirror cannot compile without someone deciding which value it gets.
+ *
+ * `true` means the index was read from the venue's `api/v1/orderBookDetails`
+ * (WHITEPAPER.md §4.4, measured 2026-09-07), which is TSLA 16 and NVDA 15 and nothing else.
+ * uSPY's 26 and uQQQ's 27 are PLACEHOLDERS — a work item, not a disclaimer.
+ *
+ * Why it is worth publishing rather than filing: on the testnet simulator
+ * `setMarkPrice(marketIndex, px)` creates the market implicitly, so an unverified index
+ * deploys, bootstraps, attests and reads back completely clean — there is no symptom. On a
+ * real venue the same index would hedge against the WRONG MARKET. The address book's own
+ * instruction is to re-read `market_id` and redeploy the mirror before pointing it at one.
+ */
+const MARKET_INDEX_VERIFIED: Record<Mirror["symbol"], boolean> = {
+  uTSLA: true,
+  uSPY: false,
+  uQQQ: false,
+  uNVDA: true,
+};
+
+/**
+ * Whether this mirror's `marketIndex` was venue-verified. See `MARKET_INDEX_VERIFIED`.
+ *
+ * Exported so a consumer holding only a vault id — a loading placeholder, or the store
+ * assembling its `Vault` rows — can publish the provenance of the market index it is about
+ * to show next to a price, without duplicating the map.
+ */
+export function isMarketIndexVerified(id: ChainVaultId): boolean {
+  return MARKET_INDEX_VERIFIED[mirrorFor(id).symbol];
+}
+
+/**
+ * One sentence for an unverified market index, so every consumer says the same thing.
+ *
+ * Deliberately short and deliberately not alarming: on this testnet an unverified index is
+ * harmless, and the honest statement is what it would be elsewhere, not what it is here.
+ */
+export const MARKET_INDEX_UNVERIFIED_NOTE =
+  "This mirror's venue market index was chosen, not read back from the venue's market list. " +
+  "On the testnet simulator setMarkPrice() creates any index implicitly, so nothing here " +
+  "misbehaves; against a real venue an unverified index would hedge the wrong market.";
 
 function mirrorFor(id: ChainVaultId): Mirror {
   const mirror = MIRRORS.find((m) => MIRROR_META[m.symbol].id === id);
@@ -144,7 +255,7 @@ function mirrorFor(id: ChainVaultId): Mirror {
  * Exported so that a consumer rendering a routed vault BEFORE the first multicall
  * returns (a loading placeholder) does not invent its own name, title or plate for it.
  * This file stays the single source of truth for those, including `imgPlaceholder`:
- * there is no `cert-plate-uspy.jpg`, and uSPY must not borrow the uSPX plate.
+ * there is no `cert-plate-uspy.jpg`, and uSPY must not borrow another certificate's plate.
  */
 export function chainVaultMeta(id: ChainVaultId): MirrorMeta {
   return MIRROR_META[mirrorFor(id).symbol];
@@ -255,8 +366,9 @@ export interface CapacityView {
   /**
    * EVERY term sitting at the binding value, not just one.
    *
-   * Both live mirrors are ties: uTSLA's depth leg is `900,000 × 1000bps = $90,000` and its
-   * `absoluteCap18` is $90,000 exactly; uSPY's are both $5,000,000. Naming one of them and
+   * Every mirror is seeded so that its depth and governance legs TIE: `seedOpenInterest18 ×
+   * depthBps(1000) == absoluteCap18` by construction on all four ($90,000 on uTSLA,
+   * $5,000,000 on uSPY, $3,050,000 on uQQQ, $311,000 on uNVDA). Naming one of them and
    * calling the other slack would be wrong — raising either alone moves the ceiling nowhere.
    * Empty until `cap18` is known.
    */
@@ -321,14 +433,21 @@ export interface LiveVault extends Omit<Vault, "id" | "price"> {
   certificateAddress: `0x${string}`;
   oracleAddress: `0x${string}`;
   marketIndex: number;
+  /**
+   * Whether `marketIndex` was read back from the venue or chosen. See
+   * `MARKET_INDEX_VERIFIED`. It travels with `marketIndex` for the same reason `ageSec`
+   * travels with `backing`: four indices presented identically read as four equally
+   * confirmed indices, and only two of them are.
+   */
+  marketIndexVerified: boolean;
   imgPlaceholder: boolean;
 
   /* ------------------------------------------------------------- non-null figures */
   /**
-   * Every figure on the store's `Vault` is nullable, because three of the five ids in
-   * `VaultId` have no contracts at all and must render nothing. A DEPLOYED mirror always
-   * has these, so they are narrowed back to `number` here — `price` stays the one genuine
-   * exception, because `oracle.px()` really does revert.
+   * Every figure on the store's `Vault` is nullable, because `VaultId` admits ids with no
+   * contracts at all, which must render nothing. A DEPLOYED mirror always has these, so
+   * they are narrowed back to `number` here — `price` stays the one genuine exception,
+   * because `oracle.px()` really does revert.
    */
   supply: number;
   buffer: number;
@@ -366,12 +485,19 @@ export interface LiveVault extends Omit<Vault, "id" | "price"> {
   /**
    * `known` from `oracle.basisBpsChecked()`. False means there is no independent basis to
    * compute at all — the feed and the venue mark are declared the same source.
+   *
+   * On chain 46630 this is `true` on every mirror, because every `CertOracle` was deployed
+   * with `singleSource: false`. Read `BASIS_ON_THIS_DEPLOYMENT` before rendering the number
+   * that comes with it: `known === true` here is a CONFIGURATION FLAG, not a measurement.
    */
   basisKnown: boolean;
   /**
    * `bps` from `oracle.basisBpsChecked()`, in percent, or `null` when `basisKnown` is
    * false. Deliberately nullable: collapsing "unverifiable" to `0` silently turns it into
    * "perfect".
+   *
+   * It reads 0.00% on every mirror of this deployment and that is not evidence of
+   * agreement — see `BASIS_ON_THIS_DEPLOYMENT`.
    */
   basisBps: number | null;
 
@@ -763,7 +889,7 @@ function buildCapacity(input: {
 /**
  * Human sentence for the set of binding legs, so every consumer says the same thing.
  *
- * Joined rather than reduced to one name because ties are the live case on both mirrors, and
+ * Joined rather than reduced to one name because ties are the live case on every mirror, and
  * "bound by the governance cap" alone would invite someone to raise the cap and see nothing
  * move.
  */
@@ -938,6 +1064,7 @@ export function useLiveVaults(options?: { refetchIntervalMs?: number }): UseLive
         certificateAddress: mirror.certificate,
         oracleAddress: mirror.certOracle,
         marketIndex: mirror.marketIndex,
+        marketIndexVerified: MARKET_INDEX_VERIFIED[mirror.symbol],
 
         price: px18 !== null ? fromPrice18(px18) : null,
         priceUnavailable: px18 === null,
@@ -1171,10 +1298,12 @@ export function aggregateTotals(vaults: LiveVault[]): {
    * `margin / notional` as a percent, or `null` when the attested notional is ZERO.
    *
    * It used to be `(margin / Math.max(1, notional)) * 100`, which does not guard the divide —
-   * it replaces a zero denominator with ONE DOLLAR. Both routed vaults currently attest
-   * `notional18 == 0`, so that clamp published the attested margin as a percentage: $460.54 of
-   * margin rendered as "46,054.10%" of a position that does not exist. A ratio with no
-   * denominator is undefined and must be an em-dash, not an artefact.
+   * it replaces a zero denominator with ONE DOLLAR. A freshly bootstrapped mirror attests
+   * `notional18 == 0` (zero supply, nothing hedged), so that clamp published the attested
+   * margin as a percentage: $460.54 of margin rendered as "46,054.10%" of a position that
+   * does not exist. A ratio with no denominator is undefined and must be an em-dash, not an
+   * artefact. uQQQ and uNVDA are in exactly that state on arrival, so this guard is the one
+   * standing between them and a five-figure percentage.
    */
   ratio: number | null;
   /**

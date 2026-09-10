@@ -7,7 +7,9 @@ import { getVault, nextVault } from "./vaults/data";
 /**
  * /vaults/:slug detail page: hero, intro + meta grid, problem, media block,
  * results, approach, holder words, next vault, CTA band. Driven entirely by
- * the per-vault data module (slugs: utsla, unvda, uspx, uqqq, uaapl).
+ * the per-vault data module (slugs: utsla, unvda, uqqq, uaapl). `uspx` was removed: the
+ * venue has no SPX perpetual, so that vault cannot exist. uSPY, which tracks the same
+ * index and IS deployed, has no marketing entry yet — see `vaults/data.ts`.
  */
 export default function VaultDetail() {
   const { slug } = useParams();

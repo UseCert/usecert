@@ -8,8 +8,9 @@ export const EM_DASH = "—";
  *
  * A bare em-dash is right for a missing INPUT but too quiet for a missing DENOMINATOR: the
  * reader can see the inputs on the same screen and will assume the app simply failed to divide
- * them. Saying "no position" instead answers the question the blank raises. Both routed vaults
- * attest `notional18 == 0`, so this is the live state of every attested ratio on the dashboard.
+ * them. Saying "no position" instead answers the question the blank raises. A mirror with no
+ * supply attests `notional18 == 0`, which is the arrival state of every newly deployed mirror,
+ * so this is the live state of most attested ratios on the dashboard.
  */
 export const NO_POSITION = "n/a — no position";
 
@@ -17,8 +18,8 @@ export const NO_POSITION = "n/a — no position";
  * The only way a number should reach the screen.
  *
  * Every figure on the live model is nullable, because plenty of them have no on-chain
- * source and three of the five vaults have no contracts at all. Passing the value through
- * here means an absent figure renders as an em-dash instead of a confident `$0.00`.
+ * source and `VaultId` admits ids with no contracts at all. Passing the value through here
+ * means an absent figure renders as an em-dash instead of a confident `$0.00`.
  */
 export function fmtOrDash(value: number | null | undefined, format: (n: number) => string): string {
   return value === null || value === undefined ? EM_DASH : format(value);

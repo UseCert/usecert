@@ -37,7 +37,7 @@ import { ExternalLink, RefreshCw } from "lucide-react";
 
 import { useFlows, type FlowEvent, type FlowKind } from "@/chain/useFlows";
 import { cn } from "@/lib/utils";
-import { useDashboard } from "./store";
+import { ROUTED_VAULT_COUNT, useDashboard } from "./store";
 import type { VaultId } from "./store";
 import {
   Dropdown,
@@ -271,8 +271,8 @@ export default function ActivityView() {
               <>
                 A per-wallet history needs a wallet. Connect one to see your own mints,
                 redemptions, claims and exits, or switch to “All vaults” for every flow on
-                the two routed vaults. This is not an empty history — no address has been
-                asked for yet.
+                the {ROUTED_VAULT_COUNT} routed vaults. This is not an empty history — no
+                address has been asked for yet.
               </>
             }
           />
@@ -382,7 +382,7 @@ export default function ActivityView() {
 
       {!history.indexUnavailable && !noWallet && !history.hasMore && filtered.length > 0 && (
         <p className="mt-6 text-center font-mono text-[10px] uppercase tracking-[0.08em] text-white-60/70">
-          End of the index for both routed vaults
+          End of the index for all {ROUTED_VAULT_COUNT} routed vaults
         </p>
       )}
 

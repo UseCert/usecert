@@ -60,7 +60,7 @@
  * `receiptId -> user` from the events that do carry a user — `MintRequested`,
  * `RedeemRequested` and `ForceExited` — and then match. Receipt ids are per-vault
  * counters, so the join key is `(vault, receiptId)`, never the bare id: uTSLA receipt 1
- * and uSPY receipt 1 are different receipts belonging to possibly different people.
+ * and uQQQ receipt 1 are different receipts belonging to possibly different people.
  *
  * When the request half is not in the fetched window, the settlement is NOT guessed. It is
  * marked `attribution: "unattributed"`, kept in the all-vault view (the event happened) and
@@ -174,7 +174,7 @@ export interface FlowEvent {
   side: FlowSide;
 
   vaultId: ChainVaultId;
-  /** "uTSLA" / "uSPY". */
+  /** The mirror's symbol, e.g. "uTSLA" / "uQQQ". */
   vaultSymbol: string;
   vaultAddress: string;
 
@@ -582,7 +582,7 @@ async function fetchFlows(maxPages: number, signal: AbortSignal | undefined): Pr
     address: vaultAddresses(id).vault as string,
   }));
 
-  // One request per routed vault, in parallel — two vaults today. If ANY vault fails the
+  // One request per routed vault, in parallel — as many as the address book routes. If ANY vault fails the
   // whole snapshot fails: a list missing one vault's history, presented as the history, is
   // the same lie as an empty list.
   const results = await Promise.all(

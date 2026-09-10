@@ -269,7 +269,7 @@ export default function Overview() {
             />
           }
         />
-        {/* The denominator is the ATTESTED notional, which is currently 0 on both mirrors.
+        {/* The denominator is the ATTESTED notional, which is 0 on any mirror with no supply.
             `totals.ratio` is null in that state rather than clamped to a $1 denominator, so
             this card shows the reason instead of publishing the margin as a percentage of
             nothing — it read "46,054.10%" before the guard. */}

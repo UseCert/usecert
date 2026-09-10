@@ -36,24 +36,37 @@ export function TopBar() {
   // No data is not "healthy" and it is not "degraded" either — it is unknown, and the
   // chip says so rather than asserting either one.
   //
-  // `totals.ratio` is now `null` when the attested notional is zero, which is the live state
-  // of both mirrors. That is a FOURTH state and it gets its own label: the old expression was
-  // `totals.ratio >= 100`, and against the previous unguarded ratio — margin over a
-  // denominator clamped to $1 — a vault with no attested position at all sailed past 100% and
-  // published "Attested backing holds". Nothing was attested. It cannot hold.
+  // `totals.ratio` is now `null` when the attested notional is zero, which is the arrival
+  // state of every mirror with no supply. That is a FOURTH state and it gets its own label:
+  // the old expression was `totals.ratio >= 100`, and against the previous unguarded ratio —
+  // margin over a denominator clamped to $1 — a vault with no attested position at all sailed
+  // past 100% and published "Attested backing holds". Nothing was attested. It cannot hold.
+  //
+  // `backingRatio` needs the SAME treatment and did not have it. It is `null` only when no
+  // mirror published a point; when the obligation is ZERO — every routed vault at zero supply,
+  // which is exactly how uQQQ and uNVDA arrived — `aggregateTotals` returns
+  // `POSITIVE_INFINITY` to mean "nothing is owed, so nothing can be short". That is not `null`,
+  // so it walked straight into `>= 100` and published a green "Attested backing holds" over a
+  // ratio that was never computed. Nothing is owed and nothing is proven; the honest chip is
+  // the "no attested position" one, which is why the non-finite case is routed there.
+  /** `backingRatio` only when it is an actual measurement. `null` covers both absences. */
+  const measuredBackingRatio =
+    totals !== null && totals.backingRatio !== null && Number.isFinite(totals.backingRatio)
+      ? totals.backingRatio
+      : null;
   const status: "unknown" | "no-position" | "healthy" | "degraded" = isError
     ? "degraded"
     : totals === null
       ? "unknown"
       : totals.anyStale || totals.anyPriceUnavailable
         ? "degraded"
-        : totals.backingRatio === null
+        : measuredBackingRatio === null
           ? "no-position"
           : // Solvency = backing covers the obligation. NOT `ratio >= 100`: `ratio` is margin
             // over hedge notional, which sits at targetMarginBps (90% here) by design, so that
             // test published "Degraded" on a correctly configured vault - live mirrors read
             // 91.11% while every real health signal was green.
-            totals.backingRatio >= 100
+            measuredBackingRatio >= 100
             ? "healthy"
             : "degraded";
   return (

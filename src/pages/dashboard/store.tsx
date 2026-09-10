@@ -25,19 +25,31 @@
  * any on-chain sentinel must be decoded before it is formatted — see `Totals.ratio` and
  * `DeltaView`.
  *
- * THE FIVE VAULTS. Only uTSLA (market 16) and uSPY (market 26) are deployed on chain
- * 46630. uNVDA, uSPX and uQQQ have no vault, no certificate token and no oracle. They are
- * kept in the UI, greyed, non-interactive, and carrying no numbers at all:
+ * THE VAULTS. All four mirrors in the address book are deployed on chain 46630 and routed
+ * here, and there is nothing else in the list:
  *
- *   utsla  LIVE       routed, real chain data
- *   uspy   LIVE       routed, real chain data (added to `VaultId` in this stage)
- *   uspx   SOON       on the roadmap for a later phase
- *   uqqq   SOON       on the roadmap for a later phase
- *   unvda  UNPLANNED  not deployed and not currently planned — do not imply otherwise
+ *   utsla  LIVE  market 16, venue-verified
+ *   uspy   LIVE  market 26, index NOT venue-verified
+ *   uqqq   LIVE  market 27, index NOT venue-verified
+ *   unvda  LIVE  market 15, venue-verified
  *
- * `status: "SOON"` is reused for uSPX/uQQQ because the roadmap does list them. uNVDA gets
- * `"UNPLANNED"` ("NOT PLANNED") because promising it would be a commitment the project has
- * not made.
+ * uSPX IS GONE, and its removal is a correction rather than a tidy-up. The row said
+ * "uSPX · SOON", and that promised a vault that cannot be built: the venue has no SPX
+ * perpetual, so a uSPX mirror would have nothing to hedge against. The live RWA perp
+ * markets are TSLA, NVDA, SPY, QQQ, AAPL, AMZN, MSFT, GOOGL, META, HOOD, PLTR, COIN, MSTR,
+ * AMD, INTC, MU, MRVL, CRCL and SNDK. SPY is the instrument that tracks that index and it
+ * is already live here, so the exposure the row implied is available under a name that
+ * exists. Do not reinstate uSPX, or any other id, without a perp market behind it.
+ *
+ * `UNROUTED` is therefore empty, and `VaultStatus` keeps `SOON` / `UNPLANNED` on purpose:
+ * the greyed, non-interactive, figure-free rendering path is still the correct answer for
+ * the next id the roadmap adds ahead of its contracts, and deleting it would mean rebuilding
+ * it under deadline. What must not come back is a status on an id the protocol cannot ship.
+ *
+ * MARKET INDEX PROVENANCE. Two of the four indices were read back from the venue and two
+ * were chosen (`marketIndexVerified` in `deployments/46630.json`, mirrored in
+ * `MARKET_INDEX_VERIFIED`). `Vault.marketIndexVerified` carries that per row so four indices
+ * cannot be presented as four equally confirmed indices.
  *
  * BUFFER vs ACCRUAL. `backing.bufferHeld` (a real ERC-20 balance) and
  * `backing.accrualClaimedUnverified` (an attester's claim that nothing on-chain verifies)
@@ -82,6 +94,7 @@ import {
   MAX_ATTESTATION_AGE_SEC,
   aggregateTotals,
   chainVaultMeta,
+  isMarketIndexVerified,
   useLiveVaults,
   useUserBalances,
   useVaultConfigs,
@@ -95,11 +108,27 @@ import {
 /* ------------------------------------------------------------------ types */
 
 /**
- * `uspy` is deployed (market 26) and was missing from this union; the other three are in
- * the union and are NOT deployed. Both halves of that mismatch are represented here on
- * purpose — see the file header.
+ * Ids with no contracts on chain 46630 that the UI nevertheless shows.
+ *
+ * `never` today: every id in the list is deployed. It is a named type rather than nothing at
+ * all because that is the seam — widen this, not `VaultId`, when the roadmap gets a row
+ * before it gets a vault, and the compiler will walk you through `UNROUTED`, `positions`
+ * and every consumer that has to decide what to render without figures.
+ *
+ * The id that used to live here was `uspx`, and it was removed because no SPX perpetual
+ * exists on the venue — see the file header. An id belongs here only if a perp market
+ * behind it plausibly will.
  */
-export type VaultId = "utsla" | "uspy" | "unvda" | "uspx" | "uqqq";
+export type UnroutedVaultId = never;
+
+/**
+ * Every id the dashboard knows: the deployed mirrors, plus the unrouted ids above.
+ *
+ * `ChainVaultId` is derived from the generated address book, so this union widens on its own
+ * when a mirror is added to `contracts.ts` — and `isChainVaultId` stays the only door from
+ * here into the write path, whether or not it currently rejects anything.
+ */
+export type VaultId = ChainVaultId | UnroutedVaultId;
 /**
  * `staking` and `keepers` are deliberately absent: neither an insurance-staking contract
  * nor a keeper-rewards mechanism is deployed on chain 46630, and the views that used to
@@ -116,6 +145,9 @@ export type Timeframe = "1H" | "24H" | "7D" | "ALL";
  * `LIVE` — a vault, certificate and oracle exist on chain 46630 and the figures are read
  * from them. `SOON` — on the published roadmap for a later phase. `UNPLANNED` — no
  * contracts and no announced plan.
+ *
+ * Every vault is `LIVE` today; the other two are kept for the reason given in the file
+ * header. Neither may be applied to an asset the venue has no perp market for.
  */
 export type VaultStatus = "LIVE" | "SOON" | "UNPLANNED";
 
@@ -186,6 +218,18 @@ export interface Vault {
   /** True while a routed vault's first multicall is still in flight. */
   loading?: boolean;
 
+  /**
+   * Was this mirror's venue `marketIndex` READ from the venue, or CHOSEN? `null` when the
+   * vault is not routed, because an undeployed vault has no index at all.
+   *
+   * Nullable and non-optional so that every construction site has to answer it, exactly
+   * like the figures below. Wherever the market index is rendered, this has to be rendered
+   * with it: uTSLA 16 and uNVDA 15 were read from the venue's `api/v1/orderBookDetails`,
+   * uSPY 26 and uQQQ 27 were placeholders, and showing all four the same way asserts a
+   * confirmation that only half of them have. See `MARKET_INDEX_VERIFIED`.
+   */
+  marketIndexVerified: boolean | null;
+
   /** `oracle.px()`. `null` when it reverted (see `priceUnavailable`) or is not routed. */
   price: number | null;
   /** `oracle.px()` reverted: the oracle is stale, deviant or badly fed. A state, not an error. */
@@ -252,13 +296,18 @@ export function isRouted(v: Vault): boolean {
 /**
  * Narrows a UI vault id to one the chain layer will accept.
  *
- * `VaultId` has five members and only two of them exist on chain 46630, so anything
- * heading for `useCertActions`, `useVaultConfig` or an address lookup has to pass through
- * here first. That is the point: the write path cannot be handed `uqqq` by accident.
+ * Anything heading for `useCertActions`, `useVaultConfig` or an address lookup passes
+ * through here, so the write path cannot be handed an id with no vault behind it. Every id
+ * happens to pass today — `UnroutedVaultId` is `never` — and the guard is kept anyway,
+ * checked against the generated `CHAIN_VAULT_IDS` rather than a literal pair, so it is
+ * correct by construction for whatever the address book holds next.
  */
 export function isChainVaultId(id: VaultId): id is ChainVaultId {
-  return id === "utsla" || id === "uspy";
+  return (CHAIN_VAULT_IDS as readonly string[]).includes(id);
 }
+
+/** How many mirrors the generated address book routes. Never write this number by hand. */
+export const ROUTED_VAULT_COUNT = CHAIN_VAULT_IDS.length;
 
 /* The `Flow` shape is gone too, and would have been wrong for real data: it required a
  * non-null `price` on every row (`RedeemClaimed` carries none), carried `feeBps` when the
@@ -291,7 +340,8 @@ export interface Totals {
   accrualClaimedUnverified: number;
   /**
    * `margin / notional` as a percent — `null` when the attested notional is ZERO, which is
-   * the live state of both routed vaults. A zero denominator is undefined, not 46,054%.
+   * the arrival state of every mirror with no supply. A zero denominator is undefined, not
+   * 46,054%.
    */
   ratio: number | null;
   /** Backing over obligation, percent. The solvency test - see `aggregateTotals`. */
@@ -310,33 +360,25 @@ export interface Totals {
 
 /* -------------------------------------------------------- vault assembly */
 
-/** The three vaults with no contracts. Figures are `null`, not `0`. */
-const UNROUTED: { id: VaultId; name: string; full: string; img: string; status: VaultStatus }[] = [
-  {
-    id: "uspx",
-    name: "uSPX",
-    full: "S&P 500 Index Certificate",
-    img: "/cert-plate-uspx.jpg",
-    status: "SOON",
-  },
-  {
-    id: "uqqq",
-    name: "uQQQ",
-    full: "Nasdaq 100 Certificate",
-    img: "/cert-plate-uqqq.jpg",
-    status: "SOON",
-  },
-  {
-    id: "unvda",
-    name: "uNVDA",
-    full: "Nvidia Certificate",
-    img: "/cert-plate-unvda.jpg",
-    status: "UNPLANNED",
-  },
-];
+/**
+ * Vaults shown with no contracts behind them. Figures would be `null`, not `0`.
+ *
+ * EMPTY. uQQQ and uNVDA left it by being deployed; uSPX left it by being impossible — the
+ * venue has no SPX perp, so the row was advertising a vault with nothing to hedge against
+ * (file header). Nothing is rendered in its place: a placeholder row for an asset the
+ * protocol cannot ship would carry the same promise under a vaguer name.
+ *
+ * `UnroutedVaultId` is `never`, so this array's element type has an unsatisfiable `id` and
+ * the compiler will refuse any entry until that type is widened. Widen it deliberately.
+ */
+const UNROUTED: { id: UnroutedVaultId; name: string; full: string; img: string; status: VaultStatus }[] =
+  [];
 
 /** Every numeric field absent. The single most important object in this file. */
-function emptyFigures(): Omit<Vault, "id" | "name" | "full" | "img" | "imgPlaceholder" | "status"> {
+function emptyFigures(): Omit<
+  Vault,
+  "id" | "name" | "full" | "img" | "imgPlaceholder" | "status" | "marketIndexVerified"
+> {
   return {
     price: null,
     // Not "unavailable": there is no oracle for this vault at all, which is a different
@@ -372,6 +414,8 @@ function unroutedVault(d: (typeof UNROUTED)[number]): Vault {
     img: d.img,
     imgPlaceholder: false,
     status: d.status,
+    // No vault, so no venue market index to have verified or chosen.
+    marketIndexVerified: null,
     ...emptyFigures(),
   };
 }
@@ -386,6 +430,8 @@ function loadingVault(id: ChainVaultId): Vault {
     img: meta.img,
     imgPlaceholder: meta.imgPlaceholder,
     status: "LIVE",
+    // Known from the address book before any read lands — unlike every figure below.
+    marketIndexVerified: isMarketIndexVerified(id),
     ...emptyFigures(),
     loading: true,
   };
@@ -418,7 +464,10 @@ interface DashboardCtx {
   refetch: () => void;
 
   /* ---- vaults ------------------------------------------------------- */
-  /** All five, routed first. Greyed vaults carry no figures. */
+  /**
+   * Every vault the dashboard shows, routed first. Greyed vaults carry no figures.
+   * Length is `MIRRORS.length + UNROUTED.length` — read it, never hardcode a count from it.
+   */
   vaults: Vault[];
   /** Only the routed ones, with the raw bigints for exact maths. */
   liveVaults: LiveVault[];
@@ -603,17 +652,20 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   /* -------------------------------------------------------- user state */
 
-  const positions = useMemo<Record<VaultId, number | null>>(
-    () => ({
-      utsla: connected ? balances.certificates.utsla : null,
-      uspy: connected ? balances.certificates.uspy : null,
-      // No certificate token exists for these three, so there is nothing to hold.
-      unvda: null,
-      uspx: null,
-      uqqq: null,
-    }),
-    [connected, balances.certificates],
-  );
+  /**
+   * Certificate balance per vault. Built from `CHAIN_VAULT_IDS` rather than written out, so
+   * a new mirror's balance appears without an edit here and an id can never be silently
+   * omitted (it would read as `undefined`, which no consumer expects). An id with no
+   * certificate token would be `null` — the `Record<VaultId, …>` type is what forces one of
+   * the two to be chosen for every id.
+   */
+  const positions = useMemo<Record<VaultId, number | null>>(() => {
+    const out = {} as Record<VaultId, number | null>;
+    for (const id of CHAIN_VAULT_IDS) {
+      out[id] = connected ? balances.certificates[id] : null;
+    }
+    return out;
+  }, [connected, balances.certificates]);
 
   const faucet = useMemo(
     () =>

@@ -4,6 +4,7 @@ import { useDashboard } from "./store";
 import { AgeLine, EmptyState, MicroLabel, Panel, PulseDot, Stagger, UnverifiedTag, ViewHeader } from "./ui";
 import { EM_DASH, NO_POSITION, fmtCompactUSD, fmtOrDash } from "./format";
 import { fromBps, fromPrice18 } from "@/chain/units";
+import { BASIS_ON_THIS_DEPLOYMENT } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
 
 /* --------------------------------------------------------------- content */
@@ -262,8 +263,19 @@ export default function RiskView() {
     },
   ];
 
-  /* Parameters: read where a read exists, blank where none does. */
-  const cfgRows = liveVaults.map((v) => ({ id: v.id, name: v.name, cfg: vaultConfig(v.id) }));
+  /* Parameters: read where a read exists, blank where none does. `marketIndexVerified` is
+     the one field here that is NOT a read — it is hand-maintained against the address book
+     (see `MARKET_INDEX_VERIFIED`) — so it travels with the index rather than as a row of
+     its own, and the row says which of the two it is. */
+  const cfgRows = liveVaults.map((v) => ({
+    id: v.id,
+    name: v.name,
+    cfg: vaultConfig(v.id),
+    marketIndexVerified: v.marketIndexVerified,
+  }));
+
+  const verifiedIndexCount = liveVaults.filter((v) => v.marketIndexVerified).length;
+  const unverifiedIndexNames = liveVaults.filter((v) => !v.marketIndexVerified).map((v) => v.name);
 
   const attestations: { label: string; value: string; state: "ok" | "warn" | "unknown" }[] = [
     {
@@ -314,17 +326,36 @@ export default function RiskView() {
           ? "ok"
           : "warn",
     },
+    /* This row used to read "2 / 2 report a basis · ok", which took the oracle's
+     * `singleSource: false` configuration flag as a finding. Every mirror here reports a
+     * basis and every one of them reports 0 bps, because the feed is a ReplayAggregator
+     * this project writes and the same keeper sets the simulator's mark in the same
+     * transaction. It can never be `ok`, whatever the reading. */
     {
-      label: "Independent basis",
+      label: "Basis independence",
       value: liveVaults.length
-        ? `${liveVaults.filter((v) => v.basisKnown).length} / ${liveVaults.length} report a basis`
+        ? `${liveVaults.filter((v) => v.basisKnown).length} / ${liveVaults.length} report a basis — asserted, not measured`
         : EM_DASH,
-      state: liveVaults.length && liveVaults.every((v) => v.basisKnown) ? "ok" : "warn",
+      state: "warn",
+    },
+    /* Hand-maintained against `deployments/46630.json`, not a chain read: the generated
+     * bundle drops the field. Named vaults rather than a bare count, because the fix is
+     * per mirror — re-read `market_id` and redeploy that one. */
+    {
+      label: "Venue market index read back from the venue",
+      value: liveVaults.length
+        ? `${verifiedIndexCount} / ${liveVaults.length}${
+            unverifiedIndexNames.length > 0 ? ` — chosen on ${unverifiedIndexNames.join(", ")}` : ""
+          }`
+        : EM_DASH,
+      state: liveVaults.length === 0 ? "unknown" : verifiedIndexCount === liveVaults.length ? "ok" : "warn",
     },
     {
       label: "Vaults routed on chain 46630",
       value: `${liveVaults.length} / ${vaults.length}`,
-      state: "warn",
+      /* Derived, not a fixed `warn`: the row was pinned amber while two of five were
+         routed and would have stayed amber with every vault live. */
+      state: liveVaults.length === 0 ? "unknown" : liveVaults.length === vaults.length ? "ok" : "warn",
     },
     {
       /* Receipt ids are STILL not enumerable on-chain and there is STILL no
@@ -431,7 +462,13 @@ export default function RiskView() {
                       ],
                       ["Settle band", `${fromBps(row.cfg.settleBandBps).toFixed(2)}%`, "fill vs request price"],
                       ["Target margin", `${fromBps(row.cfg.targetMarginBps).toFixed(2)}%`, "rebalance target"],
-                      ["Venue market index", String(row.cfg.marketIndex), "simulated venue on testnet"],
+                      [
+                        "Venue market index",
+                        String(row.cfg.marketIndex),
+                        row.marketIndexVerified
+                          ? "read back from the venue's market list"
+                          : "CHOSEN, not read back from the venue",
+                      ],
                     ] as [string, string, string][]
                   ).map(([k, v, note]) => (
                     <div
@@ -625,7 +662,16 @@ export default function RiskView() {
             <li>
               <span className="text-white">Basis risk</span>: the oracle price and the venue's mark are different
               numbers. basisBpsChecked() reports the gap when it can compute one, and reports that it cannot when it
-              cannot.
+              cannot. {BASIS_ON_THIS_DEPLOYMENT}
+            </li>
+            <li>
+              <span className="text-white">Venue market index</span>: the market a vault hedges on is a
+              constructor immutable, and {unverifiedIndexNames.length} of the {liveVaults.length}{" "}
+              indices here were chosen rather than read back from the venue's own market list
+              {unverifiedIndexNames.length > 0 ? ` (${unverifiedIndexNames.join(", ")})` : ""}. The
+              testnet simulator creates any index on first use, so nothing misbehaves; against a real
+              venue an unverified index would hedge the wrong market, and the mirror would have to be
+              redeployed rather than reconfigured.
             </li>
             <li>
               <span className="text-white">Single-venue dependency</span>: all exposure sits on one perp venue and its

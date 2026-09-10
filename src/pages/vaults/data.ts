@@ -111,61 +111,33 @@ export const VAULTS: VaultData[] = [
       image: "/testimonial-2.jpg",
     },
   },
-  {
-    slug: "uspx",
-    name: "uSPX",
-    tagline: "The index, as a holdable certificate. Mint it, LP it, lend it, redeem it.",
-    intro:
-      "The uSPX vault will hold a fully backed long on the S&P 500 index perp on Robinhood Chain and mint certificates against it, one token's worth of exposure plus tUSDG margin behind every certificate in circulation.",
-    image: "/vault-uspx.jpg",
-    tags: "Index, Roadmap C2",
-    category: "index",
-    status: "SOON",
-    year: "2026",
-    problem: [
-      "The S&P 500 is the default exposure in traditional markets, and on chain it exists only as a leveraged perp. If you want index beta today, you are managing funding, margin, and a liquidation price on a position you meant to hold for years.",
-      "An index is something you allocate to, not something you babysit. There was no way to hold broad market exposure on Robinhood Chain without running a position desk.",
-    ],
-    approach: [
-      "When the vault deploys, it opens an equivalent long on the index perp the moment you deposit. Delta target 1.0, enforced by a band check on each attested batch and rebalanced permissionlessly: rebalance() is callable by anyone.",
-      FUNDING_PARA,
-    ],
-    stats: [
-      {
-        value: 100,
-        suffix: "%",
-        decimals: 2,
-        caption: "Backing ratio target, hard-coded into the vault's solvency math",
-      },
-      { value: 0, caption: "Conditions that can refuse a redemption — forceExit is gated on nothing. Above the instant cap redemption is queued, not refused." },
-    ],
-    resultsCopy:
-      "Deposit tUSDG, receive uSPX at oracle price in the same transaction. Burn uSPX, receive tUSDG back the same way. Solvency math will be proven on-chain at every attestation from deployment, published with the age of each proof, so none of this requires trusting us.",
-    quote: {
-      text: "A holdable index certificate makes basis trades boring, which is exactly what this market needs. Mint, redeem, keep the peg tight.",
-      name: "",
-      role: "Arbitrageur",
-      image: "/testimonial-3.jpg",
-    },
-    roadmapCopy: "This vault deploys with index certificates in phase C2.",
-  },
+  /* uSPX IS GONE, and it is not coming back.
+   *
+   * The entry here promised a vault that cannot be built: the venue has no SPX perpetual,
+   * so a uSPX mirror would have nothing to hedge against. The live RWA perp markets are
+   * TSLA, NVDA, SPY, QQQ, AAPL, AMZN, MSFT, GOOGL, META, HOOD, PLTR, COIN, MSTR, AMD, INTC,
+   * MU, MRVL, CRCL and SNDK. SPY is the instrument that tracks that index, and uSPY is
+   * deployed and live on chain 46630 — so the exposure this page advertised is available
+   * under a name that exists. No placeholder is left in its place, because a vaguer
+   * placeholder would carry the same promise. Do not add an entry for any asset without a
+   * perp market behind it. */
   {
     slug: "uqqq",
     name: "uQQQ",
     tagline: "The Nasdaq, as a holdable certificate. Mint it, LP it, lend it, redeem it.",
     intro:
-      "The uQQQ vault will hold a fully backed long on the Nasdaq 100 index perp on Robinhood Chain and mint certificates against it, one token's worth of exposure plus tUSDG margin behind every certificate in circulation.",
+      "The uQQQ vault holds a fully backed long on the Nasdaq 100 perp on Robinhood Chain and mints certificates against it, one token's worth of exposure plus tUSDG margin behind every certificate in circulation.",
     image: "/vault-uqqq.jpg",
-    tags: "Index, Roadmap C2",
+    tags: "Index, Mint + Redeem",
     category: "index",
-    status: "SOON",
+    status: "LIVE",
     year: "2026",
     problem: [
       "The Nasdaq 100 is where on chain traders go for tech beta, and every unit of it is a leveraged perp position. Holding it means funding, margin, and a liquidation price on what should be a long term allocation.",
       "Tech beta is a portfolio decision, not an intraday position. On Robinhood Chain it was locked inside an instrument that forces you to trade it like one.",
     ],
     approach: [
-      "When the vault deploys, it opens an equivalent long on the Nasdaq 100 index perp the moment you deposit. Delta target 1.0, enforced by a band check on each attested batch and rebalanced permissionlessly: rebalance() is callable by anyone.",
+      "The vault opens an equivalent long on the Nasdaq 100 perp the moment you deposit. Delta target 1.0, enforced by a band check on each attested batch and rebalanced permissionlessly: rebalance() is callable by anyone.",
       FUNDING_PARA,
     ],
     stats: [
@@ -173,19 +145,18 @@ export const VAULTS: VaultData[] = [
         value: 100,
         suffix: "%",
         decimals: 2,
-        caption: "Backing ratio target, hard-coded into the vault's solvency math",
+        caption: "Backing ratio target, enforced in the vault's solvency math at each attestation",
       },
       { value: 0, caption: "Conditions that can refuse a redemption — forceExit is gated on nothing. Above the instant cap redemption is queued, not refused." },
     ],
     resultsCopy:
-      "Deposit tUSDG, receive uQQQ at oracle price in the same transaction. Burn uQQQ, receive tUSDG back the same way. Solvency math will be proven on-chain at every attestation from deployment, published with the age of each proof, so none of this requires trusting us.",
+      "Deposit tUSDG, receive uQQQ at oracle price in the same transaction. Burn uQQQ, receive tUSDG back the same way. The vault's solvency math is proven on-chain at every attestation and published with the age of that proof, so none of this requires trusting us.",
     quote: {
       text: "The whole desk runs tech beta through perps today. A certificate turns that trade into inventory we can actually hold.",
       name: "",
       role: "DeFi Builder",
       image: "/testimonial-2.jpg",
     },
-    roadmapCopy: "This vault deploys with index certificates in phase C2.",
   },
   {
     slug: "uaapl",

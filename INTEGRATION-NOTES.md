@@ -79,7 +79,7 @@ the same party. It is not evidence about mainnet.
 | Value class | Decimals | Examples |
 | --- | --- | --- |
 | Collateral | **6** | `amountIn`, `amountOut`, `hotBuffer()`, `TestUSDG` balances |
-| Certificate | **18** | `certIn`, `certOut`, `uTSLA`/`uSPY` balances, `supply` |
+| Certificate | **18** | `certIn`, `certOut`, every certificate balance, `supply` |
 | Prices and 18-dec figures | **18** | `px()`, `*Px18`, `notional18`, `buffer18`, `accrual18`, `instantCap18` |
 | Feed answers | **8** | `ReplayAggregator.latestRoundData().answer` |
 | Basis points | 10 000 = 100% | `deltaBps`, `mintFeeBps`, `basisBandBps` |
@@ -129,15 +129,30 @@ elsewhere.
 | TestFaucet | `0x8d2cc305eFC069e32d089Da2E56d61d057AcD1dC` |
 | SolvencyRegistry | `0xC7EDB3563F5b193408a9C3Ad6D7455f3246cD66B` |
 
-| uTSLA — market 16 | uSPY — market 26 |
-| --- | --- |
-| vault `0x76A76B1dbc252C2c17698A9aB0a0143dAabCE9Cc` | vault `0xc640348F977425A7cc4A38f4e4f0CADc69eB5a98` |
-| cert `0xc216b649c6DcDa8f0dA0C202D2611d026D7e6e74` | cert `0x25E1eD7f992C23D5AE025B1216865dE165d02576` |
-| oracle `0xB8195b7447d53349E3E69Bf800d3dD623104CDae` | oracle `0x1Fe58fdA586AbeCe2e8E6b8c8a02C8f40a23e450` |
+Four mirrors, all deployed and routed. `market` is `cfg().marketIndex`; **verified** is whether
+that index was read back from the venue's `api/v1/orderBookDetails` or chosen. Only TSLA 16 and
+NVDA 15 were read back. On the simulator `setMarkPrice()` creates any index implicitly, so an
+unverified index runs clean with no symptom; against a real venue it would hedge the **wrong
+market**, and the mirror must be redeployed, not reconfigured. Source of truth is
+`marketIndexVerified` in `deployments/46630.json`.
+
+| Mirror | market | verified | vault / cert / oracle |
+| --- | --- | --- | --- |
+| uTSLA | 16 | **yes** | `0x76A76B1dbc252C2c17698A9aB0a0143dAabCE9Cc` / `0xc216b649c6DcDa8f0dA0C202D2611d026D7e6e74` / `0xB8195b7447d53349E3E69Bf800d3dD623104CDae` |
+| uSPY | 26 | **no** | `0xc640348F977425A7cc4A38f4e4f0CADc69eB5a98` / `0x25E1eD7f992C23D5AE025B1216865dE165d02576` / `0x1Fe58fdA586AbeCe2e8E6b8c8a02C8f40a23e450` |
+| uQQQ | 27 | **no** | `0x21053C638c3ec96690EBc53392e02062a1A06ae8` / `0x3d3cCc8E11dEC5690F366077ADF74659f064Ef54` / `0x86D13ecD46D7218FCC9B6AF709844D064D657209` |
+| uNVDA | 15 | **yes** | `0x5236d54728671929a25Bc9492D70202c450Db5d0` / `0x35Db6d51D7f69544B0905e23D3774ad38BC31Df9` / `0x30919d07FC83a6BA27426a03778790F03142639A` |
 
 **Do not wire `LighterSim` or the `ReplayAggregator`s.** Read prices through `CertOracle`, which
 applies the staleness, deviation and basis guards; reading the aggregator directly bypasses all
 three. Both are simulator scaffolding that disappears when the real venue arrives.
+
+**And do not read a 0 bps basis as two sources agreeing.** There is no Chainlink on chain 46630,
+so every `CertOracle.feed` IS one of those `ReplayAggregator`s, and the keeper that writes it sets
+the simulator's mark in the same transaction. `basisBpsChecked()` therefore answers
+`(true, 0)` on every mirror at all times — the `singleSource: false` case the deployment
+checklist calls out, a healthy basis asserted and never computed. It shows the guard is wired;
+it is not price validation, on any mirror.
 
 ---
 
@@ -317,6 +332,8 @@ Read these from `vault.cfg()` and the oracle rather than hardcoding. Recorded he
 | `depthBps` | 1 000 | vault ≤ 10% of open interest |
 | uTSLA cap | `90_000e18` | **$90 000** |
 | uSPY cap | `5_000_000e18` | **$5 000 000** |
+| uQQQ cap | `3_050_000e18` | **$3 050 000** |
+| uNVDA cap | `311_000e18` | **$311 000** |
 
 ---
 

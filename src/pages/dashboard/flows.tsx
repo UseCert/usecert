@@ -12,7 +12,7 @@ import {
 import { cn } from "@/lib/utils";
 import { flowKindLabel, useFlows, type FlowAttribution, type FlowKind } from "@/chain/useFlows";
 import { EM_DASH, fmtNum, fmtUSD, timeAgo, truncHash } from "./format";
-import { useDashboard } from "./store";
+import { ROUTED_VAULT_COUNT, useDashboard } from "./store";
 import { EmptyState, ExplorerSourceNote, IndexStaleNotice, IndexUnavailable } from "./ui";
 
 /*
@@ -195,10 +195,12 @@ export function RecentFlows({ limit = 5, onViewAll }: { limit?: number; onViewAl
           /* Leads with provenance, then says whose flows are on screen. The provenance
              half is not optional copy: these rows are a third-party HTTP index, and the
              note is the only thing on the overview that says so. */
+          /* The vault count comes from the address book, never from a literal: "two"
+             was still on screen after the deployment grew to four. */
           detail={`${history.sourceDetail} ${
             personal
-              ? "Showing your flows on the two routed vaults, newest first."
-              : "Showing flows across the two routed vaults, newest first — connect a wallet to filter this to your own."
+              ? `Showing your flows on the ${ROUTED_VAULT_COUNT} routed vaults, newest first.`
+              : `Showing flows across the ${ROUTED_VAULT_COUNT} routed vaults, newest first — connect a wallet to filter this to your own.`
           }`}
           url={history.sourceUrl}
           fetchedAt={history.fetchedAt}

@@ -8,7 +8,7 @@
  * (INTEGRATION-NOTES.md §0.4):
  *
  *   collateral   6 dp   amountIn, amountOut, hotBuffer(), TestUSDG balances
- *   certificate 18 dp   certIn, certOut, uTSLA/uSPY balances, solvency.supply
+ *   certificate 18 dp   certIn, certOut, every certificate balance, solvency.supply
  *   price / *18 18 dp   px(), fillPx18, notional18, margin18, buffer18, accrual18,
  *                       instantCap18, bufferCapacity18
  *   feed answer  8 dp   ReplayAggregator.latestRoundData().answer
@@ -80,7 +80,7 @@ export function toCollateral(input: string): bigint {
 /* ───────────────────────────────────────────────── certificate domain — 18 decimals */
 
 /**
- * Certificate units (uTSLA / uSPY, 18 dp) → display number.
+ * Certificate units (uTSLA / uSPY / uQQQ / uNVDA, 18 dp) → display number.
  * Use for: `certificate.totalSupply()`, `certificate.balanceOf`, `certOut`,
  * `solvency.supply`.
  * DISPLAY ONLY.

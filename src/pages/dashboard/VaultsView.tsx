@@ -16,6 +16,7 @@ import {
 } from "./ui";
 import { EM_DASH, fmtCompactUSD, fmtNum, fmtOrDash, fmtUSD } from "./format";
 import { fromBps, fromPrice18 } from "@/chain/units";
+import { MARKET_INDEX_UNVERIFIED_NOTE } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
 
 function MiniStat({
@@ -381,7 +382,17 @@ export default function VaultsView() {
                       ["Instant cap (mint/redeem fork)", fmtUSD(fromPrice18(cfg.instantCap18), 2)],
                       ["Settle band", `${fromBps(cfg.settleBandBps).toFixed(2)}%`],
                       ["Target margin", `${fromBps(cfg.targetMarginBps).toFixed(2)}%`],
-                      ["Venue market index", String(cfg.marketIndex)],
+                      /* The index is read from `cfg()`; whether it was ever CHECKED
+                         against the venue's own market list is not on-chain at all, so it
+                         travels beside the number rather than being implied by it. */
+                      [
+                        "Venue market index",
+                        `${cfg.marketIndex} · ${
+                          vault.marketIndexVerified
+                            ? "read back from the venue"
+                            : "chosen, not venue-verified"
+                        }`,
+                      ],
                       ["Collateral decimals", "6 (tUSDG)"],
                       [
                         "Max attestation age",
@@ -398,6 +409,11 @@ export default function VaultsView() {
                     </div>
                   ))}
                 </div>
+              )}
+              {vault.marketIndexVerified === false && (
+                <p className="mt-4 font-mono text-[10px] leading-[1.7] uppercase tracking-[0.06em] text-warn/80">
+                  {MARKET_INDEX_UNVERIFIED_NOTE}
+                </p>
               )}
             </Panel>
           </Stagger>

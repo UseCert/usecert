@@ -154,9 +154,9 @@ function CornerDots() {
  * This used to be a "Live vault snapshot · Powers the public dashboard" panel showing an
  * oracle price, a circulating supply, a backing ratio and a delta. None of the four came
  * from a contract: they were literals in `data.ts` with a `Math.random()` jitter on the
- * price and a pulsing "Live" dot next to them, and the same panel rendered for uNVDA,
- * which has no vault, no certificate and no oracle. A number on a public page has to
- * trace to a chain read, so the figures are gone and the dashboard is linked instead.
+ * price and a pulsing "Live" dot next to them, and the same panel rendered for every
+ * vault on the roadmap, deployed or not. A number on a public page has to trace to a chain
+ * read, so the figures are gone and the dashboard is linked instead.
  */
 export function MediaBlock({ vault }: { vault: VaultData }) {
   const live = vault.status === "LIVE";

@@ -12,10 +12,14 @@ export interface VaultCardData {
   year: string;
 }
 
+/* Three live vaults. The third card was `uSPX`, tagged "Roadmap C2" — a certificate that
+ * cannot exist, because the venue has no SPX perpetual for a vault to hedge against. uQQQ
+ * replaces it: also an index certificate, and actually deployed on chain 46630. uSPY tracks
+ * the S&P 500 and is live too, so nothing the uSPX card promised is unavailable. */
 export const HOME_VAULTS: VaultCardData[] = [
   { slug: "utsla", name: "uTSLA", image: "/vault-utsla.jpg", tags: "Tesla Certificate, Mint + Redeem", year: "2026" },
   { slug: "unvda", name: "uNVDA", image: "/vault-unvda.jpg", tags: "Nvidia Certificate, Mint + Redeem", year: "2026" },
-  { slug: "uspx", name: "uSPX", image: "/vault-uspx.jpg", tags: "Index Certificate, Roadmap C2", year: "2026" },
+  { slug: "uqqq", name: "uQQQ", image: "/vault-uqqq.jpg", tags: "Index Certificate, Mint + Redeem", year: "2026" },
 ];
 
 /** Card skins alternate exactly like the template work cards: light grey, deep green, light grey. */

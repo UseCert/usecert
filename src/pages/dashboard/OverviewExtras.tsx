@@ -4,6 +4,7 @@ import { useDashboard } from "./store";
 import { AgeLine, EmptyState, Flash, MicroLabel, Panel, PulseDot, UnverifiedTag } from "./ui";
 import { EM_DASH, fmtCompactUSD, fmtNum, fmtOrDash, fmtUSD } from "./format";
 import { fromBps, fromPrice18 } from "@/chain/units";
+import { BASIS_ON_THIS_DEPLOYMENT, MARKET_INDEX_UNVERIFIED_NOTE } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
 
 /* --------------------------------------------------------- live ticker */
@@ -212,9 +213,9 @@ export function NetworkStrip() {
   const history = useFlows();
 
   const mintable = liveVaults.filter((v) => v.mintAllowed).length;
-  const basisKnownCount = liveVaults.filter((v) => v.basisKnown).length;
+  const verifiedIndexCount = liveVaults.filter((v) => v.marketIndexVerified).length;
 
-  const stats: { label: string; value: string; tone?: "warn" }[] = [
+  const stats: { label: string; value: string; tone?: "warn"; title?: string }[] = [
     { label: "Block height", value: blockKnown ? block.toLocaleString("en-US") : EM_DASH },
     { label: "Chain", value: "46630 · testnet" },
     { label: "Vaults routed", value: `${liveVaults.length}/${vaults.length}` },
@@ -228,9 +229,27 @@ export function NetworkStrip() {
       value: liveVaults.length ? `${mintable}/${liveVaults.length}` : EM_DASH,
       ...(liveVaults.length && mintable < liveVaults.length ? { tone: "warn" as const } : {}),
     },
+    /* This cell used to read "Independent basis 2/2", which was the oracle's own
+     * `singleSource` flag repeated back as if it were a finding. It is not: the feed is a
+     * ReplayAggregator we write and the mark is set in the same transaction, so the basis
+     * is zero by construction on every mirror. The honest cell is the one that says the
+     * basis is asserted, and it stays warn-toned so it cannot be read as a green check. */
     {
-      label: "Independent basis",
-      value: liveVaults.length ? `${basisKnownCount}/${liveVaults.length}` : EM_DASH,
+      label: "Basis independence",
+      value: liveVaults.length ? "asserted, not measured" : EM_DASH,
+      tone: "warn",
+      title: BASIS_ON_THIS_DEPLOYMENT,
+    },
+    /* Two of the four market indices were never read back from the venue. Harmless on the
+     * simulator, a wrong-market hedge anywhere else — so it gets a cell rather than a
+     * comment. */
+    {
+      label: "Venue market index verified",
+      value: liveVaults.length ? `${verifiedIndexCount}/${liveVaults.length}` : EM_DASH,
+      ...(liveVaults.length && verifiedIndexCount < liveVaults.length
+        ? { tone: "warn" as const }
+        : {}),
+      title: MARKET_INDEX_UNVERIFIED_NOTE,
     },
     {
       label: "Flow index (3rd party)",
@@ -244,9 +263,9 @@ export function NetworkStrip() {
   ];
 
   return (
-    <div className="mt-3 grid grid-cols-2 gap-px border hairline-dark bg-white/5 sm:grid-cols-3 xl:grid-cols-7">
+    <div className="mt-3 grid grid-cols-2 gap-px border hairline-dark bg-white/5 sm:grid-cols-4 xl:grid-cols-8">
       {stats.map((s) => (
-        <div key={s.label} className="bg-abyss px-4 py-3">
+        <div key={s.label} className="bg-abyss px-4 py-3" title={s.title}>
           <p className="font-mono text-[9px] uppercase tracking-[0.1em] text-white-60/70">{s.label}</p>
           <p
             className={cn(
@@ -272,9 +291,26 @@ export function NetworkStrip() {
  * half is the point: `known === false` means there is NO independent basis to compute,
  * which is categorically different from a basis of zero. Rendering only the number would
  * turn "unverifiable" into "perfect".
+ *
+ * AND THE NUMBER ITSELF NEEDS THE SAME TREATMENT ON THIS DEPLOYMENT. Every mirror answers
+ * `known = true, bps = 0`, and none of that is a measurement: there is no Chainlink on
+ * chain 46630, so each `CertOracle` reads a `ReplayAggregator` this project writes, and the
+ * keeper writes the simulator's mark in the same transaction. `0.00%` on all four rows is
+ * one number compared with itself. `BASIS_ON_THIS_DEPLOYMENT` is on screen under the table
+ * for that reason, and the column header says "asserted" rather than letting four green
+ * zeroes read as four independent confirmations. This applies to uTSLA as much as to the
+ * two new mirrors — the point is not which mirror is weaker, it is that none of them is
+ * evidence of agreement.
+ *
+ * The market index is in the table too, with whether it was READ from the venue or CHOSEN.
+ * uSPY 26 and uQQQ 27 are placeholders; only uTSLA 16 and uNVDA 15 were read back. It is
+ * harmless on a simulator that creates any index implicitly and it is a wrong-market hedge
+ * anywhere else, so it is published rather than filed.
  */
 export function PegMonitor() {
   const { liveVaults, vaultConfig, maxAttestationAgeSec } = useDashboard();
+
+  const unverifiedIndexNames = liveVaults.filter((v) => !v.marketIndexVerified).map((v) => v.name);
 
   return (
     <Panel className="mt-3 overflow-x-auto">
@@ -287,12 +323,23 @@ export function PegMonitor() {
       {liveVaults.length === 0 ? (
         <EmptyState className="border-0" title="No chain data yet" detail="Reading chain 46630…" />
       ) : (
-        <table className="w-full min-w-[760px] font-mono text-[12px]">
+        <table className="w-full min-w-[900px] font-mono text-[12px]">
           <thead>
             <tr className="border-b hairline-dark text-left text-[10px] uppercase tracking-[0.08em] text-white-60">
               <th className="px-5 py-3 font-medium">Vault</th>
               <th className="px-3 py-3 text-right font-medium">Oracle price</th>
-              <th className="px-3 py-3 text-right font-medium">Basis (checked)</th>
+              <th
+                className="px-3 py-3 text-right font-medium"
+                title={BASIS_ON_THIS_DEPLOYMENT}
+              >
+                Basis (asserted)
+              </th>
+              <th
+                className="hidden px-3 py-3 text-right font-medium lg:table-cell"
+                title="cfg().marketIndex — the venue market this vault hedges on — and whether that index was read back from the venue's own market list or chosen."
+              >
+                Venue market
+              </th>
               <th className="px-3 py-3 text-right font-medium">Mint / redeem fee</th>
               <th className="hidden px-3 py-3 text-right font-medium md:table-cell">Instant cap</th>
               <th className="hidden px-3 py-3 text-right font-medium lg:table-cell">Proven</th>
@@ -314,10 +361,16 @@ export function PegMonitor() {
                       <Flash value={v.price} format={(n) => fmtUSD(n)} />
                     )}
                   </td>
-                  {/* known === false is NOT a basis of zero. */}
+                  {/* known === false is NOT a basis of zero. And on this deployment
+                      known === true is not evidence either: the feed and the mark are
+                      written by the same keeper in the same transaction, so the number is
+                      rendered without a health colour and carries the caveat. */}
                   <td className="px-3 py-3.5 text-right tabular-nums">
                     {v.basisKnown && v.basisBps !== null ? (
-                      <span className="text-white">{v.basisBps.toFixed(2)}%</span>
+                      <span className="text-white-60" title={BASIS_ON_THIS_DEPLOYMENT}>
+                        {v.basisBps.toFixed(2)}%{" "}
+                        <span className="text-warn/70">· asserted</span>
+                      </span>
                     ) : (
                       <span
                         className="text-warn"
@@ -325,6 +378,25 @@ export function PegMonitor() {
                       >
                         no independent basis
                       </span>
+                    )}
+                  </td>
+                  {/* The index is read from cfg(); whether it was ever CHECKED against the
+                      venue is not on-chain, so it travels beside the number. */}
+                  <td className="hidden px-3 py-3.5 text-right tabular-nums lg:table-cell">
+                    {cfg ? (
+                      <span
+                        className={v.marketIndexVerified ? "text-white-60" : "text-warn"}
+                        title={
+                          v.marketIndexVerified
+                            ? "This index was read back from the venue's api/v1/orderBookDetails."
+                            : MARKET_INDEX_UNVERIFIED_NOTE
+                        }
+                      >
+                        {cfg.marketIndex}
+                        {v.marketIndexVerified ? " · verified" : " · chosen"}
+                      </span>
+                    ) : (
+                      EM_DASH
                     )}
                   </td>
                   <td className="px-3 py-3.5 text-right tabular-nums text-white-60">
@@ -364,13 +436,25 @@ export function PegMonitor() {
       <p className="border-t hairline-dark px-5 py-3 font-mono text-[10px] leading-[1.6] uppercase tracking-[0.06em] text-white-60">
         Prices are read through CertOracle, which applies the staleness, deviation and basis guards; the
         aggregator is never read directly. Minting paused means the oracle is unhealthy — redemption is
-        unaffected. Supply across routed vaults:{" "}
+        unaffected. Supply across the {liveVaults.length} routed vaults:{" "}
         {fmtNum(
           liveVaults.reduce((s, v) => s + (v.supply ?? 0), 0),
           2,
         )}{" "}
         certificates.
       </p>
+      {/* The one sentence that stops a column of green zeroes from reading as four
+          independent price confirmations. It is a limitation of the testnet feed on EVERY
+          mirror, so it is stated once for all of them rather than badged per row. */}
+      <p className="border-t hairline-dark px-5 py-3 font-mono text-[10px] leading-[1.6] uppercase tracking-[0.06em] text-warn/80">
+        {BASIS_ON_THIS_DEPLOYMENT}
+      </p>
+      {unverifiedIndexNames.length > 0 && (
+        <p className="border-t hairline-dark px-5 py-3 font-mono text-[10px] leading-[1.6] uppercase tracking-[0.06em] text-warn/80">
+          Venue market index not read back from the venue on {unverifiedIndexNames.join(", ")} —{" "}
+          {MARKET_INDEX_UNVERIFIED_NOTE}
+        </p>
+      )}
     </Panel>
   );
 }

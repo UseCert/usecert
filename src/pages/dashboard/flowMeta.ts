@@ -1,13 +1,18 @@
 import type { VaultId } from "./store";
 
 /**
- * Per-vault presentation metadata.
+ * Per-vault presentation metadata, one entry per `VaultId`.
  *
- * `uspy` is here because it is deployed (market 26). It points at `/logo.png` with
- * `imgPlaceholder: true` because there is no `cert-plate-uspy.jpg` in `public/` — putting
- * the uSPX plate under a uSPY heading would dress one certificate in another's artwork.
- * The other three ids have no contracts on chain 46630; they are kept so the roadmap
- * stays visible, but they never carry figures.
+ * All four ids are deployed mirrors on chain 46630. `uspy` points at `/logo.png` with
+ * `imgPlaceholder: true` because there is no `cert-plate-uspy.jpg` in `public/`, and
+ * borrowing another certificate's plate would dress one certificate in another's artwork.
+ * uQQQ and uNVDA do have their own plates.
+ *
+ * `uspx` used to be here and is gone: the venue has no SPX perpetual, so that certificate
+ * cannot exist. Its plate (`/cert-plate-uspx.jpg`) is deliberately not reused for anything.
+ *
+ * `Record<VaultId, …>` is the guard — a new id does not compile until it has an entry, so
+ * no flow row can fall back to a blank name or someone else's artwork.
  */
 export const FLOW_META: Record<
   VaultId,
@@ -25,22 +30,16 @@ export const FLOW_META: Record<
     img: "/logo.png",
     imgPlaceholder: true,
   },
-  unvda: {
-    name: "uNVDA",
-    full: "Nvidia Certificate",
-    img: "/cert-plate-unvda.jpg",
-    imgPlaceholder: false,
-  },
-  uspx: {
-    name: "uSPX",
-    full: "S&P 500 Index Certificate",
-    img: "/cert-plate-uspx.jpg",
-    imgPlaceholder: false,
-  },
   uqqq: {
     name: "uQQQ",
     full: "Nasdaq 100 Certificate",
     img: "/cert-plate-uqqq.jpg",
+    imgPlaceholder: false,
+  },
+  unvda: {
+    name: "uNVDA",
+    full: "Nvidia Certificate",
+    img: "/cert-plate-unvda.jpg",
     imgPlaceholder: false,
   },
 };
