@@ -1,0 +1,54 @@
+[Unit]
+Description=UseCert keeper stack (attester, batch advancer, feed keeper)
+Documentation=file:///opt/usecert/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=usecert
+Group=usecert
+WorkingDirectory=/opt/usecert
+
+# Keys live here, root-owned 0600. NOT in this unit file: unit files are world-readable,
+# and `systemctl cat` would print every private key to anyone who can run it.
+EnvironmentFile=/etc/usecert/keeper.env
+Environment=USECERT_HOME=/opt/usecert
+Environment=FOUNDRY_BIN=/opt/usecert/.foundry/bin
+
+ExecStart=/opt/usecert/deploy/bin/usecert-keepers.sh
+
+# THE SINGLE-INSTANCE GUARANTEE. Two keeper loops sign with the same keys and race nonces -
+# measured 19 failures in 13 iterations with two alive. systemd will not start a second copy of
+# a unit, which is the whole reason this moved off a hand-rolled lockfile.
+Restart=always
+RestartSec=10
+# If it dies 5 times in 5 minutes something is wrong that restarting will not fix; stop and alert
+# rather than hammer the RPC.
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# The attester's liveness budget is 300s (maxAttestationAgeSec). A hung forge must not sit
+# there silently burning it.
+TimeoutStopSec=30
+KillMode=mixed
+
+# Hardening. The keeper needs network, the repo, and nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/usecert
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+
+StandardOutput=append:/var/log/usecert/keeper.log
+StandardError=append:/var/log/usecert/keeper.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,38 @@
+[Unit]
+Description=UseCert front-end (TanStack Start under Node)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=usecert
+Group=usecert
+WorkingDirectory=/opt/usecert-web
+
+# THE PRESET THAT MAKES THIS RUN AT ALL. Built with NITRO_PRESET=node-server. Without it, the
+# Lovable vite config's `defaultPreset: "cloudflare-module"` fires on a bare host - std-env
+# detects no provider, nothing matches, and the fallback emits a Cloudflare Worker bundle that
+# Node cannot execute. Verified in nitro: `preset = configOverrides.preset || NITRO_PRESET
+# || SERVER_PRESET`. See deploy/README.md.
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOST=127.0.0.1
+ExecStart=/usr/bin/node /opt/usecert-web/.output/server/index.mjs
+
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/usecert-web
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=append:/var/log/usecert/web.log
+StandardError=append:/var/log/usecert/web.log
+
+[Install]
+WantedBy=multi-user.target

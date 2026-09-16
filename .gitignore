@@ -8,3 +8,6 @@ cache/
 broadcast/
 security/snapshots/
 .superpowers/
+
+# Agent worktrees - local scratch, not repo content
+.claude/
