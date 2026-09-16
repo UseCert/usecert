@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
 /// @notice Minimal surface of Lighter's ZkLighter contract that UseCert calls.

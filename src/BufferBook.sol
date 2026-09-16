@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
 /// @notice Per-asset ACCRUAL LEDGER for funding, execution variance and realised basis, with
