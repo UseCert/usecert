@@ -51,7 +51,7 @@ export default function Faq() {
               viewport={{ once: true }}
               transition={{ duration: 0.6, ease: EASE }}
             >
-              <SwapButton label="Ask on Telegram" href="https://t.me/usecert" variant="black" />
+              <SwapButton label="Ask on Telegram" href="https://t.me/usecertonchain" variant="black" />
             </motion.div>
           </div>
           <motion.div

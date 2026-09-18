@@ -192,7 +192,7 @@ export function CtaBand({ vault }: { vault: VaultData }) {
             <>
               <SwapButton label={`Mint ${vault.name}`} variant="primary" disabled title="Deploys in phase C2" />
               <a
-                href="https://t.me/usecert"
+                href="https://t.me/usecertonchain"
                 target="_blank"
                 rel="noreferrer"
                 className="group inline-flex items-center gap-2 text-[13px] font-semibold uppercase tracking-[0.08em] text-white transition-colors hover:text-green-bright"

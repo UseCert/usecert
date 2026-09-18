@@ -14,7 +14,7 @@ const PROTOCOL_DISCLAIMER =
   "Certificates are synthetic instruments backed by on chain perp positions and tUSDG margin. No dividends, no shareholder rights. Not available where synthetic equity exposure is restricted. UseCert is infrastructure, not investment advice.";
 
 const CONTACT_LINE =
-  "For any questions about this document, reach the team on X (x.com/usecert) or Telegram (t.me/usecert).";
+  "For any questions about this document, reach the team on X (x.com/use_cert) or Telegram (t.me/usecertonchain).";
 
 const DOCS: Record<LegalDoc, { title: string; updated: string; sections: LegalSection[] }> = {
   "privacy-policy": {

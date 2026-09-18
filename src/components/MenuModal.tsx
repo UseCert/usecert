@@ -130,11 +130,11 @@ export default function MenuModal({
 
               <p className="mt-8 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">Community</p>
               <div className="mt-3 flex flex-col gap-1.5 font-mono text-[13px]">
-                <a href="https://x.com/usecert" target="_blank" rel="noreferrer" className="text-white-60 transition-colors hover:text-green-bright">
-                  x.com/usecert
+                <a href="https://x.com/use_cert" target="_blank" rel="noreferrer" className="text-white-60 transition-colors hover:text-green-bright">
+                  x.com/use_cert
                 </a>
-                <a href="https://t.me/usecert" target="_blank" rel="noreferrer" className="text-white-60 transition-colors hover:text-green-bright">
-                  t.me/usecert
+                <a href="https://t.me/usecertonchain" target="_blank" rel="noreferrer" className="text-white-60 transition-colors hover:text-green-bright">
+                  t.me/usecertonchain
                 </a>
               </div>
 

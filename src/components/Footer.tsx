@@ -53,11 +53,11 @@ export default function Footer() {
             <div>
               <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">Community</p>
               <div className="mt-3 flex flex-col gap-1.5 font-mono text-[13px]">
-                <a href="https://x.com/usecert" target="_blank" rel="noreferrer" className="text-white transition-colors hover:text-green-bright">
-                  x.com/usecert
+                <a href="https://x.com/use_cert" target="_blank" rel="noreferrer" className="text-white transition-colors hover:text-green-bright">
+                  x.com/use_cert
                 </a>
-                <a href="https://t.me/usecert" target="_blank" rel="noreferrer" className="text-white transition-colors hover:text-green-bright">
-                  t.me/usecert
+                <a href="https://t.me/usecertonchain" target="_blank" rel="noreferrer" className="text-white transition-colors hover:text-green-bright">
+                  t.me/usecertonchain
                 </a>
                 <a href="https://github.com/usecert" target="_blank" rel="noreferrer" className="text-white transition-colors hover:text-green-bright">
                   github.com/usecert
@@ -86,8 +86,8 @@ export default function Footer() {
               just a certificate in your wallet.
             </p>
             <div className="mt-10 grid gap-3 sm:grid-cols-2">
-              <SwapButton label="Follow on X" href="https://x.com/usecert" variant="white" icon={<XIcon width={14} height={14} />} className="[&>span]:w-full" />
-              <SwapButton label="Join Telegram" href="https://t.me/usecert" variant="white" icon={<TelegramIcon width={14} height={14} />} className="[&>span]:w-full" />
+              <SwapButton label="Follow on X" href="https://x.com/use_cert" variant="white" icon={<XIcon width={14} height={14} />} className="[&>span]:w-full" />
+              <SwapButton label="Join Telegram" href="https://t.me/usecertonchain" variant="white" icon={<TelegramIcon width={14} height={14} />} className="[&>span]:w-full" />
             </div>
             <SwapButton label="Launch App" to="/dashboard" variant="primary" fullWidth className="mt-3" />
             <p className="mt-6 font-mono text-[11px] leading-[1.5] uppercase tracking-[0.06em] text-white-60">

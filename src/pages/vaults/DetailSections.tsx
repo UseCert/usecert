@@ -68,7 +68,7 @@ export function IntroMeta({ vault }: { vault: VaultData }) {
               </Link>
             ) : (
               <a
-                href="https://t.me/usecert"
+                href="https://t.me/usecertonchain"
                 target="_blank"
                 rel="noreferrer"
                 className="group mt-4 inline-flex items-center gap-1.5 text-[13px] font-semibold uppercase tracking-[0.08em] text-white transition-colors hover:text-green-bright"
@@ -213,7 +213,7 @@ export function MediaBlock({ vault }: { vault: VaultData }) {
                 </Link>
               ) : (
                 <a
-                  href="https://t.me/usecert"
+                  href="https://t.me/usecertonchain"
                   target="_blank"
                   rel="noreferrer"
                   className="group inline-flex items-center gap-2 text-[13px] font-semibold uppercase tracking-[0.08em] text-white transition-colors hover:text-green-bright"

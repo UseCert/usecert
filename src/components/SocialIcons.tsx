@@ -42,7 +42,7 @@ export function GithubIcon(props: SVGProps<SVGSVGElement>) {
 }
 
 export const SOCIALS = [
-  { label: "X", href: "https://x.com/usecert", Icon: XIcon },
-  { label: "Telegram", href: "https://t.me/usecert", Icon: TelegramIcon },
+  { label: "X", href: "https://x.com/use_cert", Icon: XIcon },
+  { label: "Telegram", href: "https://t.me/usecertonchain", Icon: TelegramIcon },
   { label: "GitHub", href: "https://github.com/usecert", Icon: GithubIcon },
 ];
