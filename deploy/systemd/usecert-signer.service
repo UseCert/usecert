@@ -1,0 +1,28 @@
+[Unit]
+Description=UseCert attestation signer (signs, never broadcasts)
+After=network-online.target
+
+[Service]
+Type=simple
+User=usecert
+WorkingDirectory=/opt/usecert
+# Only the attester key and the RPC. This process signs; it must never be able to
+# send, so the deployer and governance keys are deliberately not in its environment.
+EnvironmentFile=/etc/usecert/signer.env
+Environment=PATH=/home/usecert/.foundry/bin:/usr/bin:/bin
+ExecStart=/usr/bin/node /opt/usecert/deploy/bin/usecert-signer.mjs
+Restart=always
+RestartSec=10
+Slice=usecert-critical.slice
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/usecert/cache /opt/usecert/out /opt/usecert/broadcast
+
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
