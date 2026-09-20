@@ -1,5 +1,4 @@
 import { motion } from "framer-motion";
-import Scribble from "@/components/Scribble";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -24,7 +23,6 @@ export default function Quote() {
                 alt="Sealed certificate"
                 className="aspect-[4/5] w-full object-cover"
               />
-              <Scribble className="absolute -bottom-6 -right-2 w-[60%] sm:-right-8 sm:w-[70%]" onScroll delay={0.3} />
             </div>
             <div className="mt-8">
               <p className="text-[14px] font-semibold text-white">The Risk Framework</p>
