@@ -24,7 +24,7 @@
  * central promise — do not add a precondition to it.
  */
 import { useCallback, useMemo } from "react";
-import { useWriteContract } from "wagmi";
+import { usePublicClient, useWriteContract } from "wagmi";
 import {
   BaseError,
   ContractFunctionRevertedError,
@@ -32,6 +32,12 @@ import {
 } from "viem";
 
 import { CHAIN_ID } from "./config";
+import {
+  attestationFor,
+  fetchSignedAttestations,
+  isRelayable,
+  REFRESH_AT_AGE_SEC,
+} from "./attestation";
 import {
   CertVaultABI,
   CertificateABI,
@@ -401,6 +407,7 @@ export function useCertActions(id: ChainVaultId): CertActions {
   const mirror = useMemo(() => vaultAddresses(id), [id]);
   const cfg = useVaultConfig(id);
   const { mutateAsync, isPending, error, reset } = useWriteContract();
+  const publicClient = usePublicClient({ chainId: CHAIN_ID });
 
   const approve = useCallback(
     async (amountInput: string): Promise<TxHash> =>
@@ -451,6 +458,53 @@ export function useCertActions(id: ChainVaultId): CertActions {
     [mutateAsync, mirror.vault],
   );
 
+  /**
+   * Relay the attester's signature so this vault's attestation is fresh enough to
+   * mint against. Returns the tx hash if a relay was needed, or null if it was not.
+   *
+   * Called by `mint` rather than exposed as a button: refreshing an attestation is
+   * plumbing, not a user intention, and the only reason a user would ever click it
+   * is to make the next action work.
+   */
+  const refreshAttestationIfStale = useCallback(async (): Promise<TxHash | null> => {
+    if (!publicClient) return null;
+
+    // Read the age first. Most mints need no relay at all - any other user's mint
+    // in the last four minutes already paid for this one's freshness - and a
+    // needless relay is a wallet prompt and a gas charge for nothing.
+    const age = (await publicClient.readContract({
+      address: SHARED.solvencyRegistry,
+      abi: SolvencyRegistryABI,
+      functionName: "ageSec",
+      args: [mirror.vault],
+    })) as bigint;
+    if (age < BigInt(REFRESH_AT_AGE_SEC)) return null;
+
+    const batch = await fetchSignedAttestations();
+    const a = attestationFor(batch, mirror.vault);
+    // No signature available: say nothing here and let the mint revert with the
+    // contract's own `CertVault_AtCapacity`, which is the accurate reason. Inventing
+    // a different error would describe a cause we have not established.
+    if (!a || !isRelayable(a)) return null;
+
+    return mutateAsync({
+      chainId: CHAIN_ID,
+      address: a.registry,
+      abi: SolvencyRegistryABI,
+      functionName: "attestSigned",
+      args: [
+        a.vault,
+        BigInt(a.batchId),
+        BigInt(a.notional18),
+        BigInt(a.margin18),
+        BigInt(a.openInterest18),
+        BigInt(a.observedAt),
+        BigInt(a.deadline),
+        a.attestSig,
+      ],
+    });
+  }, [mutateAsync, mirror.vault, publicClient]);
+
   const mint = useCallback(
     async (amountInput: string): Promise<MintResult> => {
       const cap = cfg?.instantCap18;
@@ -460,13 +514,21 @@ export function useCertActions(id: ChainVaultId): CertActions {
           "Cannot route this mint: vault.cfg() has not loaded, so instantCap18 is unknown.",
         );
       }
+      // Refresh BEFORE routing, and WAIT for it: sending the mint while the relay
+      // is still pending means the mint reads the old attestation and reverts
+      // CertVault_AtCapacity, having charged the user for both.
+      const relayHash = await refreshAttestationIfStale();
+      if (relayHash && publicClient) {
+        await publicClient.waitForTransactionReceipt({ hash: relayHash });
+      }
+
       const amountIn6 = toCollateral(amountInput);
       if (routeMint(amountIn6, cap) === "instant") {
         return { status: "instant", hash: await mintInstant(amountInput) };
       }
       return { status: "requested", hash: await requestMint(amountInput) };
     },
-    [cfg?.instantCap18, mintInstant, requestMint],
+    [cfg?.instantCap18, mintInstant, publicClient, refreshAttestationIfStale, requestMint],
   );
 
   const redeemInstant = useCallback(
