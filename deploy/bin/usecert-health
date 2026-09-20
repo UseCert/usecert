@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Chain-specific health check. Everything else - disk, RAM, services, containers, network -
+# is Netdata's job now, and it does it better with 2755 charts and 217 alarms. Two systems
+# alerting on the same event is how alerting gets ignored, so this covers only what Netdata
+# structurally cannot know about.
+#
+# THE ONE THAT MATTERS: CapacityOracle.maxNotional18 returns 0 once the solvency attestation
+# passes maxAttestationAgeSec (300s), which halts ALL minting while mintAllowed() still reads
+# true. Every outage this deployment has had came through that door. Nothing off-the-shelf
+# understands it.
+set -uo pipefail
+source /etc/usecert/telegram.env 2>/dev/null || true
+TG_TOKEN="${TG_TOKEN:-}"; TG_CHAT="${TG_CHAT:-}"
+SUMMARY="${1:-}"
+BOOK=/opt/usecert/deployments/46630.json
+RPC=https://rpc.testnet.chain.robinhood.com
+export PATH="/home/usecert/.foundry/bin:$PATH"
+P=(); AGES=""
+
+notify() {
+  [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ] && { echo "$1"; return; }
+  curl -s -m 20 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+    -d chat_id="${TG_CHAT}" -d parse_mode=HTML --data-urlencode text="$1" >/dev/null
+}
+
+if [ ! -r "$BOOK" ]; then
+  P+=("address book missing at $BOOK")
+else
+  REG=$(python3 -c "import json;print(json.load(open('$BOOK'))['shared']['solvencyRegistry'])" 2>/dev/null)
+  CAP=$(python3 -c "import json;print(json.load(open('$BOOK'))['shared']['capacityOracle'])" 2>/dev/null)
+  while read -r SYM V O; do
+    [ -z "$V" ] && continue
+    A=$(timeout 20 cast call "$REG" 'ageSec(address)(uint256)' "$V" --rpc-url "$RPC" </dev/null 2>/dev/null | awk '{print $1}')
+    if [ -z "$A" ]; then P+=("$SYM: attestation age unreadable (RPC down?)"); continue; fi
+    AGES="$AGES ${SYM}=${A}s"
+    [ "$A" -ge 240 ] && P+=("<b>$SYM attestation ${A}s</b> of 300s - minting halts at 300")
+    # mintAllowed() is the ORACLE gate; capacity is a SEPARATE gate. A stale attestation
+    # leaves mintAllowed()=true while every mint reverts CertVault_AtCapacity.
+    BC=$(timeout 20 cast call "$V" 'bufferCapacity18()(uint256)' --rpc-url "$RPC" </dev/null 2>/dev/null | awk '{print $1}')
+    MX=$(timeout 20 cast call "$CAP" 'maxNotional18(address,uint256)(uint256)' "$V" "${BC:-0}" --rpc-url "$RPC" </dev/null 2>/dev/null | awk '{print $1}')
+    [ "${MX:-0}" = "0" ] && P+=("<b>$SYM capacity is 0</b> - every mint will revert")
+    MA=$(timeout 20 cast call "$O" 'mintAllowed()(bool)' --rpc-url "$RPC" </dev/null 2>/dev/null)
+    [ "$MA" = "false" ] && P+=("$SYM oracle unhealthy - minting paused (redemption unaffected)")
+  done < <(python3 -c "
+import json
+d=json.load(open('$BOOK'))
+[print(v['symbol'], v['vault'], v['certOracle']) for v in d['vaults']]" 2>/dev/null)
+fi
+
+systemctl is-active --quiet usecert-keeper || P+=("<b>usecert-keeper is not running</b> - attestations will age out")
+
+HOST=$(hostname)
+
+# ---------------------------------------------------------------- keeper gas
+# The 2026-09-20 outage: the attester ran dry at 06:48 UTC and every broadcast
+# failed for 11.6 hours. The age alarm below fired 46 times and never once said
+# why, because the keeper discards the error. Balance is the leading indicator -
+# it is knowable days before the age alarm can possibly fire.
+#
+# Addresses, not keys: this runs every 15 minutes and has no business reading
+# private keys to derive something public.
+ATTESTER_ADDR=0x33CCBBe41BB2374C7704B7eDA3743CC513C0002d
+BATCH_ADDR=0x066124926a69259590E64147371c6330FD287B8B
+DEPLOYER_ADDR=0xD657b2315f84f612643e8aC232e81D829beA0f4a
+
+# Measured cost of one attest cycle, and the keeper runs two per minute.
+ATTEST_WEI_PER_DAY=28359463818165120   # 0.0284 ETH/day
+
+for pair in "attester:$ATTESTER_ADDR:1" "batch-keeper:$BATCH_ADDR:0" "deployer:$DEPLOYER_ADDR:0"; do
+  NAME=${pair%%:*}; REST=${pair#*:}; ADDR=${REST%%:*}; ISATT=${REST##*:}
+  BAL=$(timeout 20 cast balance "$ADDR" --rpc-url "$RPC" </dev/null 2>/dev/null)
+  if [ -z "$BAL" ]; then
+    P+=("$NAME balance unreadable (RPC down?)")
+    continue
+  fi
+  if [ "$ISATT" = "1" ]; then
+    DAYS=$(python3 -c "print(f'{int('$BAL')/$ATTEST_WEI_PER_DAY:.1f}')" 2>/dev/null)
+    ETH=$(python3 -c "print(f'{int('$BAL')/1e18:.6f}')" 2>/dev/null)
+    # Below half a day there is no time to react across a night or a weekend.
+    if python3 -c "import sys; sys.exit(0 if int('$BAL') < $ATTEST_WEI_PER_DAY//2 else 1)" 2>/dev/null; then
+      P+=("<b>attester gas ${ETH} ETH - ${DAYS} days left</b>, every broadcast fails at zero")
+    elif python3 -c "import sys; sys.exit(0 if int('$BAL') < $ATTEST_WEI_PER_DAY*2 else 1)" 2>/dev/null; then
+      P+=("attester gas ${ETH} ETH - ${DAYS} days left, top up")
+    fi
+  else
+    # The other two only fund top-ups; warn when they can no longer do that.
+    if python3 -c "import sys; sys.exit(0 if int('$BAL') < $ATTEST_WEI_PER_DAY else 1)" 2>/dev/null; then
+      ETH=$(python3 -c "print(f'{int('$BAL')/1e18:.6f}')" 2>/dev/null)
+      P+=("$NAME gas ${ETH} ETH - too low to refill the attester")
+    fi
+  fi
+done
+
+if [ ${#P[@]} -gt 0 ]; then
+  MSG="⛓️ <b>$HOST</b> chain health%0A%0A"
+  for p in "${P[@]}"; do MSG="$MSG• $p%0A"; done
+  notify "$(printf '%b' "$MSG")"
+elif [ "$SUMMARY" = "--summary" ]; then
+  notify "$(printf '%b' "✅ <b>$HOST</b> weekly chain summary%0A%0Aattestation ages:$AGES%0Aall mirrors minting, keeper running")"
+fi

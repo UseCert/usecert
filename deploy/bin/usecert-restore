@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Restore helper. Lists what is available, and restores one database from one set.
+# Deliberately explicit: it will not guess which set or which database you mean.
+set -uo pipefail
+BASE=/var/backups/pg
+
+usage(){
+  cat <<USAGE
+usage: usecert-restore list
+       usecert-restore show  <YYYY-MM-DD>
+       usecert-restore verify <YYYY-MM-DD>
+       usecert-restore run   <YYYY-MM-DD> <host|supabase> <dbname> [--into <newdbname>]
+
+Restores default to a NEW database named <dbname>_restore so a bad restore cannot
+overwrite live data. Pass --into to choose the target explicitly.
+USAGE
+}
+
+case "${1:-}" in
+  list)
+    printf "%-14s %-7s %s\n" "SET" "FILES" "SIZE"
+    for d in $(ls -1dt $BASE/20* 2>/dev/null); do
+      printf "%-14s %-7s %s\n" "$(basename "$d")" "$(find "$d" -type f | wc -l)" "$(du -sh "$d" | cut -f1)"
+    done
+    ;;
+  show)
+    ls -la "$BASE/${2:?date required}" ;;
+  verify)
+    D="$BASE/${2:?date required}"
+    ok=0; bad=0
+    for f in "$D"/*.dump; do
+      [ -e "$f" ] || continue
+      # A container pg_restore cannot open a host path - the archive must arrive on
+      # stdin. Getting this wrong reports a perfectly good dump as BAD.
+      if [[ "$(basename "$f")" == supabase-* ]]; then
+        ok_read=$(docker exec -i supabase-db pg_restore -l < "$f" >/dev/null 2>&1 && echo yes)
+      else
+        ok_read=$(pg_restore -l "$f" >/dev/null 2>&1 && echo yes)
+      fi
+      if [ "$ok_read" = yes ]; then echo "  OK   $(basename "$f")"; ok=$((ok+1))
+      else echo "  BAD  $(basename "$f")"; bad=$((bad+1)); fi
+    done
+    echo "  checksums: $(cd "$D" && sed -n "s/^  //p" MANIFEST-*.txt 2>/dev/null | sha256sum -c 2>/dev/null | grep -c ": OK") file(s) match the manifest"
+    echo "$ok readable, $bad unreadable"
+    [ "$bad" -eq 0 ]
+    ;;
+  run)
+    D="$BASE/${2:?date required}"; KIND="${3:?host or supabase}"; DB="${4:?dbname}"
+    TARGET="${DB}_restore"
+    [ "${5:-}" = "--into" ] && TARGET="${6:?target name}"
+    F=$(ls -1t "$D"/${KIND}-${DB}-*.dump 2>/dev/null | head -1)
+    [ -n "$F" ] || { echo "no dump for $KIND/$DB in $D"; exit 1; }
+    echo "restoring $F -> $TARGET"
+    if [ "$KIND" = "supabase" ]; then
+      docker exec -i supabase-db psql -U postgres -c "CREATE DATABASE \"$TARGET\"" 2>/dev/null
+      docker exec -i supabase-db pg_restore -U postgres -d "$TARGET" --no-owner --no-acl < "$F"
+    else
+      sudo -u postgres createdb "$TARGET" 2>/dev/null
+      sudo -u postgres pg_restore -d "$TARGET" --no-owner --no-acl "$F"
+    fi
+    echo "done. inspect $TARGET before swapping it in."
+    ;;
+  *) usage; exit 1 ;;
+esac

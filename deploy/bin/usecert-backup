@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Nightly logical backup of every database on this host.
+#
+# This sits ALONGSIDE OVH's image backup, it does not replace it. The image gives
+# whole-machine disaster recovery; this gives per-database, per-table recovery
+# without rolling the entire box back a day. The incident that motivates it is
+# real: a DROP SCHEMA CASCADE on one schema, with mail, keepers and deployments
+# on the same machine perfectly healthy.
+set -uo pipefail
+
+STAMP=$(date -u +%Y-%m-%dT%H%M%SZ)
+DAY=$(date -u +%Y-%m-%d)
+DEST=/var/backups/pg/$DAY
+KEEP_LOCAL_DAYS=14
+REMOTE=$(cat /etc/usecert/backup-remote 2>/dev/null || true)   # e.g. gdrive-crypt:usecert-backups
+LOG=$(mktemp)
+ERRORS=()
+WARNINGS=()
+
+source /etc/usecert/telegram.env 2>/dev/null || true
+
+note(){ echo "[$(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
+fail(){ ERRORS+=("$*"); note "FAIL: $*"; }
+
+mkdir -p "$DEST"
+chmod 700 /var/backups/pg "$DEST"
+
+# --- verify a dump is a real archive, not just a file that got created ---------
+# pg_dump can exit 0 and leave a truncated file if the disk fills mid-write. The
+# only honest check is asking pg_restore to parse the table of contents back.
+verify(){
+  local f=$1 label=$2 where=$3
+  [ -s "$f" ] || { fail "$label: dump is empty"; return 1; }
+  local n
+  # The container has no view of this host path, so the archive goes in on stdin.
+  if [ "$where" = "container" ]; then
+    n=$(docker exec -i supabase-db pg_restore -l < "$f" 2>/dev/null | grep -c '^;')
+  else
+    n=$(pg_restore -l "$f" 2>/dev/null | grep -c '^;')
+  fi
+  if [ "${n:-0}" -lt 1 ]; then fail "$label: pg_restore cannot read the archive"; return 1; fi
+  note "$label: $(du -h "$f" | cut -f1), TOC readable"
+  return 0
+}
+
+# --- host postgres (18.6) -----------------------------------------------------
+for db in usecert orionsafe rwaexperts; do
+  f="$DEST/host-$db-$STAMP.dump"
+  # Redirect as root: the postgres user cannot write into this 700 root-owned
+  # directory, and -f made pg_dump try to open the file as postgres itself.
+  if sudo -u postgres pg_dump -Fc -d "$db" > "$f" 2>>"$LOG"; then
+    chmod 600 "$f"; verify "$f" "host/$db" host
+  else
+    fail "host/$db: pg_dump failed"
+  fi
+done
+
+# --- supabase container (17.6) ------------------------------------------------
+# Dumped with the CONTAINER's own pg_dump so client and server versions match.
+for db in postgres _supabase; do
+  f="$DEST/supabase-$db-$STAMP.dump"
+  if docker exec supabase-db pg_dump -Fc -U postgres -d "$db" > "$f" 2>>"$LOG"; then
+    chmod 600 "$f"
+    verify "$f" "supabase/$db" container
+  else
+    fail "supabase/$db: pg_dump failed"
+  fi
+done
+
+# --- roles and grants are not in a per-database dump --------------------------
+f="$DEST/supabase-globals-$STAMP.sql"
+docker exec supabase-db pg_dumpall -U postgres --globals-only > "$f" 2>>"$LOG" \
+  && chmod 600 "$f" && note "supabase globals: $(du -h "$f" | cut -f1)" \
+  || fail "supabase globals: pg_dumpall failed"
+
+# --- manifest so a restorer knows what they are holding -----------------------
+{
+  echo "created_utc: $STAMP"
+  echo "host: $(hostname)"
+  echo "host_pg: $(sudo -u postgres psql -tAc 'show server_version' 2>/dev/null | head -1)"
+  echo "supabase_pg: $(docker exec supabase-db psql -U postgres -tAc 'show server_version' 2>/dev/null | head -1)"
+  echo "files:"
+  (cd "$DEST" && sha256sum ./*"$STAMP"* 2>/dev/null | sed 's/^/  /')
+} > "$DEST/MANIFEST-$STAMP.txt"
+
+# --- offsite ------------------------------------------------------------------
+if [ -n "$REMOTE" ] && command -v rclone >/dev/null; then
+  if rclone copy "$DEST" "$REMOTE/$DAY" --transfers 2 --retries 3 2>>"$LOG"; then
+    # Prove it landed, rather than trusting rclone's exit code.
+    local_n=$(find "$DEST" -type f | wc -l)
+    remote_n=$(rclone lsf "$REMOTE/$DAY" 2>/dev/null | wc -l)
+    if [ "$remote_n" -ge "$local_n" ]; then
+      note "offsite: $remote_n files at $REMOTE/$DAY"
+    else
+      fail "offsite: only $remote_n of $local_n files arrived"
+    fi
+    rclone delete "$REMOTE" --min-age 90d 2>>"$LOG"
+  else
+    fail "offsite: rclone copy failed"
+  fi
+elif [ -z "$REMOTE" ]; then
+  note "offsite: not configured (no /etc/usecert/backup-remote) - LOCAL COPY ONLY"
+  WARNINGS+=("offsite copy is not configured; backups exist only on the same disk as the data")
+else
+  fail "offsite: rclone not installed"
+fi
+
+# --- retention ----------------------------------------------------------------
+find /var/backups/pg -maxdepth 1 -type d -name '20*' -mtime +$KEEP_LOCAL_DAYS \
+  -exec rm -rf {} + 2>/dev/null
+note "local sets retained: $(find /var/backups/pg -maxdepth 1 -type d -name '20*' | wc -l)"
+
+# --- report -------------------------------------------------------------------
+SIZE=$(du -sh "$DEST" 2>/dev/null | cut -f1)
+if [ ${#ERRORS[@]} -eq 0 ]; then
+  STATUS="OK"; ICON="a"
+else
+  STATUS="${#ERRORS[@]} problem(s)"; ICON="!"
+fi
+MSG="[$ICON] <b>$(hostname)</b> database backup%0A%0Astatus: $STATUS%0Aset: $DAY ($SIZE)%0Afiles: $(find "$DEST" -type f | wc -l)"
+for e in "${ERRORS[@]:-}"; do [ -n "$e" ] && MSG="$MSG%0A- $e"; done
+for w in "${WARNINGS[@]:-}"; do [ -n "$w" ] && MSG="$MSG%0A- (warning) $w"; done
+
+# Only notify on failure; a nightly success message trains you to ignore it.
+if { [ ${#ERRORS[@]} -gt 0 ] || [ ${#WARNINGS[@]} -gt 0 ]; } && [ -n "${TG_TOKEN:-}" ] && [ -n "${TG_CHAT:-}" ]; then
+  curl -s -m 20 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+    -d chat_id="${TG_CHAT}" -d parse_mode=HTML --data-urlencode text="$(printf '%b' "$MSG")" >/dev/null
+fi
+
+cat "$LOG" >> /var/log/usecert-backup.log
+rm -f "$LOG"
+[ ${#ERRORS[@]} -eq 0 ]
