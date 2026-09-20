@@ -43,7 +43,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
   return (
     <div className="min-h-[100dvh] bg-ink text-white">
       <Navbar onMenuOpen={() => setMenuOpen(true)} />
-      <MenuModal open={menuOpen} onOpen={() => setMenuOpen(true)} onClose={() => setMenuOpen(false)} />
+      <MenuModal open={menuOpen} onClose={() => setMenuOpen(false)} />
       <main className="pt-16 md:pt-20">{children ?? <Outlet />}</main>
       <Footer />
     </div>

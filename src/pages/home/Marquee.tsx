@@ -1,13 +1,20 @@
 import { motion } from "framer-motion";
 
+const BAR_GLYPH = (
+  <span className="mr-2 inline-flex flex-col gap-[2px]" aria-hidden>
+    <span className="h-[2px] w-3 bg-current" />
+    <span className="h-[2px] w-2 bg-current" />
+  </span>
+);
+
 const ITEMS = [
-  { name: "Robinhood Chain", glyph: <span className="mr-2 inline-block h-2 w-2 rounded-full bg-green-bright" aria-hidden /> },
-  { name: "CertVault", glyph: <span className="mr-2 inline-block h-3 w-3 border border-current" aria-hidden /> },
-  { name: "CertOracle", glyph: <span className="mr-2 inline-block h-3 w-3 rounded-full border border-current" aria-hidden /> },
-  { name: "BufferBook", glyph: <span className="mr-2 inline-flex flex-col gap-[2px]" aria-hidden><span className="h-[2px] w-3 bg-current" /><span className="h-[2px] w-2 bg-current" /></span> },
-  { name: "InsuranceStaking", glyph: <span className="mr-2 inline-block h-3 w-3 rotate-45 border border-current" aria-hidden /> },
-  { name: "FeeVault", glyph: <span className="mr-2 inline-flex h-3 w-3 items-center justify-center border border-current text-[8px] font-semibold leading-none" aria-hidden>F</span> },
-  { name: "Certificate", glyph: <img src="/logo.png" alt="" className="mr-2 inline h-4 w-4 object-contain" /> },
+  { name: "Robinhood Chain", glyph: BAR_GLYPH },
+  { name: "CertVault", glyph: BAR_GLYPH },
+  { name: "CertOracle", glyph: BAR_GLYPH },
+  { name: "BufferBook", glyph: BAR_GLYPH },
+  { name: "InsuranceStaking", glyph: BAR_GLYPH },
+  { name: "FeeVault", glyph: BAR_GLYPH },
+  { name: "Certificate", glyph: BAR_GLYPH },
 ];
 
 /** §12 ARCHITECTURE MARQUEE (light grey paper, infinite ticker, 28s cycle) */

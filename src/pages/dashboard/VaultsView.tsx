@@ -101,14 +101,6 @@ export default function VaultsView() {
       <Stagger index={0}>
         <Panel className="mt-8 flex flex-col justify-between gap-6 p-5 md:flex-row md:items-center md:p-6">
           <div className="flex items-center gap-4">
-            <img
-              src={vault.img}
-              alt={vault.imgPlaceholder ? "Placeholder mark" : `${vault.name} plate`}
-              className={cn(
-                "h-20 w-20 border hairline-dark object-cover md:h-24 md:w-24",
-                vault.imgPlaceholder && "object-contain p-3 opacity-80",
-              )}
-            />
             <div>
               <div className="flex flex-wrap items-center gap-3">
                 <h2 className="text-[32px] font-semibold uppercase leading-none tracking-[-0.03em] md:text-[40px]">

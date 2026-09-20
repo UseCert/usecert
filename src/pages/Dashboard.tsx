@@ -29,20 +29,7 @@ function ViewRouter() {
 function DashboardInner() {
   const { view } = useDashboard();
   return (
-    <div className="min-h-[100dvh] bg-abyss text-white">
-      {/* Faint blueprint hairline grid for depth */}
-      <div
-        aria-hidden
-        className="pointer-events-none fixed inset-0 z-[1]"
-        style={{
-          backgroundImage:
-            "linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px)",
-          backgroundSize: "120px 120px",
-          maskImage: "radial-gradient(80% 70% at 50% 30%, black 30%, transparent 100%)",
-          WebkitMaskImage: "radial-gradient(80% 70% at 50% 30%, black 30%, transparent 100%)",
-        }}
-      />
-
+    <div className="dashboard-root min-h-[100dvh] bg-black text-white">
       {/* Static grain texture; the single animated grain layer is the global FilmGrain */}
       <div
         aria-hidden
@@ -53,18 +40,6 @@ function DashboardInner() {
           backgroundSize: "512px 512px",
           opacity: 0.07,
         }}
-      />
-
-      {/* Ambient sage glow, same atmosphere as the landing deep sections; slowly breathes */}
-      <motion.div
-        aria-hidden
-        className="pointer-events-none fixed inset-0 z-[1]"
-        style={{
-          background:
-            "radial-gradient(55% 38% at 82% 0%, rgba(133,152,133,0.12), transparent 70%), radial-gradient(38% 30% at 8% 100%, rgba(133,152,133,0.07), transparent 70%)",
-        }}
-        animate={{ opacity: [1, 0.65, 1] }}
-        transition={{ duration: 9, repeat: Infinity, ease: "easeInOut" }}
       />
 
       <TopBar />

@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { Link, useLocation, useNavigate } from "@/lib/router-compat";
 import { AnimatePresence, motion } from "framer-motion";
-import { Menu, X } from "lucide-react";
+import { X } from "lucide-react";
 import { scrollToHash } from "@/lib/scroll";
 import SwapButton from "./SwapButton";
 
@@ -23,23 +23,13 @@ const MENU_ITEMS: Item[] = [
  */
 export default function MenuModal({
   open,
-  onOpen,
   onClose,
 }: {
   open: boolean;
-  onOpen: () => void;
   onClose: () => void;
 }) {
-  const [showFab, setShowFab] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
-
-  useEffect(() => {
-    const onScroll = () => setShowFab(window.scrollY > window.innerHeight * 0.8);
-    onScroll();
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
-  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -68,24 +58,6 @@ export default function MenuModal({
 
   return (
     <>
-      {/* Floating hamburger */}
-      <AnimatePresence>
-        {showFab && !open && (
-          <motion.button
-            type="button"
-            aria-label="Open menu"
-            onClick={onOpen}
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 16 }}
-            transition={{ duration: 0.25 }}
-            className="fixed bottom-6 left-1/2 z-50 flex h-11 w-11 -translate-x-1/2 items-center justify-center border hairline-dark bg-ink text-white"
-          >
-            <Menu size={18} />
-          </motion.button>
-        )}
-      </AnimatePresence>
-
       {/* Modal */}
       <AnimatePresence>
         {open && (

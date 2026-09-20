@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { motion, useScroll, useTransform } from "framer-motion";
 import LetterReveal from "@/components/LetterReveal";
-import Scribble from "@/components/Scribble";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -129,15 +128,6 @@ export default function Hero() {
             <h1 className="text-[40px] font-semibold uppercase leading-[0.9] tracking-[-0.04em] text-white sm:text-[52px] sm:leading-[0.82] sm:tracking-[-0.05em] md:text-[68px] lg:text-[92px]">
               <LetterReveal text="USECERT®" immediate delay={0.2} stagger={0.03} />
             </h1>
-            <motion.span
-              className="mt-1 block text-[16px] font-semibold uppercase tracking-[-0.03em] text-white sm:absolute sm:bottom-1 sm:right-0 sm:mt-0 sm:text-[18px] md:text-[24px]"
-              initial={{ opacity: 0, y: 16 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.7, duration: 0.6, ease: EASE }}
-            >
-              Protocol
-            </motion.span>
-            <Scribble className="pointer-events-none absolute -top-8 right-0 w-[40%] max-w-[380px] opacity-70 sm:-right-4 sm:-top-10 sm:w-[46%] sm:opacity-100 md:-right-10" delay={0.8} />
           </div>
 
 

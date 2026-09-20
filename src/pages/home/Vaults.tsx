@@ -49,8 +49,6 @@ function VaultCard({
   // Current card scales down + sinks as the next card covers it.
   const scale = useTransform(progress, [start, end], [1, index === total - 1 ? 1 : 0.92]);
   const y = useTransform(progress, [start, end], [0, index === total - 1 ? 0 : 24]);
-  // Giant title draws on as the card becomes active.
-  const titleOpacity = useTransform(progress, [index === 0 ? 0 : prev, index === 0 ? span * 0.5 : start], [index === 0 ? 0.9 : 0.05, 0.9]);
   // Image parallax inside the card.
   const imgY = useTransform(progress, [prev, end], [30, -30]);
 
@@ -58,15 +56,6 @@ function VaultCard({
     <div className="sticky top-0 h-[100dvh]">
       <motion.div style={{ scale, y, backgroundColor: skin.bg }} className="relative h-full w-full overflow-hidden">
         <Link to={`/vaults/${card.slug}`} className="group absolute inset-0 block" aria-label={`${card.name} vault`}>
-          {/* Giant solid white title, full width, clipped at the edges, behind the image */}
-          <motion.span
-            style={{ opacity: titleOpacity }}
-            className="absolute inset-0 flex items-center justify-center whitespace-nowrap text-[27vw] font-semibold uppercase leading-none tracking-[-0.05em] text-white"
-            aria-hidden
-          >
-            {card.name}
-          </motion.span>
-
           {/* Centered 16:10 image with meta row directly beneath it */}
           <div className="absolute inset-0 flex flex-col items-center justify-center px-6">
             <motion.div style={{ y: imgY }} className="w-full max-w-[880px]">

@@ -61,10 +61,6 @@ export default function Navbar({ onMenuOpen }: { onMenuOpen: () => void }) {
               UseCert<sup className="text-[9px] align-super">®</sup>
             </span>
           </Link>
-          <span className="hidden md:block h-4 w-px bg-hairline-dark" aria-hidden />
-          <span className="hidden md:block font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
-            Stock certificates on Robinhood Chain
-          </span>
         </div>
 
         {/* Right: links + CTA + hamburger */}
@@ -96,7 +92,7 @@ export default function Navbar({ onMenuOpen }: { onMenuOpen: () => void }) {
             type="button"
             onClick={onMenuOpen}
             aria-label="Open menu"
-            className="lg:hidden flex h-10 w-10 shrink-0 sm:h-11 sm:w-11 items-center justify-center border hairline-dark bg-ink text-white"
+            className="flex h-10 w-10 shrink-0 sm:h-11 sm:w-11 items-center justify-center border hairline-dark bg-ink text-white"
           >
             <Menu size={18} />
           </button>

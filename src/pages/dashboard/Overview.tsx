@@ -5,7 +5,6 @@ import {
   AgeLine,
   EmptyState,
   Flash,
-  GhostWord,
   HedgeRatio,
   MicroLabel,
   Panel,
@@ -197,8 +196,6 @@ export default function Overview() {
 
   return (
     <div className="relative">
-      <GhostWord className="-top-10 right-0 hidden text-[180px] xl:block">Live</GhostWord>
-
       {/* Top mono stat row, same rhythm as the landing deep-green section.
           "C1 Live" is gone: C1 is the identifier of an audit, not a release badge, and
           that audit reported open criticals — so the string could only ever be read as a

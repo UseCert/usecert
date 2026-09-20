@@ -1,5 +1,4 @@
 import { motion } from "framer-motion";
-import { ArrowUpRight } from "lucide-react";
 import { Link } from "@/lib/router-compat";
 import LetterReveal from "@/components/LetterReveal";
 import SwapButton from "@/components/SwapButton";
@@ -18,7 +17,6 @@ const CARDS = [
     date: "Jul 20, 2026",
     image: "/learn-2.jpg",
     to: "/learn/delta-backing-explained",
-    minimal: true,
   },
   {
     title: "Funding: buffered, then fee'd, never hidden",
@@ -56,24 +54,17 @@ export default function Research() {
               transition={{ delay: i * 0.1, duration: 0.7, ease: EASE }}
             >
               <Link to={card.to} className="group block">
-                {card.minimal ? (
-                  <div className="flex aspect-[16/10] items-center justify-center gap-4 border hairline-light bg-white p-6">
-                    <img src={card.image} alt="" className="h-20 w-20 rounded-full object-cover" />
-                    <ArrowUpRight size={28} className="text-ink transition-transform group-hover:translate-x-1 group-hover:-translate-y-1" />
-                  </div>
-                ) : (
-                  <div className="relative aspect-[16/10] overflow-hidden">
-                    <img
-                      src={card.image}
-                      alt=""
-                      className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
-                    />
-                    <span
-                      className="pointer-events-none absolute inset-0 bg-green-deep/0 transition-colors duration-500 group-hover:bg-green-deep/20"
-                      aria-hidden
-                    />
-                  </div>
-                )}
+                <div className="relative aspect-[16/10] overflow-hidden">
+                  <img
+                    src={card.image}
+                    alt=""
+                    className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+                  />
+                  <span
+                    className="pointer-events-none absolute inset-0 bg-green-deep/0 transition-colors duration-500 group-hover:bg-green-deep/20"
+                    aria-hidden
+                  />
+                </div>
                 <h3 className="relative mt-4 inline text-[16px] font-semibold leading-[1.3] tracking-[-0.01em]">
                   {card.title}
                   <span className="absolute bottom-0 left-0 h-px w-0 bg-green-deep transition-all duration-300 group-hover:w-full" aria-hidden />

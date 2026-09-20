@@ -1,6 +1,6 @@
 import { Link } from "@/lib/router-compat";
 import { motion } from "framer-motion";
-import { ArrowLeftRight, ArrowUpRight, Check, Layers, LayoutGrid, List, ShieldAlert } from "lucide-react";
+import { ArrowLeftRight, ArrowUpRight, Layers, LayoutGrid, List, ShieldAlert } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDashboard } from "./store";
@@ -23,16 +23,7 @@ const NAV_ITEMS: { id: ViewId; label: string; short: string; icon: LucideIcon }[
 /* ---------------------------------------------------------------- top bar */
 
 export function TopBar() {
-  const {
-    block,
-    blockKnown,
-    totals,
-    isError,
-    wrongNetwork,
-    switchToUseCert,
-    isSwitchingChain,
-    maxAttestationAgeSec,
-  } = useDashboard();
+  const { block, blockKnown, totals, isError, maxAttestationAgeSec } = useDashboard();
   // No data is not "healthy" and it is not "degraded" either — it is unknown, and the
   // chip says so rather than asserting either one.
   //
@@ -124,24 +115,6 @@ export function TopBar() {
           </span>
         </div>
 
-        {/* Center: network chip */}
-        <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-2 rounded-full border hairline-dark bg-section-deep-2 px-4 py-1.5 lg:flex">
-          <PulseDot />
-          <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
-            Robinhood Chain · Testnet 46630
-          </span>
-          {wrongNetwork && (
-            <button
-              type="button"
-              onClick={switchToUseCert}
-              disabled={isSwitchingChain}
-              className="border border-warn/40 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.08em] text-warn transition-colors hover:bg-warn/10 disabled:opacity-50"
-            >
-              {isSwitchingChain ? "Switching…" : "Wrong network · switch"}
-            </button>
-          )}
-        </div>
-
         {/* Right: search + block ticker + wallet */}
         <div className="flex shrink-0 items-center gap-2 md:gap-4">
           <CommandTrigger className="hidden sm:flex" />
@@ -199,25 +172,7 @@ export function Sidebar() {
         })}
       </nav>
 
-      {/* Giant ghost wordmark, landing-style oversized type */}
-      <div className="pointer-events-none relative mt-auto hidden h-40 overflow-hidden xl:block" aria-hidden>
-        <span
-          className="absolute -bottom-6 left-2 select-none text-[92px] font-semibold uppercase leading-none tracking-[-0.06em] text-transparent"
-          style={{ WebkitTextStroke: "1px rgba(255,255,255,0.07)" }}
-        >
-          UseCert
-        </span>
-      </div>
-
-      <div className="flex flex-col gap-4 border-t hairline-dark p-4 xl:p-6">
-        {/* The invariant is checked against an attestation, not against every block, so the
-            cadence is named here rather than implied. */}
-        <div className="hidden items-start gap-2 xl:flex">
-          <Check size={13} className="mt-0.5 shrink-0 text-green-bright" />
-          <p className="font-mono text-[10px] uppercase leading-[1.6] tracking-[0.06em] text-green-bright">
-            Backing ≥ supply × price, per attestation
-          </p>
-        </div>
+      <div className="mt-auto flex flex-col gap-4 border-t hairline-dark p-4 xl:p-6">
         <Link
           to="/"
           className="flex items-center justify-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60 transition-colors hover:text-green-bright xl:justify-start"

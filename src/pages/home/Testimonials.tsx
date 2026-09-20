@@ -45,7 +45,7 @@ export default function Testimonials() {
           <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-60">Signals</p>
         </div>
 
-        <p className="mt-8 max-w-[52ch] text-[16px] leading-[1.55]">
+        <p className="mt-8 whitespace-nowrap text-[16px] leading-[1.55]">
           We let the <strong>math speak</strong>. But sometimes the people using it have{" "}
           <strong>something to add</strong>.
         </p>
@@ -71,7 +71,7 @@ export default function Testimonials() {
                 transition={{ duration: 0.5, ease: EASE }}
                 className="text-[22px] font-medium leading-[1.2] tracking-[-0.02em] md:text-[28px]"
               >
-                "{slide.quote}"
+                {slide.quote}
                 <footer className="mt-6 flex items-center gap-3">
                   <span className="h-[8px] w-[8px] bg-green-deep" aria-hidden />
                   <p className="font-mono text-[12px] uppercase tracking-[0.08em] text-ink-60">{slide.role}</p>

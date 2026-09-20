@@ -321,3 +321,22 @@
     animation: none;
   }
 }
+
+/* Dashboard: flatten the green-tinted section backgrounds to plain dark grey/black.
+   @theme inline bakes literal hex values into .bg-section-deep(-2), so a scoped
+   CSS-variable override has no effect here - only overriding the rule itself does. */
+.dashboard-root .bg-section-deep {
+  background-color: #0a0a0a;
+}
+.dashboard-root .bg-section-deep-2 {
+  background-color: #141414;
+}
+.dashboard-root .bg-\[\#0d0f0d\] {
+  background-color: #0a0a0a;
+}
+.dashboard-root .bg-\[\#12120d\] {
+  background-color: #141414;
+}
+.dashboard-root .bg-\[\#121a12\] {
+  background-color: #141414;
+}
