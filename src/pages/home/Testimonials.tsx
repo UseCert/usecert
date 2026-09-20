@@ -39,7 +39,7 @@ export default function Testimonials() {
     <section id="signals" className="bg-paper text-ink">
       <div className="mx-auto max-w-[1440px] px-4 py-16 md:px-6 md:py-24 lg:px-12 lg:py-32">
         <div className="flex items-start justify-between gap-6">
-          <h2 className="max-w-[12ch] text-[44px] font-semibold uppercase leading-[0.85] tracking-[-0.05em] md:text-[60px] lg:text-[78px]">
+          <h2 className="whitespace-nowrap text-[44px] font-semibold uppercase leading-[0.85] tracking-[-0.05em] md:text-[60px] lg:text-[78px]">
             <LetterReveal text="What holders say." byWord stagger={0.05} />
           </h2>
           <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-60">Signals</p>

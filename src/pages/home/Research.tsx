@@ -7,7 +7,7 @@ const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
 const CARDS = [
   {
-    title: "RWA perps did $213B in Q2. None of it is holdable.",
+    title: "RWA perps: $213B, none of it holdable.",
     date: "Jul 20, 2026",
     image: "/learn-1.jpg",
     to: "/learn/rwa-perps-213b-none-holdable",
@@ -19,7 +19,7 @@ const CARDS = [
     to: "/learn/delta-backing-explained",
   },
   {
-    title: "Funding: buffered, then fee'd, never hidden",
+    title: "Funding: buffered, fee'd, never hidden.",
     date: "Jul 18, 2026",
     image: "/learn-3.jpg",
     to: "/learn/funding-buffered-then-feed",
