@@ -3,6 +3,7 @@ pragma solidity 0.8.24;
 
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
 import {ICertOracle} from "./interfaces/ICertOracle.sol";
+import {ECDSA} from "openzeppelin-contracts/utils/cryptography/ECDSA.sol";
 
 /// @notice Price source for one asset. Chainlink is the holder-facing price; the Lighter mark
 ///         price is a cross-check. Guard breaches pause MINTING only — pxUnguarded() always
@@ -10,6 +11,10 @@ import {ICertOracle} from "./interfaces/ICertOracle.sol";
 contract CertOracle is ICertOracle {
     error CertOracle_StalePrice();
     error CertOracle_NonPositivePrice();
+    /// @dev The signed mark-price path. See setMarkPriceSigned.
+    error CertOracle_SignatureExpired();
+    error CertOracle_BadSignature();
+    error CertOracle_StaleNonce();
     error CertOracle_TickOverflow();
     error CertOracle_OnlyAttester();
     /// @dev H-1: the deviation reference is rate-limited. An out-of-band price has been observed
@@ -166,6 +171,29 @@ contract CertOracle is ICertOracle {
     bool public immutable singleSource;
 
     uint256 public markPx18;
+
+    /// @notice Highest mark-price nonce accepted so far. Replay protection for setMarkPriceSigned.
+    /// @dev Strictly increasing, and deliberately NOT derived from markPx18: writing the same price
+    ///      twice is legitimate, so the value cannot carry its own ordering.
+    uint64 public markNonce;
+
+    /// @dev EIP-712 domain, built inline rather than inherited. OpenZeppelin's EIP712 base reaches
+    ///      ShortStrings, which compiles to the Cancun `mcopy`, and this project targets `shanghai`
+    ///      - raising evm_version for every audited contract to import one helper is not a trade
+    ///      worth making. Same reasoning, and the same shape, as SolvencyRegistry.
+    bytes32 private constant _DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 private constant _NAME_HASH = keccak256("UseCert CertOracle");
+    bytes32 private constant _VERSION_HASH = keccak256("1");
+
+    bytes32 public constant SET_MARK_TYPEHASH = keccak256("SetMark(uint256 px18,uint64 nonce,uint64 deadline)");
+
+    /// @notice EIP-712 domain separator for this oracle on this chain.
+    /// @dev Recomputed per call, not cached: a cached separator would keep the deploy-time chainId
+    ///      and leave every signature valid on both sides of a fork.
+    function domainSeparator() public view returns (bytes32) {
+        return keccak256(abi.encode(_DOMAIN_TYPEHASH, _NAME_HASH, _VERSION_HASH, block.chainid, address(this)));
+    }
     /// @dev The deviation breaker's reference price. Only the constructor and pokeLastGood write
     ///      it, and pokeLastGood is rate-limited (see H-1 there).
     uint256 public lastGoodPx18;
@@ -264,6 +292,38 @@ contract CertOracle is ICertOracle {
 
     function setMarkPrice(uint256 px18) external {
         if (msg.sender != attester) revert CertOracle_OnlyAttester();
+        markPx18 = px18;
+    }
+
+    /// @notice The mark price the attester SIGNED rather than SENT, so the minter pays the gas.
+    /// @dev The companion to SolvencyRegistry.attestSigned, and the second half of one logical
+    ///      update: the attester writes markPx18 here and the solvency figures there, and on the
+    ///      signed path a minter submits both inside their own transaction.
+    ///
+    /// @dev WHY THIS ONE NEEDS LESS TIMESTAMP MACHINERY THAN THE REGISTRY. markPx18 has no stored
+    ///      timestamp and never did, because nothing measures its age - it is a CROSS-CHECK, not a
+    ///      clock. Its staleness is caught structurally instead: mintAllowed() bands it against the
+    ///      live feed (`diff * 10_000 / p > basisBandBps` fails), so a mark that has drifted away
+    ///      from reality closes minting by itself, whatever timestamp anyone attaches to it. Adding
+    ///      an `observedAt` here would therefore be ceremony rather than a guard. The `deadline`
+    ///      still earns its place: it bounds how long a relayer may sit on any one signature, which
+    ///      is what stops a mark being replayed at a moment of the relayer's choosing INSIDE the
+    ///      band, where the band would not catch it.
+    ///
+    /// @dev `nonce` is what replay protection there is. The registry gets it free from a strictly
+    ///      increasing batchId; there is no equivalent here, since setting the same mark twice is
+    ///      legitimate and markPx18 carries no sequence of its own. So the nonce is explicit, it is
+    ///      inside the signed payload, and it must strictly increase - which also means the two
+    ///      halves can be submitted independently without one having to know the other's state.
+    function setMarkPriceSigned(uint256 px18, uint64 nonce, uint64 deadline, bytes calldata signature) external {
+        if (block.timestamp > deadline) revert CertOracle_SignatureExpired();
+        if (nonce <= markNonce) revert CertOracle_StaleNonce();
+
+        bytes32 structHash = keccak256(abi.encode(SET_MARK_TYPEHASH, px18, nonce, deadline));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator(), structHash));
+        if (ECDSA.recover(digest, signature) != attester) revert CertOracle_BadSignature();
+
+        markNonce = nonce;
         markPx18 = px18;
     }
 
