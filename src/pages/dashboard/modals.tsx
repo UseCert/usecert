@@ -77,6 +77,21 @@ export function ModalShell({
  * "any wallet connects the same mock account" is no longer true: this connects a real
  * wallet to chain 46630.
  */
+/**
+ * What a connector actually means to someone choosing one.
+ *
+ * The list previously showed `connector.type` - "injected", "coinbaseWallet" - which is
+ * wagmi's internal identifier, not information. The distinction that matters to a user
+ * with no wallet installed is whether a choice needs an extension at all.
+ */
+function connectorHint(c: { id: string; type: string }): string {
+  if (c.type === "walletConnect") return "Scan with a mobile wallet";
+  if (c.id === "coinbaseWalletSDK" || c.type === "coinbaseWallet") {
+    return "Extension, or a passkey - no install needed";
+  }
+  return "Browser extension";
+}
+
 export function WalletModal() {
   const { walletModalOpen, setWalletModalOpen, chainId } = useDashboard();
   const connectors = useConnectors();
@@ -125,7 +140,7 @@ export function WalletModal() {
       <div className="mt-6 flex flex-col gap-px border hairline-dark bg-hairline-dark">
         {connectors.length === 0 && (
           <p className="bg-[#0d0f0d] px-5 py-4 font-mono text-[11px] leading-[1.6] text-white-60">
-            No browser wallet detected. Install one that can add a custom network, then reload.
+            No wallet available. Reload, or install a browser wallet that can add a custom network.
           </p>
         )}
         {connectors.map((c) => (
@@ -138,7 +153,7 @@ export function WalletModal() {
           >
             <span>
               <span className="block text-[15px] font-medium text-white">{c.name}</span>
-              <span className="block font-mono text-[11px] text-white-60">{c.type}</span>
+              <span className="block font-mono text-[11px] text-white-60">{connectorHint(c)}</span>
             </span>
             {pendingId === c.uid ? (
               <span className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.08em] text-green-bright">

@@ -17,7 +17,7 @@ import {
   http,
   type Config,
 } from "wagmi";
-import { injected } from "wagmi/connectors";
+import { injected, walletConnect } from "wagmi/connectors";
 import { defineChain } from "viem";
 
 import { CHAIN } from "./contracts";
@@ -53,6 +53,50 @@ export function explorerAddressUrl(address: string): string {
   return `${CHAIN.blockExplorers.default.url}/address/${address}`;
 }
 
+/**
+ * The wallets a user may connect with.
+ *
+ * `injected()` is not one wallet: wagmi's multi-injected discovery (EIP-6963) is on by
+ * default, so every browser extension that announces itself - MetaMask, Rabby, Brave,
+ * Coinbase's extension - already appears as its own entry. What it CANNOT reach is a
+ * wallet that is not an extension, and that is the whole gap this list closes.
+ *
+ * Coinbase Smart Wallet was tried and reverted. `@coinbase/wallet-sdk` pulls in
+ * `@coinbase/cdp-sdk`, which imports `toClientEvmSigner` from `@x402/evm` - an OPTIONAL
+ * peer dependency that is not installed - and the SSR build fails on the missing export.
+ * The ways out were installing a payments SDK this project has no use for, or overriding
+ * a vite config the repo explicitly says not to touch. Neither is worth one connector.
+ *
+ * `walletConnect` is the one that reaches the hundreds of MOBILE wallets - scan a QR and
+ * sign on the phone. It is CONDITIONAL because it needs a project id from Reown/
+ * WalletConnect Cloud, which is an account this project has to own. Listing a connector
+ * that cannot complete is worse than not listing it: the user picks it, nothing happens,
+ * and they conclude the site is broken. Set VITE_WALLETCONNECT_PROJECT_ID and it appears.
+ *
+ * Deliberately NOT here: `safe()`, which only functions inside a Safe app iframe and would
+ * otherwise sit in the list as an option that can never connect.
+ */
+function buildConnectors() {
+  const wcProjectId = import.meta.env?.VITE_WALLETCONNECT_PROJECT_ID as string | undefined;
+  return [
+    injected({ shimDisconnect: true }),
+    ...(wcProjectId
+      ? [
+          walletConnect({
+            projectId: wcProjectId,
+            showQrModal: true,
+            metadata: {
+              name: "UseCert",
+              description: "Perp-backed certificates on Robinhood Chain testnet",
+              url: "https://use-cert.com",
+              icons: ["https://use-cert.com/logo192.png"],
+            },
+          }),
+        ]
+      : []),
+  ];
+}
+
 let cached: Config | undefined;
 
 /**
@@ -66,7 +110,7 @@ export function getWagmiConfig(): Config {
   if (cached) return cached;
   cached = createConfig({
     chains: [usecertChain],
-    connectors: [injected({ shimDisconnect: true })],
+    connectors: buildConnectors(),
     transports: {
       [usecertChain.id]: http(CHAIN.rpcUrls.default.http[0]),
     },
