@@ -42,6 +42,7 @@ import {
   CertVaultABI,
   CertificateABI,
   SHARED,
+  SolvencyRegistryABI,
   TestFaucetABI,
   TestUSDGABI,
 } from "./contracts";
@@ -489,7 +490,14 @@ export function useCertActions(id: ChainVaultId): CertActions {
 
     return mutateAsync({
       chainId: CHAIN_ID,
-      address: a.registry,
+      // PINNED, not taken from the payload. The signer tells us which registry it
+      // signed for, and attestationFor() now refuses a payload that disagrees with
+      // the bundled address - but the transaction itself is addressed from the
+      // constant regardless. Whoever controls that endpoint should not be able to
+      // aim a user's signed transaction at a contract of their choosing, even
+      // though the calldata is fixed to a nonpayable attestSigned and no user holds
+      // an allowance to the registry.
+      address: SHARED.solvencyRegistry,
       abi: SolvencyRegistryABI,
       functionName: "attestSigned",
       args: [

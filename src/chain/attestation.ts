@@ -20,6 +20,8 @@
  * passed through exactly as signed, or not sent at all.
  */
 
+import { SHARED } from "./contracts";
+
 const ENDPOINT = "/api/attestations";
 
 /** One mirror's signed attestation, exactly as the signer emitted it. */
@@ -74,7 +76,14 @@ export function attestationFor(
 ): SignedAttestation | null {
   if (!batch) return null;
   const lower = vault.toLowerCase();
-  return batch.attestations.find((a) => a.vault.toLowerCase() === lower) ?? null;
+  const found = batch.attestations.find((a) => a.vault.toLowerCase() === lower) ?? null;
+  if (!found) return null;
+  // The endpoint is trusted to say WHAT the attester signed, never WHERE to send it.
+  // A payload naming a registry other than the bundled one is not a routing hint to
+  // follow: it means the endpoint and this build disagree about which deployment is
+  // current, and relaying it would either revert or reach a contract nobody here chose.
+  if (found.registry.toLowerCase() !== SHARED.solvencyRegistry.toLowerCase()) return null;
+  return found;
 }
 
 /**
