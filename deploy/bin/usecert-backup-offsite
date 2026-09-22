@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Finishes the offsite half of the backup, AFTER you have created the underlying
+# cloud remote yourself with `rclone config`. It never asks for, sees, or stores
+# your cloud account password - that stays inside rclone's own config, created by
+# you, under your own authorisation.
+#
+# What it does: wraps your remote in an rclone `crypt` layer so the provider only
+# ever stores ciphertext and encrypted filenames, then points the nightly backup
+# at it.
+set -uo pipefail
+
+# The Drive remote is authorised under the `usecert` account; these scripts run as
+# root, and rclone reads the invoking user's config. Point it at the right file
+# rather than duplicating the credential into root's home.
+export RCLONE_CONFIG=/home/usecert/.config/rclone/rclone.conf
+
+BASE_REMOTE="${1:-}"
+FOLDER="${2:-usecert-backups}"
+
+if [ -z "$BASE_REMOTE" ]; then
+  cat <<USAGE
+usage: usecert-backup-offsite <existing-rclone-remote> [folder]
+
+  e.g. usecert-backup-offsite gdrive usecert-backups
+
+Existing remotes:
+$(rclone listremotes 2>/dev/null | sed 's/^/  /' || echo "  (none - run: rclone config)")
+USAGE
+  exit 1
+fi
+
+rclone listremotes 2>/dev/null | grep -qx "${BASE_REMOTE}:" || {
+  echo "!! '${BASE_REMOTE}:' is not a configured remote. Run: rclone config"; exit 1; }
+
+CRYPT="${BASE_REMOTE}-crypt"
+if rclone listremotes 2>/dev/null | grep -qx "${CRYPT}:"; then
+  echo "-- ${CRYPT}: already exists, reusing it"
+else
+  PW=$(openssl rand -base64 32 | tr -d '/+=' | cut -c1-32)
+  SALT=$(openssl rand -base64 32 | tr -d '/+=' | cut -c1-32)
+  rclone config create "$CRYPT" crypt \
+    remote "${BASE_REMOTE}:${FOLDER}" \
+    filename_encryption standard \
+    directory_name_encryption true \
+    password "$(rclone obscure "$PW")" \
+    password2 "$(rclone obscure "$SALT")" >/dev/null
+
+  umask 077
+  printf 'crypt_password=%s\ncrypt_salt=%s\nremote=%s\ncreated=%s\n' \
+    "$PW" "$SALT" "${BASE_REMOTE}:${FOLDER}" "$(date -u +%FT%TZ)" \
+    > /etc/usecert/backup-crypt-keys.txt
+  chmod 600 /etc/usecert/backup-crypt-keys.txt
+
+  echo
+  echo "=============================================================="
+  echo " WRITE THESE DOWN SOMEWHERE THAT IS NOT THIS SERVER."
+  echo " Without them the offsite copies cannot be decrypted - and the"
+  echo " whole point of them is surviving the loss of this machine."
+  echo
+  echo "   crypt password : $PW"
+  echo "   crypt salt     : $SALT"
+  echo
+  echo " Also saved to /etc/usecert/backup-crypt-keys.txt (root, 0600)."
+  echo "=============================================================="
+  echo
+fi
+
+echo "${CRYPT}:" > /etc/usecert/backup-remote
+chmod 600 /etc/usecert/backup-remote
+echo "-- nightly backup will now upload to ${CRYPT}:"
+
+echo
+echo "-- end-to-end test: write, read back, compare, delete"
+T=$(mktemp); head -c 2048 /dev/urandom > "$T"
+H=$(sha256sum "$T" | cut -d' ' -f1)
+if rclone copyto "$T" "${CRYPT}:__selftest" 2>&1; then
+  R=$(mktemp)
+  rclone copyto "${CRYPT}:__selftest" "$R" 2>&1
+  if [ "$(sha256sum "$R" | cut -d' ' -f1)" = "$H" ]; then
+    echo "   round trip OK - bytes came back identical"
+  else
+    echo "   !! ROUND TRIP MISMATCH - do not trust this remote"
+  fi
+  rclone delete "${CRYPT}:__selftest" 2>/dev/null
+  rm -f "$R"
+else
+  echo "   !! upload failed - check the remote"
+fi
+rm -f "$T"

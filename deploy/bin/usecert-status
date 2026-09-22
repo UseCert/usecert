@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Writes a small JSON status file the dashboard can read same-origin.
+# A browser page cannot check use-cert.com / qwilon.com / orion-safe.com itself - they are
+# different origins and CORS blocks it - so availability has to be measured server-side.
+set -uo pipefail
+OUT=/var/www/monitor/status.json
+TMP=$(mktemp)
+HIST=/var/lib/usecert/availability.log
+mkdir -p /var/lib/usecert /var/www/monitor
+
+check() {  # name url -> "name|code|ms|up"
+  local n=$1 u=$2 code ms out
+  # curl reports its own timing; the earlier date arithmetic produced nonsense values.
+  out=$(curl -s -o /dev/null -w '%{http_code} %{time_total}' -m 10 -L "$u" 2>/dev/null)
+  code=${out%% *}; ms=$(awk -v t="${out##* }" 'BEGIN{printf "%d", t*1000}')
+  case "$code" in 2*|3*|401) printf '%s|%s|%s|1\n' "$n" "$code" "$ms";; *) printf '%s|%s|%s|0\n' "$n" "$code" "$ms";; esac
+}
+
+ROWS=$( { check "use-cert.com"     "https://use-cert.com/"
+          check "qwilon.com"       "https://qwilon.com/"
+          check "orion-safe.com"   "https://orion-safe.com/"
+          check "supabase"         "https://use-cert.com/supabase/rest/v1/"
+          check "netdata"          "http://127.0.0.1:19999/api/v1/info"; } )
+
+# append to a rolling 7-day history for the uptime percentages
+NOW=$(date +%s)
+while IFS='|' read -r n c m u; do echo "$NOW|$n|$u" >> "$HIST"; done <<< "$ROWS"
+# keep 7 days
+awk -F'|' -v cut=$((NOW-604800)) '$1>=cut' "$HIST" > "${HIST}.tmp" && mv "${HIST}.tmp" "$HIST"
+
+# services
+SVC=""
+for s in usecert-keeper usecert-web rwa-web nginx postfix dovecot rspamd postgresql docker netdata fail2ban; do
+  a=$(systemctl is-active "$s" 2>/dev/null)
+  SVC="${SVC}${SVC:+,}{\"name\":\"$s\",\"state\":\"$a\"}"
+done
+
+# chain: attestation ages
+CHAIN=""
+BOOK=/opt/usecert/deployments/46630.json
+if [ -r "$BOOK" ]; then
+  export PATH="/home/usecert/.foundry/bin:$PATH"
+  REG=$(python3 -c "import json;print(json.load(open('$BOOK'))['shared']['solvencyRegistry'])" 2>/dev/null)
+  while read -r SYM V; do
+    [ -z "$V" ] && continue
+    A=$(timeout 15 cast call "$REG" 'ageSec(address)(uint256)' "$V" --rpc-url https://rpc.testnet.chain.robinhood.com </dev/null 2>/dev/null | awk '{print $1}')
+    CHAIN="${CHAIN}${CHAIN:+,}{\"symbol\":\"$SYM\",\"ageSec\":${A:-null}}"
+  done < <(python3 -c "
+import json
+d=json.load(open('$BOOK'))
+[print(v['symbol'], v['vault']) for v in d['vaults']]" 2>/dev/null)
+fi
+
+# availability percentages from history
+AVAIL=$(awk -F'|' '{tot[$2]++; up[$2]+=$3} END{s=""; for(k in tot){p=100*up[k]/tot[k]; s=s (s?",":"") "{\"name\":\"" k "\",\"pct\":" sprintf("%.3f",p) ",\"samples\":" tot[k] "}"} print s}' "$HIST")
+
+
+# --- backups -------------------------------------------------------------------
+# The nightly dump is the one piece of infrastructure whose failure stays invisible
+# until you need it. It pages on error, but "nothing broke last night" and "the timer
+# is dead" look identical from a phone, so the dashboard carries the state instead.
+#
+# `offsite` is counted on the REMOTE, not inferred from the local run: a backup that
+# completed and never left the machine is not an offsite backup, and only asking the
+# remote can tell those apart.
+BK_RESULT=$(systemctl show usecert-backup -p Result --value 2>/dev/null)
+BK_EXIT=$(systemctl show usecert-backup -p ExecMainStatus --value 2>/dev/null)
+BK_WHEN=$(systemctl show usecert-backup -p ExecMainExitTimestamp --value 2>/dev/null)
+BK_EPOCH=$(date -d "$BK_WHEN" +%s 2>/dev/null || echo 0)
+if [ "${BK_EPOCH:-0}" -gt 0 ]; then BK_AGE=$(( NOW - BK_EPOCH )); else BK_AGE=-1; fi
+BK_DIR=$(ls -1dt /var/backups/pg/20*/ 2>/dev/null | head -1)
+BK_SET=$(basename "${BK_DIR:-none}")
+BK_FILES=$(find "${BK_DIR:-/nonexistent}" -type f 2>/dev/null | wc -l)
+BK_BYTES=$(du -sb "${BK_DIR:-/nonexistent}" 2>/dev/null | cut -f1)
+BK_SETS=$(find /var/backups/pg -maxdepth 1 -type d -name '20*' 2>/dev/null | wc -l)
+BK_REMOTE=$(cat /etc/usecert/backup-remote 2>/dev/null)
+BK_OFFSITE=-1
+if [ -n "$BK_REMOTE" ] && [ "$BK_SET" != none ]; then
+  BK_OFFSITE=$(RCLONE_CONFIG=/home/usecert/.config/rclone/rclone.conf timeout 45 rclone lsf "${BK_REMOTE}${BK_SET}" 2>/dev/null | wc -l)
+fi
+BACKUP=$(printf '{"result":"%s","exit":%s,"ageSec":%s,"set":"%s","files":%s,"bytes":%s,"sets":%s,"offsite":%s,"remote":"%s"}'   "${BK_RESULT:-unknown}" "${BK_EXIT:-0}" "$BK_AGE" "$BK_SET" "$BK_FILES" "${BK_BYTES:-0}" "$BK_SETS" "$BK_OFFSITE" "${BK_REMOTE:-}")
+
+{
+  printf '{"generated":%s,' "$NOW"
+  printf '"endpoints":['
+  first=1
+  while IFS='|' read -r n c m u; do
+    [ $first -eq 0 ] && printf ','; first=0
+    printf '{"name":"%s","code":"%s","ms":%s,"up":%s}' "$n" "$c" "$m" "$u"
+  done <<< "$ROWS"
+  printf '],"services":[%s],"chain":[%s],"availability":[%s],"backup":%s}' "$SVC" "$CHAIN" "$AVAIL" "$BACKUP"
+} > "$TMP"
+python3 -c "import json,sys;json.load(open('$TMP'))" 2>/dev/null && mv "$TMP" "$OUT" || rm -f "$TMP"
+chmod 644 "$OUT" 2>/dev/null
