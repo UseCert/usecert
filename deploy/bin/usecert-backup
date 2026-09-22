@@ -67,6 +67,82 @@ for db in postgres _supabase; do
   fi
 done
 
+# --- per project ---------------------------------------------------------------
+# The whole-database dump above is the AUTHORITATIVE copy and stays: it is the only
+# one guaranteed to restore cross-schema objects, extensions and grants together.
+# These three are for the common case - "restore one project" - where taking the
+# whole database back would drag the other project's data with it.
+#
+# The split is by SCHEMA, verified rather than assumed: orion-safe configures
+# `db: { schema: 'orion' }`, rwa-experts configures nothing and so uses `public`,
+# and a cross-schema foreign-key check returns empty, which is what makes a
+# schema-only dump restorable on its own.
+#
+# auth and storage are SHARED by both apps and belong to neither, so they are their
+# own file. Restoring a project onto a fresh database needs that one too, or the
+# rows survive and the users who own them do not.
+for pair in "orion:orion" "qwilon:public"; do
+  NAME=${pair%%:*}; SCHEMA=${pair##*:}
+  f="$DEST/project-$NAME-$STAMP.dump"
+  # `extensions` rides along with every project dump. Supabase puts uuid-ossp and
+  # pgcrypto there, and orion's tables default their ids to gen_random_uuid() - so a
+  # --schema=orion dump alone restored 5 of 17 tables with 108 errors, every one of
+  # them downstream of "schema extensions does not exist". It costs a few KB and it
+  # is the difference between a dump that restores and one that only looks like it.
+  if docker exec supabase-db pg_dump -Fc -U postgres -d postgres        --schema="$SCHEMA" --schema=extensions > "$f" 2>>"$LOG"; then
+    chmod 600 "$f"; verify "$f" "project/$NAME ($SCHEMA)" container
+  else
+    fail "project/$NAME: pg_dump --schema=$SCHEMA failed"
+  fi
+done
+
+f="$DEST/project-shared-auth-$STAMP.dump"
+if docker exec supabase-db pg_dump -Fc -U postgres -d postgres --schema=auth --schema=storage > "$f" 2>>"$LOG"; then
+  chmod 600 "$f"; verify "$f" "project/shared (auth+storage)" container
+else
+  fail "project/shared: pg_dump of auth+storage failed"
+fi
+
+# UseCert has NO database. Its web app reads the chain and the usecert database is
+# empty - so a "cert" dump of nothing would look like a backup and protect nothing.
+# What it does have off-chain, and what is genuinely irreplaceable, is the address
+# book: lose it and the deployed contracts are still there but nothing knows where.
+# Keys are deliberately NOT included - this set is destined for offsite storage.
+# A project dump restores into an EMPTY database, which has none of the Supabase
+# scaffolding its tables assume. pg_dump --schema deliberately omits extensions -
+# they are database-level objects, not schema members - so orion restored 5 of 17
+# tables, every failure tracing back to `extensions.uuid_generate_v4() does not
+# exist`. This file recreates that scaffolding, generated from the live database
+# rather than hardcoded, so it stays true if the extension set changes.
+f="$DEST/project-prepare-$STAMP.sql"
+{
+  echo "-- Run this FIRST when restoring any project-*.dump into a fresh database."
+  echo "-- Generated from the live database; recreates the schemas and extensions a"
+  echo "-- per-schema dump cannot carry."
+  docker exec supabase-db psql -U postgres -tAc "
+    SELECT 'CREATE SCHEMA IF NOT EXISTS '||quote_ident(n.nspname)||';'
+    FROM pg_namespace n
+    WHERE n.nspname IN ('extensions','vault','graphql','graphql_public')" 2>/dev/null
+  docker exec supabase-db psql -U postgres -tAc "
+    SELECT 'CREATE EXTENSION IF NOT EXISTS '||quote_ident(e.extname)||
+           ' SCHEMA '||quote_ident(n.nspname)||';'
+    FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace
+    WHERE e.extname <> 'plpgsql'" 2>/dev/null
+} > "$f" 2>>"$LOG"
+if [ -s "$f" ]; then
+  chmod 600 "$f"; note "project/prepare: $(grep -c . "$f") statements"
+else
+  fail "project/prepare: could not generate the scaffolding"
+fi
+
+f="$DEST/project-cert-addressbook-$STAMP.json"
+if [ -r /opt/usecert/deployments/46630.json ]; then
+  cp /opt/usecert/deployments/46630.json "$f"; chmod 600 "$f"
+  note "project/cert: address book $(du -h "$f" | cut -f1) (no database - state is on chain)"
+else
+  fail "project/cert: address book missing at /opt/usecert/deployments/46630.json"
+fi
+
 # --- roles and grants are not in a per-database dump --------------------------
 f="$DEST/supabase-globals-$STAMP.sql"
 docker exec supabase-db pg_dumpall -U postgres --globals-only > "$f" 2>>"$LOG" \
