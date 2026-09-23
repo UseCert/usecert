@@ -10,13 +10,13 @@ const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 const SLIDES = [
   {
     quote:
-      "Perps are a job. A certificate is an asset. I minted uTSLA, LP'd it against USDC, and stopped babysitting funding.",
+      "Perps are a job. A certificate is an asset. I minted uTSLA, LP'd it against tUSDG, and stopped babysitting funding.",
     role: "Holder since C1",
     image: "/testimonial-1.jpg",
   },
   {
     quote:
-      "It is the first equity-shaped asset on Robinhood Chain. We listed it as collateral the same week the vault opened.",
+      "It is equity-shaped exposure that behaves like a plain token. We listed it as collateral the same week the vault opened.",
     role: "DeFi Builder",
     image: "/testimonial-2.jpg",
   },

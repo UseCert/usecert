@@ -51,7 +51,7 @@ export const ARTICLES: Article[] = [
       {
         heading: "A market of positions, not assets",
         paragraphs: [
-          "Every dollar of that exposure is a leveraged perpetual. It tracks the stock beautifully, but it is a position you must manage: funding every eight hours, margin to maintain, a liquidation price that does not care about your thesis. A perp cannot sit in a cold wallet, cannot be LP'd against USDC, cannot be posted as collateral on a lending market.",
+          "Every dollar of that exposure is a leveraged perpetual. It tracks the stock beautifully, but it is a position you must manage: funding every eight hours, margin to maintain, a liquidation price that does not care about your thesis. A perp cannot sit in a cold wallet, cannot be LP'd against tUSDG, cannot be posted as collateral on a lending market.",
           "This is not a complaint about perps. Perps are the engine: the deepest, most liquid, oracle-priced equity book that has ever existed on chain, running 24/7 for TSLA, AAPL, NVDA, AMZN, and a synthetic Nasdaq index. The complaint is that the engine is all there is.",
         ],
       },

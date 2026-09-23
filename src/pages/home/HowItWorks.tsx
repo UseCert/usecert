@@ -19,7 +19,7 @@ export const HOW_IT_WORKS_ROWS: AccordionRow[] = [
     title: "Hold & Use",
     meta: "Form: plain token",
     body: [
-      "Certificates are plain tokens on Robinhood Chain. Hold the stock 24/7, LP uTSLA against USDC, post it as collateral on lending markets, or send it like any token. No funding tabs, no liquidation price, nothing to babysit.",
+      "Certificates are plain tokens on Robinhood Chain. Hold the stock 24/7, LP uTSLA against tUSDG, post it as collateral on lending markets, or send it like any token. No funding tabs, no liquidation price, nothing to babysit.",
       "This is the missing primitive: equity-shaped exposure that finally behaves like an asset. The stock, finally composable.",
     ],
     image: "/hiw-hold.jpg",
