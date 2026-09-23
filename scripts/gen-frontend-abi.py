@@ -16,9 +16,12 @@ UI can turn a revert into a sentence, events because receipt ids are not enumera
 and a receipts screen can only be built from logs.
 """
 
+import hashlib
 import io
 import json
 import os
+import re
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -95,11 +98,72 @@ ARTIFACTS = {
     "BufferBook": "out/BufferBook.sol/BufferBook.json",
 }
 
+# ------------------------------------------------------------------ provenance
+#
+# The header used to print `commit {book["commit"]}` truncated to 12 characters. That
+# field is whatever `COMMIT=` was set to at deploy time, so it accepted any string - and
+# the string it actually carried was `signed-attestation`, which the truncation rendered
+# as `signed-attes`. Twelve characters of lowercase in the slot where a commit prefix
+# goes reads as a commit prefix. It pointed at nothing.
+#
+# Provenance a reader can check is the only kind worth printing, so the header now
+# carries three facts that cannot be hand-set from the address book:
+#
+#   - the commit this file was GENERATED at, read from git here, marked `-dirty` when the
+#     tree has uncommitted changes. A dirty build is not reproducible and says so.
+#   - the sha256 of the address book, so the exact address set is pinned. Recomputable
+#     with `sha256sum deployments/46630.json`.
+#   - the commit the contracts were DEPLOYED at - but ONLY when the book holds something
+#     shaped like one. Anything else prints as unrecorded, quoting what was found. These
+#     are different commits and conflating them is how the old line came to be wrong.
+
+_HEX40 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _git(*args):
+    """A git value, or None. Never raises: this runs in checkouts and in tarballs."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", ROOT] + list(args),
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
+def generated_at_commit():
+    sha = _git("rev-parse", "HEAD")
+    if sha is None:
+        return "unavailable (not a git checkout)"
+    # `status --porcelain` is empty exactly when the tree is clean. An empty result and a
+    # failed call both come back None, so ask for the exit code rather than the text.
+    dirty = _git("status", "--porcelain", "--untracked-files=no")
+    return sha[:12] + ("-dirty" if dirty else "")
+
+
+def deployed_at_commit(book):
+    """The book's `commit`, but only if it IS one. Never truncated into looking like one."""
+    raw = book.get("commit")
+    c = str(raw or "").strip().lower()
+    if _HEX40.match(c):
+        return c[:12]
+    return "unrecorded (address book carries %r, which is not a commit hash)" % (raw,)
+
+
+def book_digest(path):
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()[:12]
+
+
 HEADER = """// GENERATED from Foundry artifacts - do not hand-edit.
 // Regenerate:  forge build && python scripts/gen-frontend-abi.py
 //
 // UseCert - Robinhood Chain testnet (chain 46630)
-// Deployment: block {block}, commit {commit}
+// Deployment:   block {block}
+// Address book: deployments/46630.json, sha256 {book} (first 12)
+// Deployed at:  {deployed}
+// Generated at: commit {generated}
 //
 // Functions are filtered to the front-end surface. ALL errors and events are kept:
 // errors so a UI can decode a revert into a sentence, events because receipt ids are
@@ -145,7 +209,10 @@ def main():
     out = io.StringIO()
     out.write(
         HEADER.format(
-            block=book.get("blockNumber"), commit=str(book.get("commit"))[:12]
+            block=book.get("blockNumber"),
+            book=book_digest(BOOK_PATH),
+            deployed=deployed_at_commit(book),
+            generated=generated_at_commit(),
         )
     )
 
