@@ -136,10 +136,30 @@ def generated_at_commit():
     sha = _git("rev-parse", "HEAD")
     if sha is None:
         return "unavailable (not a git checkout)"
-    # `status --porcelain` is empty exactly when the tree is clean. An empty result and a
-    # failed call both come back None, so ask for the exit code rather than the text.
-    dirty = _git("status", "--porcelain", "--untracked-files=no")
-    return sha[:12] + ("-dirty" if dirty else "")
+    return sha[:12] + ("-dirty" if _tree_is_dirty() else "")
+
+
+def _tree_is_dirty():
+    """Uncommitted tracked changes, EXCLUDING this script's own output.
+
+    The output file is almost always modified at the moment it is regenerated - by the
+    previous run. Counting it means `-dirty` is on every single time, and a flag that
+    cannot be off carries no information. What the flag is for is the case that matters:
+    a bundle generated from sources that differ from the commit it names.
+    """
+    status = _git("status", "--porcelain", "--untracked-files=no")
+    if not status:
+        return False
+    out_rel = os.path.relpath(OUT_PATH, ROOT).replace(os.sep, "/")
+    for line in status.splitlines():
+        # Porcelain v1: two status characters, a space, then the path. A rename carries
+        # "old -> new"; the destination is what was written, so take that side.
+        path = line[3:].strip().strip('"')
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1].strip().strip('"')
+        if path != out_rel:
+            return True
+    return False
 
 
 def deployed_at_commit(book):
