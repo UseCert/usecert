@@ -23,7 +23,7 @@ const NAV_ITEMS: { id: ViewId; label: string; short: string; icon: LucideIcon }[
 /* ---------------------------------------------------------------- top bar */
 
 export function TopBar() {
-  const { block, blockKnown, totals, isError, maxAttestationAgeSec } = useDashboard();
+  const { block, blockKnown, totals, isError, maxAttestationAgeSec, signer } = useDashboard();
   // No data is not "healthy" and it is not "degraded" either — it is unknown, and the
   // chip says so rather than asserting either one.
   //
@@ -45,11 +45,18 @@ export function TopBar() {
     totals !== null && totals.backingRatio !== null && Number.isFinite(totals.backingRatio)
       ? totals.backingRatio
       : null;
+  // An aged attestation is NOT degradation under on-demand attestation - it is what an
+  // idle protocol looks like, and a mint refreshes it in its own transaction. Treating it
+  // as a fault published "Degraded" continuously over a working system (230,019s on chain
+  // against an 11s-old signature at the time this was fixed), which trains a reader to
+  // ignore the chip entirely. What IS degradation is an aged attestation that nothing can
+  // refresh, so staleness only counts when the signer is known to be down.
+  const staleAndUnrefreshable = Boolean(totals?.anyStale) && signer.available === false;
   const status: "unknown" | "no-position" | "healthy" | "degraded" = isError
     ? "degraded"
     : totals === null
       ? "unknown"
-      : totals.anyStale || totals.anyPriceUnavailable
+      : staleAndUnrefreshable || totals.anyPriceUnavailable
         ? "degraded"
         : measuredBackingRatio === null
           ? "no-position"
@@ -86,7 +93,11 @@ export function TopBar() {
             {status === "healthy"
               ? "Attested backing holds"
               : status === "degraded"
-                ? "Degraded · check age and oracle"
+                ? // Name the one that is actually broken. "Check age and oracle" sent readers
+                  // to look at an age that was working as designed.
+                  staleAndUnrefreshable
+                  ? "Degraded · attester not serving"
+                  : "Degraded · check oracle"
                 : status === "no-position"
                   ? "No attested position"
                   : "Reading chain…"}
@@ -110,7 +121,11 @@ export function TopBar() {
                 } · margin / notional ${
                   totals.ratio === null ? "n/a (attested notional $0)" : `${totals.ratio.toFixed(2)}%`
                 } · proven ${Math.round(totals.worstAgeSec)}s ago${
-                  totals.anyStale ? ` · stale >${maxAttestationAgeSec}s` : ""
+                  !totals.anyStale
+                    ? ""
+                    : signer.available === false
+                      ? ` · >${maxAttestationAgeSec}s and no attester`
+                      : ` · >${maxAttestationAgeSec}s · a mint refreshes it`
                 }`}
           </span>
         </div>

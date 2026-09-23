@@ -175,7 +175,8 @@ function Waterfall({
 /* ------------------------------------------------------------------ view */
 
 export default function RiskView() {
-  const { totals, liveVaults, vaults, vaultConfig, maxAttestationAgeSec } = useDashboard();
+  const { totals, liveVaults, vaults, vaultConfig, maxAttestationAgeSec, signer } =
+    useDashboard();
   // Flow history is a third-party HTTP index, not a contract read — see `useFlows`.
   const history = useFlows();
 
@@ -281,7 +282,19 @@ export default function RiskView() {
     {
       label: "Solvency attestation age",
       value: totals ? `${Math.round(totals.worstAgeSec)}s · max ${maxAttestationAgeSec}s` : EM_DASH,
-      state: totals === null ? "unknown" : totals.anyStale ? "warn" : "ok",
+      // Past the max is the normal idle state now, so age alone is not a warning. The
+      // warning that replaces it is the attester row below: that is what actually breaks.
+      state: totals === null ? "unknown" : "ok",
+    },
+    {
+      label: "Attester serving signatures",
+      value:
+        signer.available === null
+          ? EM_DASH
+          : signer.available
+            ? `yes · batch ${signer.batchAgeSec === null ? "age unknown" : `${signer.batchAgeSec}s old`}`
+            : "no · nothing can refresh the attestation",
+      state: signer.available === null ? "unknown" : signer.available ? "ok" : "warn",
     },
     {
       label: "Oracle price available",
