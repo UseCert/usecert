@@ -175,8 +175,15 @@ function Waterfall({
 /* ------------------------------------------------------------------ view */
 
 export default function RiskView() {
-  const { totals, liveVaults, vaults, vaultConfig, maxAttestationAgeSec, signer } =
-    useDashboard();
+  const {
+    totals,
+    liveVaults,
+    vaults,
+    vaultConfig,
+    maxAttestationAgeSec,
+    signer,
+    allAttestationsRefreshable,
+  } = useDashboard();
   // Flow history is a third-party HTTP index, not a contract read — see `useFlows`.
   const history = useFlows();
 
@@ -223,13 +230,19 @@ export default function RiskView() {
       value:
         totals === null
           ? EM_DASH
-          : totals.anyCapacityHalted
-            ? "halted"
-            : fmtOrDash(capacityUtilisation, (n) => `${n.toFixed(2)}%`),
+          : // A ceiling of zero that a mint would refresh is idle, not halted. Same
+            // distinction as the overview table and the mint panel.
+            totals.anyCapacityHalted && allAttestationsRefreshable === true
+            ? "idle"
+            : totals.anyCapacityHalted
+              ? "halted"
+              : fmtOrDash(capacityUtilisation, (n) => `${n.toFixed(2)}%`),
       note:
-        totals?.anyCapacityHalted
-          ? "a routed vault's maxNotional18 is 0 — it refuses every mint"
-          : "used / capacityOracle.maxNotional18",
+        !totals?.anyCapacityHalted
+          ? "used / capacityOracle.maxNotional18"
+          : allAttestationsRefreshable === true
+            ? "maxNotional18 is 0 while the attestation is aged out — a mint refreshes it"
+            : "a routed vault's maxNotional18 is 0 — it refuses every mint",
       icon: Layers,
     },
     {

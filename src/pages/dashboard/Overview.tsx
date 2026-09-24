@@ -31,8 +31,32 @@ import { cn } from "@/lib/utils";
  * level at all. This one is `used / cap` from `_requireCapacity` (`CertVault.sol:1755-1771`)
  * and hits 100% exactly when `CertVault_AtCapacity` fires.
  */
-function CapacityCell({ view }: { view: CapacityView }) {
+function CapacityCell({
+  view,
+  refreshable,
+}: {
+  view: CapacityView;
+  /** Can a mint refresh this vault's attestation? `null` when not yet known. */
+  refreshable?: boolean | null;
+}) {
   if (view.capIsZero) {
+    // The same distinction `CapacityHalt` draws, which this cell was missing: a ceiling of
+    // zero whose ONLY cause is an aged attestation is the idle state of a working vault,
+    // because the mint relays a fresh attestation before the ceiling is read. Printing
+    // "halted" over that told every reader the protocol was refusing mints while it was
+    // not - and did it in amber, four rows at a time.
+    const onlyStale =
+      view.bindingLegs.length === 1 && view.bindingLegs[0] === "stale-attestation";
+    if (onlyStale && refreshable === true) {
+      return (
+        <span
+          className="text-white-60"
+          title="Mint ceiling reads 0 because the on-chain attestation has aged out, which is what an idle protocol looks like. A mint relays a fresh attestation in the same transaction, so the ceiling is non-zero by the time it is checked."
+        >
+          idle · refreshes on mint
+        </span>
+      );
+    }
     return (
       <span
         className="text-warn"
@@ -484,7 +508,7 @@ export default function Overview() {
                     </td>
                     <td className="hidden px-3 py-3.5 text-right md:table-cell">
                       {routed && v.capacity !== null ? (
-                        <CapacityCell view={v.capacity} />
+                        <CapacityCell view={v.capacity} refreshable={attestationRefreshable(v.id)} />
                       ) : (
                         <span className="text-white-60">{EM_DASH}</span>
                       )}
