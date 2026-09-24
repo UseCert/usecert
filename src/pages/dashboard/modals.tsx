@@ -9,6 +9,11 @@ import { truncHash } from "./format";
 import { MicroLabel } from "./ui";
 import { explorerAddressUrl } from "@/chain/config";
 import { decodeRevert } from "@/chain/useActions";
+import {
+  CUSTOM_CHAIN_WARNING,
+  cannotAddCustomChains,
+  explainChainFailure,
+} from "@/chain/walletSupport";
 
 /* ------------------------------------------------------------- modal shell */
 
@@ -84,7 +89,11 @@ export function ModalShell({
  * wagmi's internal identifier, not information. The distinction that matters to a user
  * with no wallet installed is whether a choice needs an extension at all.
  */
-function connectorHint(c: { id: string; type: string }): string {
+function connectorHint(c: { id: string; type: string; name: string }): string {
+  // The capability that matters here outranks the form factor. A wallet that cannot be
+  // given chain 46630 is a dead end whatever kind of wallet it is, and the user should
+  // read that before spending a click on it rather than after.
+  if (cannotAddCustomChains(c)) return CUSTOM_CHAIN_WARNING;
   if (c.type === "walletConnect") return "Scan with a mobile wallet";
   if (c.id === "coinbaseWalletSDK" || c.type === "coinbaseWallet") {
     return "Extension, or a passkey - no install needed";
@@ -112,7 +121,10 @@ export function WalletModal() {
       await connectAsync({ connector, chainId });
       setWalletModalOpen(false);
     } catch (err) {
-      setFailure(decodeRevert(err).message);
+      // A wallet that cannot hold chain 46630 fails here with a viem string that says
+      // nothing useful ("An error occurred when attempting to switch chain"). Name the
+      // actual cause when it is one we understand, and fall back otherwise.
+      setFailure(explainChainFailure(err, connector) ?? decodeRevert(err).message);
     } finally {
       setPendingId(null);
     }
@@ -153,7 +165,14 @@ export function WalletModal() {
           >
             <span>
               <span className="block text-[15px] font-medium text-white">{c.name}</span>
-              <span className="block font-mono text-[11px] text-white-60">{connectorHint(c)}</span>
+              <span
+                className={cn(
+                  "block font-mono text-[11px]",
+                  cannotAddCustomChains(c) ? "text-warn" : "text-white-60",
+                )}
+              >
+                {connectorHint(c)}
+              </span>
             </span>
             {pendingId === c.uid ? (
               <span className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.08em] text-green-bright">
