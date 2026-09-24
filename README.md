@@ -80,6 +80,11 @@ bun run dev
 There are deliberately **no lifecycle scripts** (no `postinstall`, no `prepare`) and no CI in
 the front-end tree. Both are monitored properties, not oversights.
 
+## Revision history
+
+[CHANGELOG.md](CHANGELOG.md) — dated rather than versioned, because nothing here has shipped
+to mainnet yet.
+
 ## Licence
 
 [MIT](LICENSE).
