@@ -1,4 +1,6 @@
+import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Link } from "@/lib/router-compat";
 import { cn } from "@/lib/utils";
 
@@ -161,89 +163,41 @@ const BEFORE_MAINNET: Milestone[] = [
   },
 ];
 
-function Section({
-  label,
-  status,
-  items,
-}: {
-  label: string;
-  status: Status;
-  items: Milestone[];
-}) {
-  const dot =
-    status === "shipped" ? "bg-green-bright" : status === "building" ? "bg-warn" : "bg-white-60";
-  return (
-    <div className="mt-16 first:mt-0 md:mt-24">
-      <p className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
-        <span className={cn("h-1.5 w-1.5 rounded-full", dot)} aria-hidden />
-        {label}
-        <span className="text-white-60/60">· {items.length}</span>
-      </p>
-      <div className="mt-8 grid border-t hairline-dark md:grid-cols-2">
-        {items.map((m, i) => (
-          <motion.div
-            key={m.title}
-            className={cn(
-              "border-b hairline-dark py-8 md:px-8 md:first:pl-0",
-              "md:[&:nth-child(odd)]:pl-0 md:[&:nth-child(even)]:border-l",
-              // A card carrying a screenshot takes the whole row. In a half-width column
-              // these images render around 600px against a 2324px natural - the table text
-              // lands near six pixels and cannot be read, which makes the screenshot
-              // decoration. Full width puts it back at roughly its original size.
-              m.shot && "md:col-span-2 md:!border-l-0 md:!pl-0",
-            )}
-            initial={{ opacity: 0, y: 20 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true, amount: 0.2 }}
-            transition={{ delay: Math.min(i, 4) * 0.06, duration: 0.5, ease: EASE }}
-          >
-            <p className="text-[19px] font-semibold uppercase leading-[1.1] tracking-[-0.03em] text-white lg:text-[22px]">
-              {m.title}
-            </p>
-            <p className="mt-3 max-w-[52ch] text-[13px] leading-[1.6] text-white-60">{m.copy}</p>
-            {m.verify && (
-              <p className="mt-3 font-mono text-[11px] leading-[1.6] text-green-bright/80">
-                Check it: {m.verify}
-              </p>
-            )}
-            {/* Lazy, and with width and height declared, so four screenshots below the fold
-                cost nothing on arrival and reserve their space instead of shifting the
-                text as they load. */}
-            {m.shot && (
-              <figure className="mt-5">
-                {/* Opens the file itself. On a phone these captures sit at 343px - a 1134px
-                    table is unreadable there and no amount of layout fixes that, so the
-                    honest remedy is a way to see it full size rather than pretending the
-                    thumbnail is legible. */}
-                <a
-                  href={m.shot.src}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="block"
-                  aria-label={`Open full-size: ${m.shot.caption}`}
-                >
-                  <img
-                    src={m.shot.src}
-                    alt={m.shot.alt}
-                    loading="lazy"
-                    decoding="async"
-                    style={m.shot.maxW ? { maxWidth: m.shot.maxW } : undefined}
-                    className="w-full border hairline-dark bg-[#0d0f0d] transition-opacity hover:opacity-90"
-                  />
-                </a>
-                <figcaption className="mt-2 max-w-[80ch] font-mono text-[10px] leading-[1.6] text-white-60/70">
-                  {m.shot.caption} <span className="text-white-60/50">Tap to enlarge.</span>
-                </figcaption>
-              </figure>
-            )}
-          </motion.div>
-        ))}
-      </div>
-    </div>
-  );
-}
+/**
+ * One flat sequence, so a reader can walk the whole set without first choosing a section.
+ * The section a milestone belongs to travels with it as a label instead.
+ */
+const PAGES: { m: Milestone; status: Status; label: string }[] = [
+  ...SHIPPED.map((m) => ({ m, status: "shipped" as Status, label: "Shipped" })),
+  ...BUILDING.map((m) => ({ m, status: "building" as Status, label: "Building" })),
+  ...BEFORE_MAINNET.map((m) => ({ m, status: "planned" as Status, label: "Before mainnet" })),
+];
+
+const DOT: Record<Status, string> = {
+  shipped: "bg-green-bright",
+  building: "bg-warn",
+  planned: "bg-white-60",
+};
 
 export default function RoadmapPage() {
+  const [i, setI] = useState(0);
+  const { m, status, label } = PAGES[i];
+
+  const go = useCallback((next: number) => {
+    setI(Math.max(0, Math.min(PAGES.length - 1, next)));
+  }, []);
+
+  // Arrow keys. A paged view that answers only the mouse is a worse version of the
+  // scrolling page it replaced.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "ArrowRight") go(i + 1);
+      if (e.key === "ArrowLeft") go(i - 1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [i, go]);
+
   return (
     <section className="grain bg-ink text-white">
       <div className="relative z-[2] mx-auto max-w-[1440px] px-4 py-24 md:px-6 md:py-32 lg:px-12">
@@ -252,9 +206,9 @@ export default function RoadmapPage() {
           What works<span className="text-green-bright">,</span> and what does not yet
         </h1>
 
-        {/* The disclosure a reader needs before anything below means what it appears to
-            mean. It leads rather than sits in a footnote, because someone who reads only
-            the first paragraph should still leave with the correct impression. */}
+        {/* The disclosure a reader needs before anything below means what it appears to mean.
+            It stays above the pager rather than living on page one, because a paged view is
+            one a reader can arrive in the middle of. */}
         <p className="mt-8 max-w-[62ch] text-[16px] leading-[1.55] text-silver">
           UseCert runs on Robinhood Chain <strong className="text-white">testnet</strong>. Nothing
           here holds real-world value, the collateral is a test token, and the perp venue is a
@@ -266,9 +220,107 @@ export default function RoadmapPage() {
           and publishing that as a calendar would be inventing a confidence nobody has.
         </p>
 
-        <Section label="Shipped" status="shipped" items={SHIPPED} />
-        <Section label="Building" status="building" items={BUILDING} />
-        <Section label="Before mainnet" status="planned" items={BEFORE_MAINNET} />
+        {/* ------------------------------------------------------------------ pager */}
+        <div className="mt-16 border-t hairline-dark pt-8 md:mt-24">
+          {/* Every milestone as a tick, so a reader sees the shape of the whole set and can
+              jump, instead of only stepping one at a time. Coloured by status, so the
+              proportion of shipped to planned is readable at a glance. */}
+          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-2">
+            {PAGES.map((p, n) => (
+              <button
+                key={p.m.title}
+                type="button"
+                onClick={() => go(n)}
+                aria-label={`${n + 1}. ${p.m.title}`}
+                aria-current={n === i ? "step" : undefined}
+                title={`${p.label} — ${p.m.title}`}
+                className={cn(
+                  "h-1 w-7 transition-colors md:w-9",
+                  n === i ? DOT[p.status] : "bg-white/15 hover:bg-white/40",
+                )}
+              />
+            ))}
+          </div>
+
+          <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
+            <p className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
+              <span className={cn("h-1.5 w-1.5 rounded-full", DOT[status])} aria-hidden />
+              {label}
+              <span className="text-white-60/60">
+                · {i + 1} of {PAGES.length}
+              </span>
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => go(i - 1)}
+                disabled={i === 0}
+                className="flex items-center gap-1.5 border border-white/20 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.08em] text-white transition-colors hover:border-green-bright/50 hover:text-green-bright disabled:opacity-30 disabled:hover:border-white/20 disabled:hover:text-white"
+              >
+                <ChevronLeft size={13} /> Prev
+              </button>
+              <button
+                type="button"
+                onClick={() => go(i + 1)}
+                disabled={i === PAGES.length - 1}
+                className="flex items-center gap-1.5 border border-white/20 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.08em] text-white transition-colors hover:border-green-bright/50 hover:text-green-bright disabled:opacity-30 disabled:hover:border-white/20 disabled:hover:text-white"
+              >
+                Next <ChevronRight size={13} />
+              </button>
+            </div>
+          </div>
+
+          {/* A floor under the panel so the controls above do not jump as pages of very
+              different lengths swap in - the buttons have to stay where the cursor left them. */}
+          <div className="mt-8 min-h-[460px] border-t hairline-dark pt-10">
+            {/* A plain keyed remount, NOT AnimatePresence mode="wait". With the wait mode
+                the exit never completed here, so the incoming article never mounted and
+                the page counter advanced over frozen content - fifteen pages all showing
+                the first milestone. Changing the key remounts and replays the entrance,
+                which is the whole effect that was wanted. */}
+            <motion.article
+              key={m.title}
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.28, ease: EASE }}
+            >
+                <h2 className="max-w-[26ch] text-[28px] font-semibold uppercase leading-[1.05] tracking-[-0.03em] text-white md:text-[38px]">
+                  {m.title}
+                </h2>
+                <p className="mt-5 max-w-[64ch] text-[15px] leading-[1.65] text-white-60 md:text-[16px]">
+                  {m.copy}
+                </p>
+                {m.verify && (
+                  <p className="mt-4 max-w-[64ch] font-mono text-[11px] leading-[1.6] text-green-bright/80">
+                    Check it: {m.verify}
+                  </p>
+                )}
+                {m.shot && (
+                  <figure className="mt-8">
+                    <a
+                      href={m.shot.src}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="block"
+                      aria-label={`Open full-size: ${m.shot.caption}`}
+                    >
+                      <img
+                        src={m.shot.src}
+                        alt={m.shot.alt}
+                        loading="lazy"
+                        decoding="async"
+                        style={m.shot.maxW ? { maxWidth: m.shot.maxW } : undefined}
+                        className="w-full border hairline-dark bg-[#0d0f0d] transition-opacity hover:opacity-90"
+                      />
+                    </a>
+                    <figcaption className="mt-2 max-w-[80ch] font-mono text-[10px] leading-[1.6] text-white-60/70">
+                      {m.shot.caption} <span className="text-white-60/50">Tap to enlarge.</span>
+                    </figcaption>
+                  </figure>
+                )}
+            </motion.article>
+          </div>
+        </div>
 
         <div className="mt-16 border hairline-dark bg-section-deep p-6 md:mt-24 md:p-8">
           <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-green-bright">
