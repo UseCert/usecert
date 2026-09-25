@@ -70,7 +70,7 @@ const SHIPPED: Milestone[] = [
   {
     title: "Four mirrors live",
     copy: "uTSLA, uSPY, uQQQ and uNVDA on Robinhood Chain testnet. Mint, redeem, and force-exit all work against the deployed contracts.",
-    verify: "Every address is in the dashboard and on the explorer.",
+    verify: "Every address is on /contracts, each linking to its verified source on the explorer.",
     shot: {
       src: "/roadmap/mirrors.jpg",
       alt: "Dashboard table listing uTSLA, uSPY, uQQQ and uNVDA, each marked live, with oracle price, supply, attested notional and margin, buffer held and hedge ratio.",
