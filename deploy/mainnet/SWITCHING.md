@@ -67,6 +67,58 @@ Two things that cost real money if missed:
 **SPX also exists, as market 42.** `uSPX` was retired from this project because "the venue has
 no SPX perp" — true of the simulator, not of Lighter. Worth revisiting on its own merits.
 
+## 2b. Running the deploy
+
+`script/DeployMainnet.s.sol` is `DeployTestnet` with the six answers that differ. Every phase,
+ordering constraint and post-deploy assertion is inherited unchanged.
+
+**Keys.** Three wallets, generated on the operations host and stored in
+`/etc/usecert/mainnet-deployer.env`, root-owned `0600`. The private keys have never been in a
+terminal, a log or this repository.
+
+| role | address |
+|---|---|
+| deployer | `0x6381577a72266E6b89eE9E96dF604CC3cd3f8e92` |
+| governance | `0x0E315779a25c124B7C94a43E7C57636949ca5ff7` |
+| attester | `0x021EeE925f9a7F0e9de1dBB5211D62466404f681` |
+
+The script reads `MAINNET_DEPLOYER_PK` / `MAINNET_GOV_PK` / `MAINNET_ATTESTER_PK`, deliberately
+NOT the parent's `DEPLOYER_PK` / `GOV_PK` / `ATTESTER_PK`. Those names are already exported on
+this host for the testnet keeper, and inheriting them would let a mainnet deploy run in the
+wrong shell pick up testnet keys and broadcast real transactions from them.
+
+**Four answers the script refuses to guess.** Each reverts by name rather than defaulting:
+
+```
+MAINNET_SEED_COLLATERAL   real USDG per vault, 6 decimals. Cannot be zero:
+                          bootstrap() deposits one unit into the venue, so a
+                          vault with an empty balance cannot be bootstrapped.
+MAINNET_FEED_<symbol>     a real 8-decimal aggregator per mirror. _readFeed does
+                          not bound decimals(), so 8 is a deployment constraint
+                          with no runtime check behind it.
+_collateralAssetIndex     USDG's asset index at the venue. Testnet used 3, which
+                          is LighterSim's own numbering. Edit the override.
+_singleSource             whether the feed and the venue mark are economically
+                          independent, answered against the real feed. Edit it.
+```
+
+**Dry run, in order.** Verified 2026-09-25 — each gate names what is missing:
+
+```bash
+sudo bash -c 'set -a; . /etc/usecert/mainnet-deployer.env; set +a
+  cd /opt/usecert
+  forge script script/DeployMainnet.s.sol:DeployMainnet     --rpc-url https://rpc.mainnet.chain.robinhood.com'
+```
+
+With no extra environment it stops at `MAINNET_FEED_uTSLA`; with feeds set it stops at
+`singleSource`. Add `--broadcast` only when nothing is left to stop it, and set
+`COMMIT=$(git rev-parse HEAD)` so the address book records a real commit.
+
+**One earlier version of this script panicked** with `array out-of-bounds` after
+`SolvencyRegistry` deployed, because the phase-1 override skipped pushing one aggregator per
+mirror and later phases index that array. It now demands a real feed per mirror instead, which
+is both the fix and the thing that was actually missing.
+
 ## 3. The mechanical switch
 
 1. Answer the three nulls in `deploy/mainnet/4663.plan.json`: `singleSource`,

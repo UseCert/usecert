@@ -366,6 +366,13 @@ contract DeployTestnet is Script {
         return SEED_COLLATERAL;
     }
 
+    /// @dev Whether a fourth key is needed to advance the venue's batches. True for the
+    ///      simulator, which gates `settleBatch` on owner-or-keeper; false for a real venue,
+    ///      which settles its own.
+    function _requiresBatchKeeper() internal view virtual returns (bool) {
+        return true;
+    }
+
     // ------------------------------------------------------------------------------------ setup
 
     /// @dev DELIBERATELY NOT read from `script/config/testnet.json`. A Foundry script parsing JSON
@@ -482,7 +489,11 @@ contract DeployTestnet is Script {
         // the deployer (who is also the simulator's owner); loaded and validated here so a missing
         // key aborts before anything is broadcast, exactly like the collateral check above.
         batchKeeper = _batchKeeperAddress();
-        if (batchKeeper == address(0)) revert DeployTestnet_MissingBatchKeeper();
+        // Required here because LighterSim gates settleBatch on owner-or-keeper. A real venue
+        // advances its own batches and has no such role, so the requirement is overridable.
+        if (_requiresBatchKeeper() && batchKeeper == address(0)) {
+            revert DeployTestnet_MissingBatchKeeper();
+        }
 
         // AND IT MUST BE A FOURTH KEY, checked the same way the three above are.
         //
