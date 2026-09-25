@@ -14,6 +14,15 @@ WorkingDirectory=/opt/usecert-web
 # detects no provider, nothing matches, and the fallback emits a Cloudflare Worker bundle that
 # Node cannot execute. Verified in nitro: `preset = configOverrides.preset || NITRO_PRESET
 # || SERVER_PRESET`. See deploy/README.md.
+#
+# The failure is silent: Node loads the Worker bundle, runs nothing and EXITS ZERO, so this
+# unit sits in "activating" forever, the log below stays EMPTY, and the site 502s with nothing
+# anywhere naming the cause. It happened on 2026-09-25 from a plain `bun run build`.
+#
+# DO NOT DEPLOY BY BUILDING AND RESTARTING BY HAND. Use deploy/bin/usecert-deploy-web: it sets
+# the preset, then checks .output/nitro.json to confirm nitro actually used it, refuses to
+# restart onto a bundle that cannot boot, and puts the previous build back if the new one does
+# not serve a page.
 Environment=NODE_ENV=production
 Environment=PORT=3000
 Environment=HOST=127.0.0.1
