@@ -1037,6 +1037,31 @@ the design's protection against an owner draining it, and the reason it cannot b
 The cause was seeding twelve vaults before proving that one could hedge.
 
 
+### 6.9 The hybrid works technically, and is blocked by jurisdiction — **BLOCKING, legal** — 2026-09-26
+
+Phase A of the keeper design (6.8), run from the deployer wallet before any contract change:
+
+* **Key registration through the L1 contract works.** A Lighter API key registered with
+  `changePubKey(33016, 3, pubKey)` - the only registration path a contract can use - was
+  recognised by the venue (`check_client` OK). So a vault CAN hold a trading key.
+* **Opening a position off-chain was refused before it reached the book:**
+  `code 20558, "You are accessing Lighter from a restricted jurisdiction."` The server is OVH
+  Montréal.
+* Lighter's own terms, section 6, *"For both the Points Program and perpetual futures trading on
+  Lighter on Robinhood Chain"*, restrict: BY, **CA**, CN, CU, IR, MM, KP, RU, SG, SS, SD, **CH**,
+  SY, UA, AE, **GB**, **US**, VE.
+
+This is not a server problem. Moving the keeper would only change where the order comes from, not
+who is trading: if the operating entity is in a restricted region - and Switzerland is on the
+list - running the keeper elsewhere would be circumventing the venue's terms. It is not done here
+and should not be. **Whether UseCert can hedge on this venue at all is a legal question for the
+operator, not an engineering one.**
+
+The on-chain side (deposits, key registration, reduce-only closes, withdrawals) was not blocked.
+All test funds were returned: wallet 16.89 USDG, venue account empty. The API key registered on
+the wallet's venue account controls an empty account.
+
+
 ---
 
 ## Keeping the public page in sync
