@@ -681,11 +681,48 @@ address book, and `attestationFor` now rejects a payload naming a different `cer
 already did for the registry. `deploy/bin/usecert-smoke` relays both and was re-run from the
 audit's own starting condition (`ageSec` 7,260, capacity 0) with every hash recorded.
 
-### 5.3 Race and expiry handling — **S** — open
+### 5.3 Race and expiry handling — **S** — ✅ done 2026-09-25
 
-On `StaleBatch`, `StaleNonce` or near-expiry, refetch state and bundle **once**, with deadline
-headroom, then show a specific message. Do not blindly retry the mint. Today a lost race surfaces
-as a raw revert.
+The re-audit asked for deliberate handling of `StaleBatch`, `StaleNonce` and expiry instead of a
+blind retry. Writing it turned up a worse bug than the one requested.
+
+**`waitForTransactionReceipt` does not throw on a revert.** It returns a receipt whose `status`
+is `"reverted"`. The refresh path awaited it and moved on — so a relay that lost a race was
+indistinguishable from one that worked, and the mint went out behind it and reverted too. **The
+user paid for both** and was told the contract rejected the action. Measured rather than reasoned
+about: a replayed attestation forced past gas estimation mines with receipt status **0**, which is
+exactly the case where the wallet simulated cleanly and someone else landed first.
+
+**Losing a race is not an error.** Two people minting off one bundle is the ordinary case, and the
+loser's revert means the winner's transaction landed — which is what the second mint wanted. So a
+failed relay asks **the chain** whether it is fresh rather than parsing the revert: state is ground
+truth, the error name is a report about it, and a receipt does not carry the reason anyway. Fresh
+→ the mint proceeds as if it had won.
+
+Not fresh → **one** retry on a newly fetched bundle, and then the mint is **not sent**. A retry
+loop here is a loop of wallet prompts. `no-bundle` is excluded from the retry on purpose — the
+signer just said it has nothing for this vault, and asking again 200ms later is not a strategy —
+and a dismissed wallet prompt is rethrown rather than retried, because retrying it means prompting
+again.
+
+**Deadline headroom 10s → 25s.** Ten seconds is enough for ONE transaction and this path now sends
+up to two before the mint: a bundle with twelve seconds left passed the old test, funded the mark
+relay, and expired under the registry relay. 25s is measured, not guessed — the signer was sampled
+live and republishes every 30s against 60s validity, so remaining life is always ≥ 30s and the
+guard is a bound rather than a common path.
+
+The four race reverts now carry copy that says the true thing — nothing is broken, somebody else
+was first — rather than "the contract rejected this action (`SolvencyRegistry_StaleBatch`)". The
+two expiry cases are `retryable`, not `user`.
+
+**Verified by producing both races on purpose.** The first attempt *measured the wrong thing*: it
+fetched the bundle twice, and the signer rolls over every 30 seconds, so the "replay" was a
+different valid bundle and succeeded. Capturing one bundle and replaying **that** gave the real
+selectors — `0x42ca6d9e` and `0xa31577df`, which are `SolvencyRegistry_StaleBatch` and
+`CertOracle_StaleNonce` exactly — so the copy is keyed to the names that actually fire rather than
+the ones that looked right. Receipt status 0 confirmed on a mined revert. Happy path re-run end to
+end after deploying: mark nonce 4 → 5, attestation refreshed, mint and redeem clean, supply
+returned to 1.3624 exactly.
 
 ### 5.4 The five user-visible states — **M** — partly done
 
@@ -786,8 +823,10 @@ three, since all three are the same question — what does the project claim, an
 1.5 is now narrower than the other two: 3.6 built the mechanism, so the per-chain claims follow
 the deployment on their own and what remains is the **wording**, not the plumbing.
 
-**Ahead of all of it.** 5.5 is closed; the corrective re-audit's remaining P0 is 5.3, which gates
-a public testnet pilot rather than mainnet and is small. 5.1's acceptance evidence — one recorded wallet
+**Ahead of all of it.** The corrective re-audit's P0 items are now closed (5.1, 5.2, 5.3, 5.5).
+What stands between here and a labelled no-value testnet pilot is P1 work: 5.4 (the remaining
+user-visible states, and signer-readiness alerting), 5.6 (runtime payload validation) and 4.5
+(a green enforced baseline). 5.1's acceptance evidence — one recorded wallet
 journey from an aged-out attestation through to a confirmed mint — is the single cheapest piece of
 evidence this project is missing, and it is the one that would have caught 5.1 before an auditor
 did.
