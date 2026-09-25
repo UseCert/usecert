@@ -221,7 +221,7 @@ contract DeployMainnet is DeployTestnet {
                 marketIndex: 112,
                 priceDecimals: 2,
                 sizeDecimals: 4,
-                seedPx18: 366.62e18,
+                seedPx18: 372.58e18,
                 absoluteCap18: 90_000e18,
                 openInterest18: 900_000e18,
                 bufferFloor18: 100_000e18,
@@ -237,7 +237,7 @@ contract DeployMainnet is DeployTestnet {
                 marketIndex: 128,
                 priceDecimals: 2,
                 sizeDecimals: 4,
-                seedPx18: 650e18,
+                seedPx18: 769.82e18,
                 absoluteCap18: 5_000_000e18,
                 openInterest18: 50_000_000e18,
                 bufferFloor18: 100_000e18,
@@ -253,7 +253,7 @@ contract DeployMainnet is DeployTestnet {
                 marketIndex: 129,
                 priceDecimals: 2,
                 sizeDecimals: 4,
-                seedPx18: 716.31e18,
+                seedPx18: 742.79e18,
                 absoluteCap18: 3_050_000e18,
                 openInterest18: 30_500_000e18,
                 bufferFloor18: 100_000e18,
@@ -270,9 +270,42 @@ contract DeployMainnet is DeployTestnet {
                 // 3 and 3, NOT the 2 and 4 its neighbours use. See the note above.
                 priceDecimals: 3,
                 sizeDecimals: 3,
-                seedPx18: 223.67e18,
+                seedPx18: 224.908e18,
                 absoluteCap18: 311_000e18,
                 openInterest18: 3_110_000e18,
+                bufferFloor18: 100_000e18,
+                bufferFeeOn18: 60_000e18,
+                bufferMintSlow18: 30_000e18
+            })
+        );
+        assets.push(
+            AssetParams({
+                name: "UseCert AAPL",
+                symbol: "uAAPL",
+                feedDescription: "AAPL / USD",
+                marketIndex: 113,
+                // 3 and 3, like NVDA and unlike the 2/4 majority. Read, not assumed.
+                priceDecimals: 3,
+                sizeDecimals: 3,
+                seedPx18: 339.336e18,
+                absoluteCap18: 500_000e18,
+                openInterest18: 5_000_000e18,
+                bufferFloor18: 100_000e18,
+                bufferFeeOn18: 60_000e18,
+                bufferMintSlow18: 30_000e18
+            })
+        );
+        assets.push(
+            AssetParams({
+                name: "UseCert MSFT",
+                symbol: "uMSFT",
+                feedDescription: "MSFT / USD",
+                marketIndex: 115,
+                priceDecimals: 2,
+                sizeDecimals: 4,
+                seedPx18: 514.46e18,
+                absoluteCap18: 500_000e18,
+                openInterest18: 5_000_000e18,
                 bufferFloor18: 100_000e18,
                 bufferFeeOn18: 60_000e18,
                 bufferMintSlow18: 30_000e18
