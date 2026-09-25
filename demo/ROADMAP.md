@@ -496,6 +496,66 @@ next verification a one-liner, and is the same provenance gap as 0.3 and 3.4.
 
 ---
 
+## Phase 4 — from the launch-readiness audit, 25 September 2026
+
+Full response in `demo/AUDIT-RESPONSE-2026-09-25.md`. Its verdict — no-go for mainnet,
+promising testnet prototype — is accepted.
+
+### 4.1 Security headers, source-controlled — **S** — ✅ done 2026-09-25
+
+The audit reported no source-controlled CSP, HSTS, anti-framing, MIME-sniffing, referrer or
+permissions policy. Half wrong about the **live site**, which already served HSTS, nosniff,
+X-Frame-Options and Referrer-Policy — and entirely right about the **repository**, where none
+of it existed. A header living only on one host is one bad reload from being gone.
+
+`deploy/nginx/10-security-headers.conf` is now committed and installed. Added: **CSP** and
+**Permissions-Policy**. Tightened: X-Frame-Options `SAMEORIGIN` → `DENY`, HSTS given
+`includeSubDomains`. `preload` deliberately not set — a one-way door enforced by browser
+vendors belongs in a decision, not a config change.
+
+Every CSP source earns its place: the Google Fonts stylesheet and its files, the chain RPC,
+and the Blockscout index `useFlows` reads directly. `frame-ancestors 'none'` is the one that
+matters — it stops a clickjacking frame around a page asking people to sign transactions.
+`'unsafe-inline'` on `script-src` stays and is documented as a real weakening: the hydration
+payload is an inline script, and removing it needs per-request nonces through SSR.
+`'unsafe-eval'` is **not** granted, so a connector that wants it fails loudly.
+
+Installing it found two things review would not have: the old snippet was still included in the
+same server block, which would have sent every shared header **twice**; and a location block
+re-included the old file, which matters because nginx drops server-level `add_header` entirely
+in any location that sets its own.
+
+Verified as served on `/`, `/dashboard`, `/contracts`, `/api/attestations` and on a 404, with
+no header sent twice, and the dashboard still loading chain data under the CSP — block height,
+prices and attestation age all render, so `connect-src` is right. Three Permissions-Policy
+features were dropped after the browser logged them unrecognised: a policy that fills the
+console with warnings teaches an operator to ignore it.
+
+### 4.2 Prove the live mint path — **S** — ✅ done 2026-09-25
+
+The audit's headline finding. See `AUDIT-RESPONSE-2026-09-25.md` §1 and
+`deploy/bin/usecert-smoke`: minting works today with no keeper restored, with transaction
+hashes recorded. The observation (stale attestations, zero capacity) was right; the conclusion
+(a dead attestation process) was not — that is the on-demand design.
+
+### 4.3 Commit the `/api/attestations` route as deployable config — **S** — open
+
+The route works and is proxied on the host, but the configuration is not in the repository, so
+nothing here proves the client and the signer are connected.
+
+### 4.4 Product and legal copy — **M** — open, *and it is 1.3 / 1.4 / 1.5*
+
+The audit independently reached the same conclusion as this document's Phase 1 editorial items:
+staking, slashing, insurance, fee passthrough and buybacks are described as live, and simulated
+mirrors are labelled `LIVE`. Still an editorial call about what the project claims.
+
+### 4.5 Green enforced baseline — **M/L** — open
+
+`forge fmt --check` red, front-end lint red (1,644 errors), no CI, no release manifest, 97
+Slither findings untriaged.
+
+---
+
 ## Keeping the public page in sync
 
 **This file is not the only roadmap.** `/roadmap` on use-cert.com publishes a reader-facing
