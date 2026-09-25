@@ -1,0 +1,93 @@
+#!/bin/bash
+# END-TO-END SMOKE TEST on Robinhood Chain testnet (chain 46630).
+#
+# The external audit reported the deployment "not mint-operational": attestations ~395,000s
+# stale, zero capacity on every mirror, "a currently dead attestation process". The
+# observation is correct. Whether it is a FAILURE depends on something the audit could not
+# see from chain state alone: since 2026-09-20 attestation is on-demand, so the registry is
+# stale between mints by design and the mint relays a fresh signature itself.
+#
+# That has never been proven end to end. This proves it or breaks it. Every transaction hash
+# is printed.
+set -uo pipefail
+# sudo makes $HOME root's, so the toolchain path is explicit.
+export PATH="/home/usecert/.foundry/bin:$PATH"
+set -a; . /etc/usecert/keeper.env; set +a
+
+R=https://rpc.testnet.chain.robinhood.com
+V=0x31d6Ffd315212DF8f7f640daC14FcCBB83E9E105
+CERT=0xe663ea92ccbF37497869262C73D9B7aA99899331
+REG=0xf0BA4fbc077314FE13aE4CaDA5940035FadEa61c
+CAP=0xdB57D9936c6099acE144dbbeD1ec9132268436C0
+USDG=0x09ECc891D36eaf5B1Fcb637200E2028165E3D79e
+FAUCET=0x1E4331A0b7C7923Aaba2EF0C30CAfC8bC7edc8Fc
+
+num() { sed 's/ .*//' ; }
+say() { printf "  %-30s %s\n" "$1" "$2"; }
+send() { # echoes the tx hash, or the revert reason
+  local out
+  out=$(cast send "$@" --private-key "$DEPLOYER_PK" --rpc-url "$R" 2>&1)
+  local h
+  h=$(printf '%s' "$out" | grep -oE '^transactionHash\s+0x[0-9a-f]+' | awk '{print $2}')
+  if [ -n "$h" ]; then printf '%s' "$h"; else printf 'REVERT: %s' "$(printf '%s' "$out" | grep -oE '\[Revert\].*|Error:.*|revert.*' | head -1)"; fi
+}
+
+ME=$(cast wallet address --private-key "$DEPLOYER_PK" 2>/dev/null)
+[ -z "$ME" ] && { echo "  could not derive the minter address"; exit 1; }
+
+bufcap=$(cast call "$V" 'bufferCapacity18()(uint256)' --rpc-url "$R" | num)
+echo "== 0. state the audit observed =="
+say "minter" "$ME"
+say "attestation age" "$(cast call "$REG" 'ageSec(address)(uint256)' "$V" --rpc-url "$R" | num)s   (limit 300)"
+say "capacity maxNotional18" "$(cast call "$CAP" 'maxNotional18(address,uint256)(uint256)' "$V" "$bufcap" --rpc-url "$R" | num)"
+say "tUSDG balance" "$(cast call "$USDG" 'balanceOf(address)(uint256)' "$ME" --rpc-url "$R" | num)"
+CB0=$(cast call "$CERT" 'balanceOf(address)(uint256)' "$ME" --rpc-url "$R" | num)
+say "uTSLA balance" "$CB0"
+echo
+
+echo "== 1. collateral =="
+HAVE=$(cast call "$USDG" 'balanceOf(address)(uint256)' "$ME" --rpc-url "$R" | num)
+if [ "$HAVE" -lt 10000000 ]; then
+  say "faucet claim()" "$(send "$FAUCET" 'claim()')"
+fi
+say "tUSDG now" "$(cast call "$USDG" 'balanceOf(address)(uint256)' "$ME" --rpc-url "$R" | num)"
+echo
+
+echo "== 2. relay the signed attestation, exactly as a mint does first =="
+python3 -c "
+import json, urllib.request
+d = json.load(urllib.request.urlopen('http://127.0.0.1:8787/attestations', timeout=20))
+a = [x for x in d['attestations'] if x['symbol'] == 'uTSLA'][0]
+json.dump(a, open('/tmp/att.json', 'w'))
+print('  signer batch %s  observedAt %s  deadline %s' % (a['batchId'], a['observedAt'], a['deadline']))
+"
+BID=$(python3 -c "import json;print(json.load(open('/tmp/att.json'))['batchId'])")
+NOT=$(python3 -c "import json;print(json.load(open('/tmp/att.json'))['notional18'])")
+MAR=$(python3 -c "import json;print(json.load(open('/tmp/att.json'))['margin18'])")
+OI=$(python3 -c "import json;print(json.load(open('/tmp/att.json'))['openInterest18'])")
+OBS=$(python3 -c "import json;print(json.load(open('/tmp/att.json'))['observedAt'])")
+DL=$(python3 -c "import json;print(json.load(open('/tmp/att.json'))['deadline'])")
+SIG=$(python3 -c "import json;print(json.load(open('/tmp/att.json'))['attestSig'])")
+say "attestSigned" "$(send "$REG" 'attestSigned(address,uint64,uint256,uint256,uint256,uint64,uint64,bytes)' "$V" "$BID" "$NOT" "$MAR" "$OI" "$OBS" "$DL" "$SIG")"
+say "attestation age now" "$(cast call "$REG" 'ageSec(address)(uint256)' "$V" --rpc-url "$R" | num)s"
+bufcap=$(cast call "$V" 'bufferCapacity18()(uint256)' --rpc-url "$R" | num)
+say "capacity now" "$(cast call "$CAP" 'maxNotional18(address,uint256)(uint256)' "$V" "$bufcap" --rpc-url "$R" | num)"
+echo
+
+echo "== 3. mint 10 tUSDG =="
+say "approve" "$(send "$USDG" 'approve(address,uint256)' "$V" 10000000)"
+say "mintInstant" "$(send "$V" 'mintInstant(uint256)' 10000000)"
+CB=$(cast call "$CERT" 'balanceOf(address)(uint256)' "$ME" --rpc-url "$R" | num)
+say "uTSLA received" "$CB"
+echo
+
+echo "== 4. redeem back ONLY what this run minted =="
+# NOT the full balance. The first run of this script passed $CB - the whole position - and
+# redeemed 1.3624 uTSLA that predated the test, taking total supply to zero. Redeem the
+# delta, so the smoke test leaves the deployment exactly as it found it.
+MINTED=$(( CB - CB0 ))
+if [ "$MINTED" -gt 0 ]; then
+  say "redeemInstant (delta only)" "$(send "$V" 'redeemInstant(uint256)' "$MINTED")"
+fi
+say "uTSLA final" "$(cast call "$CERT" 'balanceOf(address)(uint256)' "$ME" --rpc-url "$R" | num)"
+say "tUSDG final" "$(cast call "$USDG" 'balanceOf(address)(uint256)' "$ME" --rpc-url "$R" | num)"
