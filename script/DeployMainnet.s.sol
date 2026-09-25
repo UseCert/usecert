@@ -65,25 +65,42 @@ contract DeployMainnet is DeployTestnet {
         return MAINNET_STALENESS_SECONDS;
     }
 
-    /// @dev REVERTS ON PURPOSE. The parent's 3 is LighterSim's own numbering and means nothing
-    ///      to Lighter; a wrong asset index deposits margin against the wrong asset. It is not
-    ///      exposed by any public endpoint checked on 2026-09-25 (`api/v1/assets` and
-    ///      `api/v1/info` both 403), so it has to be read from the venue and pasted here.
-    ///      A plausible default would be the most expensive kind of guess.
+    /// @dev ANSWERED 2026-09-25 by asking the venue itself. A wrong index deposits margin
+    ///      against the wrong asset, so this is measured rather than reasoned about.
+    ///
+    ///      HOW IT WAS MEASURED, AND HOW IT WAS FIRST MEASURED WRONG. `api/v1/assets` and
+    ///      `api/v1/info` are both 403, but `api/v1/orderBooks` is public and carries a
+    ///      `quote_asset_id` per market. Every one of our six markets reports 0, so 0 went in
+    ///      here - and the deploy dry run reverted `AdditionalZkLighter_InvalidAssetIndex` at
+    ///      `bootstrap()`. The order book's quote asset id and `deposit()`'s asset index are
+    ///      DIFFERENT NUMBERINGS; reading one and calling it the other was measuring the wrong
+    ///      thing and describing it as a measurement.
+    ///
+    ///      What settled it: `eth_call` of `deposit(deployer, i, 0, 1e6)` across i = 0..24.
+    ///      0 and 2 revert `InvalidAssetIndex`; 1 and 4..24 revert `InvalidDepositAmount`;
+    ///      3 alone reached the ERC-20 transfer and failed only on allowance. Granting a
+    ///      1 USDG allowance turned that inference into a pass - index 3 then SUCCEEDS and
+    ///      every other index still fails. The allowance was revoked immediately.
+    ///
+    ///      The parent also uses 3, which is a coincidence of LighterSim's own numbering and
+    ///      not evidence: had it disagreed, the venue would still be right.
     function _collateralAssetIndex() internal view override returns (uint16) {
-        revert DeployMainnet_AnswerRequired(
-            "collateralAssetIndex: read USDG's asset index from the venue and set it here"
-        );
+        return 3;
     }
 
-    /// @dev REVERTS ON PURPOSE. This declares the price feed and the venue mark economically
-    ///      independent. On testnet it was `false` while both keepers ran on our own keys, which
-    ///      made the declaration organisational rather than economic. On mainnet it is a claim
-    ///      about whatever real feed is wired, and only a human who knows that feed can make it.
+    /// @dev ANSWERED 2026-09-25: false, and the constructor would refuse anything else.
+    ///
+    ///      This declares the price feed and the venue mark economically independent. On
+    ///      testnet it was `false` while both keepers ran on our own keys, which made the
+    ///      declaration organisational rather than economic. On mainnet it is now true in the
+    ///      economic sense the flag is for: the mark comes from Lighter's order book and the
+    ///      price from Chainlink's own aggregators on this chain, which share no operator.
+    ///
+    ///      It is also forced. `true` caps `deviationBps` at MAX_SINGLE_SOURCE_DEVIATION_BPS
+    ///      (200) and construction REVERTS at our 500, so `true` could not deploy without also
+    ///      loosening a risk parameter - which is the right coupling and worth not fighting.
     function _singleSource() internal view override returns (bool) {
-        revert DeployMainnet_AnswerRequired(
-            "singleSource: answer honestly against the real feed being wired, then set it here"
-        );
+        return false;
     }
 
     /// @dev No free collateral. The parent mints its own seed because the deployer owns
@@ -96,6 +113,52 @@ contract DeployMainnet is DeployTestnet {
     /// @dev The real venue advances its own batches; there is no keeper role to register.
     function _requiresBatchKeeper() internal view override returns (bool) {
         return false;
+    }
+
+    /// @dev False: see `_phase5_allowlistMarksAndBootstrap` above. Bootstrap is done by
+    ///      `deploy/bin/usecert-mainnet-bootstrap` as six direct transactions, because forge
+    ///      cannot execute the venue's Stylus deposit in any mode.
+    function _bootstrapsInScript() internal view override returns (bool) {
+        return false;
+    }
+
+    /// @dev The real venue, asserted for what it IS rather than for what `LighterSim` is.
+    ///
+    ///      The parent checks an allowlist row, a margin floor, a seeded mark, a simulator owner
+    ///      and a batch keeper. Lighter has none of those: no depositor allowlist we sit on, no
+    ///      owner we control, and it advances its own batches. Calling them here would revert
+    ///      rather than fail an assertion.
+    ///
+    ///      What IS assertable before bootstrap is that each vault points at the venue this file
+    ///      names, carries the collateral asset index that venue accepts, and has NOT yet been
+    ///      registered - the last one being the precondition the bootstrap step depends on. The
+    ///      post-conditions of bootstrap are asserted by the tool that performs it.
+    function _verifyVenueWiring(uint256 i) internal view override {
+        CertVault v = CertVault(deployed[i].vault);
+        (, uint16 assetIndex,,,,,,,,) = v.cfg();
+
+        require(address(v.lighter()) == ZK_LIGHTER, "S9 MAINNET: vault.lighter is not Lighter's proxy");
+        require(assetIndex == 3, "S9 MAINNET: cfg.collateralAssetIndex != 3 - the venue rejects the deposit");
+        require(!v.bootstrapped(), "S9 MAINNET: already bootstrapped before the bootstrap step");
+        require(
+            v.lighterAccountIndex() == 0,
+            "S9 MAINNET: lighterAccountIndex non-zero before bootstrap - this vault is not fresh"
+        );
+    }
+
+    /// @dev The parent asserts the collateral is deployer-owned and that a faucet holds its
+    ///      float. Neither is true or desirable here: USDG is owned by its issuer - the deploy
+    ///      dry run read `owner()` as 0xcFA0388f5ddf905FdC08c45c716C15Dc10A14C6F, which is the
+    ///      point of using real collateral - and no faucet is deployed, because a faucet on
+    ///      mainnet is a mint of free money.
+    ///
+    ///      The check is REPLACED rather than dropped. What matters on this chain is that the
+    ///      vaults were wired to the USDG this file names and not to something else that also
+    ///      reports six decimals, and that no faucet slipped into the deployment.
+    function _verifyCollateralAndFaucet() internal view override {
+        require(collateral == USDG, "S9 MAINNET: collateral is not the USDG this script names");
+        require(testFaucet == address(0), "S9 MAINNET: a faucet was deployed on mainnet");
+        require(IERC20(collateral).totalSupply() > 0, "S9 MAINNET: collateral has no supply");
     }
 
     // ---------------------------------------------------------------------------------- senders
@@ -183,13 +246,32 @@ contract DeployMainnet is DeployTestnet {
     ///      owner-gated depositor allowlist for us to call, and there is no free collateral.
     ///
     ///      Bootstrapping still has to happen, so it is done here without the two testnet steps.
+    /// @dev BOOTSTRAP IS NOT DONE HERE, and cannot be.
+    ///
+    ///      `CertVault.bootstrap()` calls `lighter.deposit(...)`, which on mainnet delegates to
+    ///      0xDa2B59fFB41485a6f21E14e479AE7B7AB29a997c - an Arbitrum Stylus (WASM) contract that
+    ///      foundry's EVM cannot execute. It aborts with `NotActivated` after burning ~963M gas,
+    ///      which is the signature of that rather than of a contract fault: the USDG transfer
+    ///      into the venue completes first and the venue's balance visibly increments.
+    ///
+    ///      `--skip-simulation` does not help. `forge script` ALWAYS executes the script locally
+    ///      to collect the transactions to send; that flag only skips the separate on-chain
+    ///      simulation pass. So a script that calls `bootstrap()` can never broadcast anything
+    ///      at all - it dies while building the list. Confirmed by running it: nothing was sent,
+    ///      no address book was written, and not one wei moved.
+    ///
+    ///      The chain itself has no such trouble: `eth_call` of `deposit()` at asset index 3
+    ///      SUCCEEDS against the node. So bootstrapping is a direct transaction, not a scripted
+    ///      one - `deploy/bin/usecert-mainnet-bootstrap` does the six and verifies each.
+    ///
+    ///      What stays here is the part forge can do: fund each buffer so the dust is already in
+    ///      the vault when bootstrap is called.
     function _phase5_allowlistMarksAndBootstrap() internal override {
         uint256 seed = _seedCollateral();
         require(seed > 0, "MAINNET: seed collateral must be non-zero; bootstrap deposits from it");
         for (uint256 i = 0; i < assets.length; ++i) {
             IERC20(collateral).approve(deployed[i].vault, seed);
             CertVault(deployed[i].vault).seedBuffer(seed);
-            CertVault(deployed[i].vault).bootstrap();
         }
     }
 
