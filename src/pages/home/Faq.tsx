@@ -28,7 +28,7 @@ export const FAQ_ROWS: AccordionRow[] = [
   {
     title: "Who takes the loss if the buffer runs out?",
     body: [
-      "Stakers. Staked tokens underwrite the insurance buffer and are slashed before holder backing is ever touched. Holders are senior, always. In exchange, stakers earn a share of mint and redeem fees plus funding-surplus fees.",
+      "In the design, stakers — staked tokens would underwrite the insurance buffer and be slashed before holder backing is ever touched, with holders senior always, and stakers earning a share of mint and redeem fees plus funding-surplus fees in exchange. None of that is deployed: there is no token, no staking contract and no insurance buffer on chain today. Until there is, the per-asset funding buffer is the only thing absorbing this loss, and after it is exhausted the loss reaches holders.",
     ],
   },
 ];

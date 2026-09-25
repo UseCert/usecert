@@ -3,10 +3,21 @@ import Counter from "@/components/Counter";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
+/**
+ * THE INTENDED SPLIT FOR A TOKEN THAT IS NOT DEPLOYED.
+ *
+ * These read as present-tense facts about money moving. No token exists, no fee split is
+ * implemented, and nothing on chain routes a buyback. Token genesis is C3 on the roadmap
+ * below, and `live: false` there — this section was the one place that forgot.
+ *
+ * The numbers stay because the design is real and worth publishing. The framing changes,
+ * because "of protocol fees go to buyback" and "is what we intend to do with protocol fees"
+ * are different claims and only one of them is true today.
+ */
 const STATS = [
-  { end: 80, suffix: "%", caption: "Of protocol fees go to open market token buyback" },
-  { end: 10, suffix: "%", caption: "Goes to staker pay for underwriting the buffer" },
-  { end: 5, suffix: "+5%", caption: "Split between the buffer and the treasury" },
+  { end: 80, suffix: "%", caption: "Intended for open-market token buyback" },
+  { end: 10, suffix: "%", caption: "Intended for staker pay, for underwriting the buffer" },
+  { end: 5, suffix: "+5%", caption: "Intended split between the buffer and the treasury" },
 ];
 
 /** §3 TOKEN FLOW (full-bleed section-deep): counters left, metallic statement right. */
@@ -15,6 +26,11 @@ export default function TokenFlow() {
     <section className="grain section-glow relative bg-section-deep text-white">
       <div className="relative z-[2] mx-auto max-w-[1440px] px-4 py-16 md:px-6 md:py-24 lg:px-12 lg:py-32">
         <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">The token</p>
+        {/* Stated before the numbers, not after them. A reader who takes in the counters and
+            leaves should not have been misled by the time they go. */}
+        <p className="mt-3 inline-block border border-warn/40 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.08em] text-warn">
+          Not deployed — design only
+        </p>
 
         <div className="mt-10 grid gap-14 lg:grid-cols-2 lg:gap-20">
           {/* Left: counters with dot markers */}
@@ -74,8 +90,11 @@ export default function TokenFlow() {
               viewport={{ once: true, amount: 0.4 }}
               transition={{ delay: 0.2, duration: 0.7, ease: EASE }}
             >
-              Mint and redeem fees, plus the funding-surplus share, fund buybacks and staker pay. Stakers are paid
-              because stakers are first in line when the buffer breaks. No emissions games, no hidden dilution.
+              The design: mint and redeem fees, plus the funding-surplus share, would fund buybacks and staker
+              pay — stakers paid because they are first in line when the buffer breaks. No emissions games, no
+              hidden dilution. None of it is deployed. There is no token, no staking contract and no fee split
+              on chain today; this is the intent the contracts are being built toward, published so it can be
+              argued with early.
             </motion.p>
           </div>
         </div>
