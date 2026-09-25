@@ -336,7 +336,12 @@ def main():
         "certFactory",
         "lighterSim",
     ):
-        if key in shared:
+        # A null means "not deployed on this chain", and the mainnet book has testFaucet
+        # and lighterSim null on purpose. Emitting them anyway writes the literal string
+        # 'None' into the bundle - which typechecks, reads like an address, and is one of
+        # the more expensive things a front end could be handed. Omitting them instead lets
+        # the front end test for ABSENCE and say true things about which chain it is on.
+        if shared.get(key):
             out.write("  %s: '%s' as const,\n" % (key, shared[key]))
     out.write("} as const;\n\nexport const MIRRORS = [\n")
     for v in book["vaults"]:
