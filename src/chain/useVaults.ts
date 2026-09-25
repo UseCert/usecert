@@ -505,6 +505,16 @@ export interface LiveVault extends Omit<Vault, "id" | "price"> {
   /** True when `ageSec > MAX_ATTESTATION_AGE_SEC` (300 s): capacity is zero, minting off. */
   attestationStale: boolean;
 
+  /**
+   * The guard thresholds this mirror’s oracle actually enforces, read from it.
+   *
+   * `px()` reverts past `stalenessSeconds`; `mintAllowed()` goes false on a deviation
+   * beyond `deviationBps` or a basis outside `basisBandBps`. Published so the risk table
+   * can name a number a reader can check against the oracle, instead of quoting one from
+   * a document that nothing keeps in sync with the deployment.
+   */
+  guards: { stalenessSeconds: number; deviationBps: number; basisBandBps: number };
+
   /* -------------------------------------------------------------------- basis */
   /**
    * `known` from `oracle.basisBpsChecked()`. False means there is no independent basis to
@@ -637,7 +647,7 @@ type ReadResult =
   | { status: "failure"; result?: undefined; error?: unknown };
 
 /** Number of calls issued per mirror, in the order built by `vaultCalls`. */
-const CALLS_PER_MIRROR = 13;
+const CALLS_PER_MIRROR = 16;
 
 function vaultCalls(mirror: Mirror): ContractCall[] {
   // Order matters: `useLiveVaults` decodes by index against CALLS_PER_MIRROR.
@@ -666,6 +676,15 @@ function vaultCalls(mirror: Mirror): ContractCall[] {
     // The own-capital input to bufferCapacity18() (CertVault.sol:564). Read so a zero
     // ceiling can be attributed to an empty float rather than to the ledger.
     call(mirror.vault, CertVaultABI, "freeCollateral18"),
+    // ---- the oracle's own guard thresholds.
+    //
+    // These decide when px() reverts and when mintAllowed() goes false. Until now the
+    // dashboard discussed them only in comments while the risk table named them in prose.
+    // A threshold a reader cannot check is indistinguishable from one that was made up, so
+    // they are read from the oracle that enforces them rather than copied from a document.
+    call(mirror.certOracle, CertOracleABI, "stalenessSeconds"),
+    call(mirror.certOracle, CertOracleABI, "deviationBps"),
+    call(mirror.certOracle, CertOracleABI, "basisBandBps"),
   ];
 }
 
@@ -1123,6 +1142,13 @@ export function useLiveVaults(options?: { refetchIntervalMs?: number }): UseLive
         ageSec,
         ageSecFromVault: Number(solvency.ageSec),
         attestationStale: ageSec > MAX_ATTESTATION_AGE_SEC,
+
+        // Read from the oracle, never from a constant: these are what it actually enforces.
+        guards: {
+          stalenessSeconds: Number(asBigint(results[base + 13]) ?? 0n),
+          deviationBps: Number(asBigint(results[base + 14]) ?? 0n),
+          basisBandBps: Number(asBigint(results[base + 15]) ?? 0n),
+        },
 
         basisKnown: basis.known,
         basisBps: basis.bps !== null ? fromBps(basis.bps) : null,
