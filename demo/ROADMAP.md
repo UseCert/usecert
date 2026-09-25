@@ -15,7 +15,7 @@ the flow list now reads Blockscout. They are not repeated here.
 All small, all independent, none blocked on anyone. **0.0 is a one-line fix and it is the
 most urgent item in this document.**
 
-### 0.0 `SolvencyRegistryABI` is used but never imported — **S** — 🔴 breaks every mint
+### 0.0 `SolvencyRegistryABI` is used but never imported — **S** — ✅ done 2026-09-21
 
 `src/chain/useActions.ts` references `SolvencyRegistryABI` at lines **477** and **493**, inside
 `refreshAttestationIfStale()`. It is not in the import list and not declared in the file. The
@@ -50,7 +50,7 @@ mint with capacity forced open, and confirmed with `tsc --noEmit`.
 why a branch with two TS2304 errors was recordable and deployable. `npx tsc --noEmit` catches
 this class of bug in seconds. See 3.4.
 
-### 0.1 Pin the relay's contract address — **S**
+### 0.1 Pin the relay's contract address — **S** — ✅ done 2026-09-21
 
 `src/chain/useActions.ts:491` sends the relay transaction to `a.registry`, taken from the
 `/api/attestations` JSON, instead of the pinned `SHARED.solvencyRegistry`. The `ageSec` read
@@ -67,7 +67,7 @@ address: SHARED.solvencyRegistry,   // and drop `registry` from SignedAttestatio
                                     // or assert equality and bail on mismatch
 ```
 
-### 0.2 Fix the mobile horizontal scroll — **S**
+### 0.2 Fix the mobile horizontal scroll — **S** — ✅ done 2026-09-21
 
 Five `whitespace-nowrap` classes replaced width constraints. Measured at 375×812 on the
 branch tip: `document.scrollWidth` is **650px against a 375px viewport — 275px of sideways
@@ -205,16 +205,39 @@ go to open market token buyback" for a token that is not deployed.
 The dashboard is already clean — its figures are live reads. This is the marketing surface,
 and half-doing it leaves the site contradicting itself.
 
-### 1.6 Finish the redemption SLA — **S**
+### 1.6 Finish the redemption SLA — **S** — ✅ done 2026-09-25
 
-`home/HowItWorks.tsx` and `home/Compare.tsx` were corrected. The rollup escape hatch, and
-the same SLA wherever else redemption is described, were not.
+`home/HowItWorks.tsx` and `home/Compare.tsx` already carried it. Three other places described
+redemption with no timing at all, each reading as an unconditional promise of immediacy:
+
+| where | said | now also says |
+|---|---|---|
+| `home/Faq.tsx` | "redeemable at oracle price any time" | same transaction below the instant cap, queued and paid by claim above it |
+| `roles/RolesAccordion.tsx` | "redeems whenever you want out" | the same cap distinction |
+| `Legal.tsx` (terms of service) | "Redemption is never gated and settles at oracle price" | the full SLA — two batch round-trips expected, the venue's 14-day priority expiration as the worst case, and "queued is not refused" |
+
+"Any time" was never wrong about *availability* — redemption really is never refused — but it
+was silent about *speed*, which is the part a holder plans around.
+
+**The rollup escape hatch turned out to be absent rather than half-written.** Nothing on the
+site mentioned it. Rather than describe an Arbitrum Orbit mechanism this project has never
+exercised, the terms now state the boundary, which is the part that is actually known:
+`forceExit` is gated on nothing UseCert controls, but submitting the transaction at all
+requires Robinhood Chain to include it, and that is the chain's concern, not something UseCert
+can promise on its behalf.
+
+Verified as served rather than by grep: `/legal/terms-of-service` carries the SLA, the 14-day
+worst case and the boundary; the FAQ and Holder caveats are in the DOM on `/` and `/roles`.
+Worth recording for next time — the How-it-works copy is inside an **accordion**, so a
+collapsed row is absent from the server-rendered HTML. Grepping the page suggested the SLA was
+missing there; expanding the row in a browser showed it rendering correctly. The grep was
+measuring the wrong thing, not finding a bug.
 
 ---
 
 ## Phase 2 — make the app whole
 
-### 2.1 Ship `/api/attestations` — **M** — ⚠️ currently a live outage
+### 2.1 Ship `/api/attestations` — **M** — ✅ done 2026-09-20 (the signer has been live since)
 
 **This is the highest-value item in the document.** There is no API implementation anywhere
 in the repo, and the endpoint 404s on the deployed host.
