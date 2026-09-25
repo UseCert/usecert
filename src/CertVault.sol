@@ -783,7 +783,11 @@ contract CertVault {
         // remainder is escrow with no certificate against it and is reconciled in settleMint.
         uint256 indicative = _quantiseToVenue(net18 * 1e18 / px18);
         uint256 notional18 = _value18(indicative, px18);
-        if (notional18 <= cfg.instantCap18) revert CertVault_BelowInstantCap();
+        // The instant/queued split routes small mints to mintInstant. Keeper mode switches
+        // mintInstant off - it would open on chain, which the venue refuses - so EVERY mint is
+        // queued and the cap no longer separates anything. Without this, a mint at or below the
+        // cap would be refused by both paths: impossible, not merely slow.
+        if (!keeperHedging && notional18 <= cfg.instantCap18) revert CertVault_BelowInstantCap();
         _requireCapacity(notional18, px18);
 
         receiptId = _nextReceiptId++;

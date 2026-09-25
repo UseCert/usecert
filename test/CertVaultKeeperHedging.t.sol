@@ -105,6 +105,20 @@ contract CertVaultKeeperHedgingTest is VaultFixture {
         assertEq(usdg.balanceOf(alice), balBefore);
     }
 
+    /// Every mint is queued in keeper mode, so the instant cap stops separating anything. Without
+    /// the exemption a mint below it would be refused by BOTH paths - requestMint for being small,
+    /// mintInstant for opening on chain - and small mints would be impossible, not merely slow.
+    function test_keeperMode_mintsBelowTheInstantCapAreQueuedToo() public {
+        vm.expectRevert(CertVault.CertVault_BelowInstantCap.selector);
+        vm.prank(alice);
+        vault.requestMint(1_000e6);          // ~$1k against a $10k instant cap: refused by default
+
+        _enable();
+        vm.prank(alice);
+        uint256 id = vault.requestMint(1_000e6);
+        assertGt(_indicative(id), 0, "a small mint in keeper mode was not queued");
+    }
+
     // -------------------------------------------------------------------------------- settling
 
     /// Settling is the claim that the off-chain hedge FILLED, so only the keeper makes it, and the
