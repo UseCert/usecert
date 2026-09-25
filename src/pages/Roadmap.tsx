@@ -116,6 +116,16 @@ const SHIPPED: Milestone[] = [
     },
   },
   {
+    title: "Every contract verified on the explorer",
+    copy: "All 26 deployed contracts publish their source. Paste any address into the explorer and read the code it was compiled from, including the certificate token itself.",
+    verify: "Pick any address from the dashboard and open it on the explorer.",
+  },
+  {
+    title: "Risk thresholds read from the contracts",
+    copy: "The failure-mode table used to name its thresholds in prose. Each row now prints the number the contract actually enforces — staleness, deviation, basis band, attestation age, instant cap — read live from the oracle and the vault.",
+    verify: "Compare the risk table against the same values on the explorer.",
+  },
+  {
     title: "External security audit, criticals closed",
     copy: "The contracts were audited by an outside reviewer. Every critical finding is closed in code, and the proof-of-concept exploits are kept in the repository as executable evidence rather than summarised.",
   },
@@ -142,12 +152,12 @@ const BEFORE_MAINNET: Milestone[] = [
     copy: "Moving attestation from a keeper to a signature is new since the audit, and it sits directly on the gate that admits minting. Closed criticals do not transfer to a path that did not exist when they were closed.",
   },
   {
-    title: "A real venue",
-    copy: "Today the perp venue is a simulator this project runs. Every margin and position figure on the dashboard describes a simulated position, and the independence check between price sources cannot mean anything until there are two real ones.",
+    title: "Trade against the real venue",
+    copy: "Lighter is live on Robinhood Chain mainnet and the interface this project calls matches it — every function checked against the deployed contract. What has never been tested is behaviour: settlement timing, partial fills, order rejection, margin accounting. On testnet the venue is a simulator this project runs, so every margin and position figure here describes a simulated position.",
   },
   {
     title: "Verified market indices on every mirror",
-    copy: "Two of the four mirrors carry a market index that was chosen rather than read from the venue. On a simulator that deploys cleanly; against a real order book it would hedge the wrong market. This is recorded per mirror in the public address book.",
+    copy: "Checked against the live venue: none of the four indices deployed here match it, including the two previously recorded as verified. On a simulator any index works, which is exactly why a wrong one went unnoticed. The real ids are known and recorded; correcting them is a redeploy per mirror, because the index is immutable.",
   },
   {
     title: "Real collateral",
@@ -179,12 +189,22 @@ const DOT: Record<Status, string> = {
   planned: "bg-white-60",
 };
 
+/** Page 0 is the summary; milestone n sits at index n + 1. */
+const TOTAL_PAGES = PAGES.length + 1;
+
+const GROUPS: { label: string; status: Status; items: Milestone[] }[] = [
+  { label: "Shipped", status: "shipped", items: SHIPPED },
+  { label: "Building", status: "building", items: BUILDING },
+  { label: "Before mainnet", status: "planned", items: BEFORE_MAINNET },
+];
+
 export default function RoadmapPage() {
   const [i, setI] = useState(0);
-  const { m, status, label } = PAGES[i];
+  const summary = i === 0;
+  const page = summary ? null : PAGES[i - 1];
 
   const go = useCallback((next: number) => {
-    setI(Math.max(0, Math.min(PAGES.length - 1, next)));
+    setI(Math.max(0, Math.min(TOTAL_PAGES - 1, next)));
   }, []);
 
   // Arrow keys. A paged view that answers only the mouse is a worse version of the
@@ -197,6 +217,12 @@ export default function RoadmapPage() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [i, go]);
+
+  /** Jump straight to a milestone from the summary. */
+  const openMilestone = (title: string) => {
+    const n = PAGES.findIndex((p) => p.m.title === title);
+    if (n >= 0) go(n + 1);
+  };
 
   return (
     <section className="grain bg-ink text-white">
@@ -226,17 +252,28 @@ export default function RoadmapPage() {
               jump, instead of only stepping one at a time. Coloured by status, so the
               proportion of shipped to planned is readable at a glance. */}
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-2">
+            <button
+              type="button"
+              onClick={() => go(0)}
+              aria-label="Overview"
+              aria-current={summary ? "step" : undefined}
+              title="Overview"
+              className={cn(
+                "h-1 w-7 transition-colors md:w-9",
+                summary ? "bg-white" : "bg-white/15 hover:bg-white/40",
+              )}
+            />
             {PAGES.map((p, n) => (
               <button
                 key={p.m.title}
                 type="button"
-                onClick={() => go(n)}
+                onClick={() => go(n + 1)}
                 aria-label={`${n + 1}. ${p.m.title}`}
-                aria-current={n === i ? "step" : undefined}
+                aria-current={n + 1 === i ? "step" : undefined}
                 title={`${p.label} — ${p.m.title}`}
                 className={cn(
                   "h-1 w-7 transition-colors md:w-9",
-                  n === i ? DOT[p.status] : "bg-white/15 hover:bg-white/40",
+                  n + 1 === i ? DOT[p.status] : "bg-white/15 hover:bg-white/40",
                 )}
               />
             ))}
@@ -244,10 +281,13 @@ export default function RoadmapPage() {
 
           <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
             <p className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
-              <span className={cn("h-1.5 w-1.5 rounded-full", DOT[status])} aria-hidden />
-              {label}
+              <span
+                className={cn("h-1.5 w-1.5 rounded-full", page ? DOT[page.status] : "bg-white")}
+                aria-hidden
+              />
+              {page ? page.label : "Overview"}
               <span className="text-white-60/60">
-                · {i + 1} of {PAGES.length}
+                · {i + 1} of {TOTAL_PAGES}
               </span>
             </p>
             <div className="flex items-center gap-2">
@@ -262,7 +302,7 @@ export default function RoadmapPage() {
               <button
                 type="button"
                 onClick={() => go(i + 1)}
-                disabled={i === PAGES.length - 1}
+                disabled={i === TOTAL_PAGES - 1}
                 className="flex items-center gap-1.5 border border-white/20 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.08em] text-white transition-colors hover:border-green-bright/50 hover:text-green-bright disabled:opacity-30 disabled:hover:border-white/20 disabled:hover:text-white"
               >
                 Next <ChevronRight size={13} />
@@ -278,47 +318,90 @@ export default function RoadmapPage() {
                 the page counter advanced over frozen content - fifteen pages all showing
                 the first milestone. Changing the key remounts and replays the entrance,
                 which is the whole effect that was wanted. */}
-            <motion.article
-              key={m.title}
-              initial={{ opacity: 0, y: 12 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.28, ease: EASE }}
-            >
+            {summary ? (
+              <motion.div
+                key="overview"
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.28, ease: EASE }}
+              >
                 <h2 className="max-w-[26ch] text-[28px] font-semibold uppercase leading-[1.05] tracking-[-0.03em] text-white md:text-[38px]">
-                  {m.title}
+                  Where this stands
                 </h2>
                 <p className="mt-5 max-w-[64ch] text-[15px] leading-[1.65] text-white-60 md:text-[16px]">
-                  {m.copy}
+                  {SHIPPED.length} shipped, {BUILDING.length} being built, and{" "}
+                  {BEFORE_MAINNET.length} things that have to be true before any of it touches
+                  mainnet. Open any one for what it means and how to check it.
                 </p>
-                {m.verify && (
-                  <p className="mt-4 max-w-[64ch] font-mono text-[11px] leading-[1.6] text-green-bright/80">
-                    Check it: {m.verify}
+
+                <div className="mt-10 grid gap-10 md:grid-cols-3 md:gap-6">
+                  {GROUPS.map((g) => (
+                    <div key={g.label}>
+                      <p className="flex items-center gap-2 border-b hairline-dark pb-3 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
+                        <span className={cn("h-1.5 w-1.5 rounded-full", DOT[g.status])} aria-hidden />
+                        {g.label}
+                        <span className="text-white-60/60">· {g.items.length}</span>
+                      </p>
+                      <ul className="mt-1">
+                        {g.items.map((it) => (
+                          <li key={it.title}>
+                            <button
+                              type="button"
+                              onClick={() => openMilestone(it.title)}
+                              className="w-full border-b hairline-dark py-3 text-left text-[13px] leading-[1.45] text-silver transition-colors hover:text-green-bright"
+                            >
+                              {it.title}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </motion.div>
+            ) : (
+            <motion.article
+                key={page!.m.title}
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.28, ease: EASE }}
+              >
+                  <h2 className="max-w-[26ch] text-[28px] font-semibold uppercase leading-[1.05] tracking-[-0.03em] text-white md:text-[38px]">
+                    {page!.m.title}
+                  </h2>
+                  <p className="mt-5 max-w-[64ch] text-[15px] leading-[1.65] text-white-60 md:text-[16px]">
+                    {page!.m.copy}
                   </p>
-                )}
-                {m.shot && (
-                  <figure className="mt-8">
-                    <a
-                      href={m.shot.src}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="block"
-                      aria-label={`Open full-size: ${m.shot.caption}`}
-                    >
-                      <img
-                        src={m.shot.src}
-                        alt={m.shot.alt}
-                        loading="lazy"
-                        decoding="async"
-                        style={m.shot.maxW ? { maxWidth: m.shot.maxW } : undefined}
-                        className="w-full border hairline-dark bg-[#0d0f0d] transition-opacity hover:opacity-90"
-                      />
-                    </a>
-                    <figcaption className="mt-2 max-w-[80ch] font-mono text-[10px] leading-[1.6] text-white-60/70">
-                      {m.shot.caption} <span className="text-white-60/50">Tap to enlarge.</span>
-                    </figcaption>
-                  </figure>
-                )}
-            </motion.article>
+                  {page!.m.verify && (
+                    <p className="mt-4 max-w-[64ch] font-mono text-[11px] leading-[1.6] text-green-bright/80">
+                      Check it: {page!.m.verify}
+                    </p>
+                  )}
+                  {page!.m.shot && (
+                    <figure className="mt-8">
+                      <a
+                        href={page!.m.shot.src}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="block"
+                        aria-label={`Open full-size: ${page!.m.shot.caption}`}
+                      >
+                        <img
+                          src={page!.m.shot.src}
+                          alt={page!.m.shot.alt}
+                          loading="lazy"
+                          decoding="async"
+                          style={page!.m.shot.maxW ? { maxWidth: page!.m.shot.maxW } : undefined}
+                          className="w-full border hairline-dark bg-[#0d0f0d] transition-opacity hover:opacity-90"
+                        />
+                      </a>
+                      <figcaption className="mt-2 max-w-[80ch] font-mono text-[10px] leading-[1.6] text-white-60/70">
+                        {page!.m.shot.caption} <span className="text-white-60/50">Tap to enlarge.</span>
+                      </figcaption>
+                    </figure>
+                  )}
+              </motion.article>
+            )}
           </div>
         </div>
 
