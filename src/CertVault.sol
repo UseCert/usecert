@@ -51,6 +51,13 @@ contract CertVault {
     ///      the revert-capable _hedge, so an amount that rounds to zero after size-decimals
     ///      conversion must revert instead of hedging nothing (an unhedged mint breaks Law 1).
     error CertVault_ZeroHedgeAmount();
+    /// @dev The hedge this action needs is below the venue's minimum order size. The venue would
+    ///      reject it off chain AFTER the vault had minted against it, so the mint refuses here.
+    error CertVault_BelowVenueMinimum();
+    /// @dev A venue call failed because the transaction did not carry enough gas for it. Reverts
+    ///      rather than being treated as a venue refusal - see _requestWithdraw.
+    error CertVault_VenueCallStarvedOfGas();
+    error CertVault_VenueMinimumOutOfBounds();
     /// @dev C3: an unsettled mint receipt past its settleWindow. Not a dead end — refundMint()
     ///      is permissionless and returns the escrow, so the expiry is a fork, not a trap.
     error CertVault_SettleWindowExpired();
@@ -81,6 +88,7 @@ contract CertVault {
     error CertVault_RefundNotStaged();
 
     event Minted(address indexed user, uint256 amountIn, uint256 certOut, uint256 px18, uint256 fee);
+    event VenueMinimumsSet(uint256 minBase, uint256 minNotional18);
     event MintRequested(uint256 indexed receiptId, address indexed user, uint256 amountIn);
     event MintSettled(uint256 indexed receiptId, uint256 certOut, uint256 fillPx18);
     /// @dev C3: the other side of the settle deadline — escrow returned, no certificates minted.
@@ -158,6 +166,29 @@ contract CertVault {
     uint8 internal constant ORDER_TYPE_MARKET = 1;
     uint8 internal constant SIDE_BID = 0;
     uint8 internal constant SIDE_ASK = 1;
+
+    /// @notice How far past the oracle price a hedge order is allowed to fill, in bps.
+    /// @dev MAINNET, 2026-09-25. Every hedge used to be a market order whose price field was the
+    ///      oracle price EXACTLY. On Lighter a market order's price is its worst acceptable fill:
+    ///      a buy will not pay more, a sell will not take less. The oracle is a Chainlink
+    ///      TOTAL-RETURN feed and the venue marks spot, so the two differ by tens of bps in either
+    ///      direction - measured at the first mainnet mint, the feed read $371.75 while the best
+    ///      ask was $372.62. The buy refused to pay 23 bps over a price nobody was selling at, was
+    ///      killed, and the vault minted certificates with nothing behind them.
+    ///
+    ///      The testnet simulator could not catch this by construction: LighterCore fills at its
+    ///      own mark price and ignores the order's price field entirely.
+    ///
+    ///      So the price sent is now a band, not a point: a buy may fill up to +1%, a sell down to
+    ///      -1%. A market order still fills at the book, so in the ordinary case this costs the
+    ///      spread and the feed/venue basis (11-46 bps measured) and nothing more - the band only
+    ///      decides the worst fill the vault will accept rather than refusing every fill. The
+    ///      basis the vault pays is absorbed by the buffer, exactly as the basis already was.
+    uint256 public constant HEDGE_PRICE_BAND_BPS = 100;
+
+    /// @notice Ceiling on the venue minimum governance may configure, so the setter cannot be
+    ///         used to price every mint out.
+    uint256 public constant MAX_VENUE_MIN_NOTIONAL_18 = 1_000e18;
 
     uint256 internal constant MIN_TARGET_MARGIN_BPS = 5_000;
     uint256 internal constant MAX_TARGET_MARGIN_BPS = 10_000;
@@ -399,6 +430,16 @@ contract CertVault {
     ///      test_zeroSupplyTrimCannotCloseADanglingShort exists to keep those two gaps visible.
     int256 public venuePositionBase;
 
+    /// @notice The venue's minimum order: base units (at cfg.sizeDecimals) and notional (18dp).
+    /// @dev MAINNET, 2026-09-25. Lighter rejects an order below `min_base_amount` or below
+    ///      `min_quote_amount` ($10 for every market this project uses) - off chain, after the L1
+    ///      transaction has already succeeded. An 8 USDG mint produced a $7.97 hedge, the venue
+    ///      discarded it, and the vault's own ledger recorded a position the venue never held.
+    ///      Zero means "no minimum" so the simulator-backed test suite is unchanged; the mainnet
+    ///      deployment sets both from the venue's own market list and asserts they are set.
+    uint256 public venueMinBase;
+    uint256 public venueMinNotional18;
+
     /// @notice How long a mint receipt stays settleable before it can only be refunded.
     /// @dev C3: settleMint bands against the price recorded at requestMint, so a receipt must not
     ///      be allowed to sit indefinitely and be settled against a price that has moved
@@ -589,6 +630,22 @@ contract CertVault {
     {
         if (msg.sender != governance) revert CertVault_OnlyGovernance();
         buffer.configure(address(this), floor18, feeOn18, mintSlow18, insuranceDraw18);
+    }
+
+    /// @notice Record the venue's minimum order for this market.
+    /// @dev Governance-set rather than constructor-set, like the buffer thresholds above, because
+    ///      the venue can change its minimums and a vault whose market index is immutable should
+    ///      not need a redeploy to follow. Bounded so it cannot be used to price out every mint.
+    ///      It gates MINTS only: redemptions never revert on it (Law 2); a close below the
+    ///      minimum is reported as not placed instead.
+    function setVenueMinimums(uint256 minBase, uint256 minNotional18) external {
+        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        if (minNotional18 > MAX_VENUE_MIN_NOTIONAL_18 || minBase > type(uint48).max) {
+            revert CertVault_VenueMinimumOutOfBounds();
+        }
+        venueMinBase = minBase;
+        venueMinNotional18 = minNotional18;
+        emit VenueMinimumsSet(minBase, minNotional18);
     }
 
     /// @notice Pre-fund the buffer. Permissionless: it can only ever add value to the vault.
@@ -1410,10 +1467,20 @@ contract CertVault {
         // See venueWithdrawCap's deployment note: a cap within uint64 makes this unreachable.
         uint64 ask = SafeCast.toUint64(amount);
 
+        // MAINNET, 2026-09-25: GAS STARVATION IS NOT A VENUE REFUSAL. A wallet estimates gas by
+        // searching for the LOWEST limit at which the transaction succeeds - and because this
+        // call sits in a try/catch, the transaction "succeeds" even when the venue call runs out
+        // of gas and is swallowed. Measured: recallMargin at the estimated 142,503 gas requested
+        // nothing; at 300,000 it requested the withdrawal. Every recall sent that night through a
+        // normal wallet silently did nothing. A catch entered with only the 1/64 remainder left
+        // is starvation, so it reverts, which forces the estimate up to what the call needs. A
+        // genuine refusal still returns false with plenty of gas left.
+        uint256 gasBefore = gasleft();
         try lighter.withdraw(accountIndex, cfg.collateralAssetIndex, cfg.routeType, ask) {
             emit MarginRecallRequested(amount);
             return true;
         } catch {
+            if (gasleft() <= gasBefore / 63) revert CertVault_VenueCallStarvedOfGas();
             // Venue refused at request time. Neither counter is reduced — the caller may retry.
             return false;
         }
@@ -1452,7 +1519,7 @@ contract CertVault {
             // this order does not carry. The ledger is zeroed explicitly instead: a full-size close
             // on the correct side lands the position at flat.
             lighter.createOrder(
-                lighterAccountIndex(), cfg.marketIndex, 0, oracle.toTickPrice(px18), side, ORDER_TYPE_MARKET
+                lighterAccountIndex(), cfg.marketIndex, 0, oracle.toTickPrice(_limitPx18(px18, side)), side, ORDER_TYPE_MARKET
             );
             venuePositionBase = 0;
             emit ClosedAll(side, known);
@@ -1837,9 +1904,26 @@ contract CertVault {
         // a bare cast. The bare cast's real hazard was never zero — it was a value above 2^48
         // wrapping to a small NON-zero one and silently submitting an order for the wrong size.
         uint48 baseAmount = SafeCast.toUint48(base);
-        uint32 tickPx = oracle.toTickPrice(px18);
+        // An order the venue will discard must not be sent from a path that mints against it.
+        if (_belowVenueMinimum(base, px18)) revert CertVault_BelowVenueMinimum();
+        uint32 tickPx = oracle.toTickPrice(_limitPx18(px18, side));
         lighter.createOrder(lighterAccountIndex(), cfg.marketIndex, baseAmount, tickPx, side, ORDER_TYPE_MARKET);
         _recordOrder(base, side);
+    }
+
+    /// @dev The worst fill a hedge order will accept: HEDGE_PRICE_BAND_BPS above the oracle for a
+    ///      buy, below it for a sell. See HEDGE_PRICE_BAND_BPS for why a point price never fills.
+    function _limitPx18(uint256 px18, uint8 side) internal pure returns (uint256) {
+        return side == SIDE_BID
+            ? Math.mulDiv(px18, 10_000 + HEDGE_PRICE_BAND_BPS, 10_000)
+            : Math.mulDiv(px18, 10_000 - HEDGE_PRICE_BAND_BPS, 10_000);
+    }
+
+    /// @dev True when an order of `base` venue units at `px18` is below what the venue accepts.
+    function _belowVenueMinimum(uint256 base, uint256 px18) internal view returns (bool) {
+        if (base < venueMinBase) return true;
+        if (venueMinNotional18 == 0) return false;
+        return Math.mulDiv(base, px18, 10 ** cfg.sizeDecimals) < venueMinNotional18;
     }
 
     /// @dev M-3: maintain the vault's own signed record of what it has asked the venue to hold.
@@ -1895,13 +1979,20 @@ contract CertVault {
         // forceExit, the Law 2 backstop, and stageRefund with it. Reading it into a local first,
         // inside its own try, is the whole fix. _hedge is left alone on purpose: it is the
         // revert-capable path for mint and rebalance, which may be gated (Laws 2 and 3).
+        // Below the venue minimum the order would be discarded off chain after being recorded
+        // here, and the ledger would carry a close that never happened. Report it as not placed.
+        if (_belowVenueMinimum(base, px18)) return false;
         uint48 accountIndex;
         try lighter.addressToAccountIndex(address(this)) returns (uint48 idx) {
             accountIndex = idx;
         } catch {
             return false;
         }
-        try oracle.toTickPrice(px18) returns (uint32 tickPx) {
+        try oracle.toTickPrice(_limitPx18(px18, side)) returns (uint32 tickPx) {
+            // Same starvation guard as _requestWithdraw: a close dropped for want of gas is not a
+            // venue refusal, and a redemption that silently leaves its hedge open is the worse
+            // outcome of the two.
+            uint256 gasBefore = gasleft();
             try lighter.createOrder(accountIndex, cfg.marketIndex, baseAmount, tickPx, side, ORDER_TYPE_MARKET) {
                 // M-3: recorded only here, in the branch where the venue actually accepted the
                 // order. A refused close (the `catch` below, which is what CloseOrderNotPlaced
@@ -1912,6 +2003,7 @@ contract CertVault {
                 _recordOrder(base, side);
                 return true;
             } catch {
+                if (gasleft() <= gasBefore / 63) revert CertVault_VenueCallStarvedOfGas();
                 return false;
             }
         } catch {
