@@ -255,6 +255,7 @@ abstract contract LighterCore is ILighter {
     ///      and gets the exact block the index became usable, with no extra on-chain cost and no
     ///      per-batch walk over pending registrations.
     event AccountRegistered(address indexed owner, uint48 indexed account, uint256 resolvesAtBatch);
+    event PubKeyChanged(uint48 indexed account, uint8 indexed apiKeyIndex, bytes pubKey);
 
     /// @notice An order was accepted into the settlement queue. It has NOT filled — orders never
     ///         fill in the calling transaction, which is the venue behaviour this simulator exists
@@ -857,6 +858,21 @@ abstract contract LighterCore is ILighter {
         if (accountIndex == 0) revert AccountIsNotRegistered();
         _requireCallerOwnsAccount(accountIndex);
         _cancelOrdersOf(accountIndex);
+    }
+
+    /// @notice The API key registered per account and key index, for tests to read back.
+    mapping(uint48 => mapping(uint8 => bytes)) public apiKeyOf;
+
+    /// @dev Models AdditionalZkLighter.changePubKey: the caller must own the account, the key
+    ///      index is bounded at 254 and the key is exactly 40 bytes. The real contract also checks
+    ///      each 8-byte limb is a canonical Goldilocks element; the simulator only records it.
+    function changePubKey(uint48 accountIndex, uint8 apiKeyIndex, bytes calldata pubKey) public virtual {
+        if (accountIndex == 0) revert AccountIsNotRegistered();
+        _requireCallerOwnsAccount(accountIndex);
+        require(apiKeyIndex <= 254, "LighterCore: api key index");
+        require(pubKey.length == 40, "LighterCore: pubkey length");
+        apiKeyOf[accountIndex][apiKeyIndex] = pubKey;
+        emit PubKeyChanged(accountIndex, apiKeyIndex, pubKey);
     }
 
     function getPendingBalance(address owner, uint16 assetIndex) public view virtual returns (uint128) {
