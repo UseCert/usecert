@@ -214,11 +214,32 @@ const MIRROR_META: Record<Mirror["symbol"], MirrorMeta> = {
  * real venue the same index would hedge against the WRONG MARKET. The address book's own
  * instruction is to re-read `market_id` and redeploy the mirror before pointing it at one.
  */
+/**
+ * ALL FOUR ARE FALSE as of 2026-09-25, and two of them changed from true.
+ *
+ * uTSLA 16 and uNVDA 15 were recorded as venue-verified, read from the venue's market list
+ * on 2026-09-07. Checked against Lighter's LIVE market list on Robinhood Chain mainnet
+ * (`mainnet.zklighter.elliot.ai/api/v1/orderBookDetails`, 235 active markets), every one of
+ * the four is wrong:
+ *
+ *     mirror   deployed   real market_id on the live venue
+ *     uTSLA          16   112
+ *     uSPY           26   128
+ *     uQQQ           27   129
+ *     uNVDA          15   110
+ *
+ * So the earlier reading has either gone stale or came from a different venue instance.
+ * Either way "verified" no longer describes it, and a true here would be the most expensive
+ * kind of wrong: it is the flag that tells a reader this mirror hedges the market it names.
+ *
+ * Nothing misbehaves on testnet, where LighterSim's setMarkPrice() creates any index
+ * implicitly. Against the real venue index 16 is not TSLA.
+ */
 const MARKET_INDEX_VERIFIED: Record<Mirror["symbol"], boolean> = {
-  uTSLA: true,
+  uTSLA: false,
   uSPY: false,
   uQQQ: false,
-  uNVDA: true,
+  uNVDA: false,
 };
 
 /**
@@ -239,9 +260,12 @@ export function isMarketIndexVerified(id: ChainVaultId): boolean {
  * harmless, and the honest statement is what it would be elsewhere, not what it is here.
  */
 export const MARKET_INDEX_UNVERIFIED_NOTE =
-  "This mirror's venue market index was chosen, not read back from the venue's market list. " +
-  "On the testnet simulator setMarkPrice() creates any index implicitly, so nothing here " +
-  "misbehaves; against a real venue an unverified index would hedge the wrong market.";
+  "This mirror's venue market index does not match the live venue's market list. Checked " +
+  "2026-09-25 against Lighter on Robinhood Chain mainnet: the real ids are 112 for TSLA, " +
+  "128 for SPY, 129 for QQQ and 110 for NVDA. On the testnet simulator setMarkPrice() " +
+  "creates any index implicitly, so nothing here misbehaves; against the real venue these " +
+  "would hedge the wrong market, and every mirror must be redeployed with the real id " +
+  "before it points at one.";
 
 function mirrorFor(id: ChainVaultId): Mirror {
   const mirror = MIRRORS.find((m) => MIRROR_META[m.symbol].id === id);
