@@ -1062,6 +1062,30 @@ All test funds were returned: wallet 16.89 USDG, venue account empty. The API ke
 the wallet's venue account controls an empty account.
 
 
+### 6.10 The hybrid, proven end to end on the live venue — ✅ 2026-09-26
+
+The keeper design of 6.8, run on the real exchange from the two places it will really live.
+Operating entity: Brazil. Keeper host: OVH **Roubaix, France** (141.94.203.130), neither
+restricted. Montréal keeps everything else.
+
+| step | where | result |
+|---|---|---|
+| deposit 12 USDG | Montréal, L1 | credited, `0x7c86dc66…` |
+| **open** 0.0300 TSLA, market, API-key signed | **France**, off chain | **long 0.0300 @ 372.91 within 10s** |
+| **close**, reduce-only market sell | Montréal, **L1 contract** | **flat within 10s**, `0xcfadeb71…`, no key involved |
+| withdraw 11.9955 | Montréal, L1 | back in the wallet in ~6 min |
+
+Round trip cost **0.0045 USDG** (the spread; taker fee is 0). Wallet 16.894864 → 16.890364 USDG.
+
+Before spending anything, a free check: an order from France against an EMPTY account reached the
+matching engine as a genuine opening order (`ReduceOnly: 0`) with no jurisdiction refusal.
+
+This settles every open question about the venue: a key registered on-chain opens positions off
+chain, and the chain alone can close them. **What remains is wiring**, not discovery: the keeper
+orchestrator (event watching, settlement with the attester key) stays in Montréal and delegates only
+order placement to France, then one keeper-mode vault proves mint → hedge → redeem.
+
+
 ---
 
 ## Keeping the public page in sync
