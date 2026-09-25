@@ -53,21 +53,42 @@ fi
 say "tUSDG now" "$(cast call "$USDG" 'balanceOf(address)(uint256)' "$ME" --rpc-url "$R" | num)"
 echo
 
-echo "== 2. relay the signed attestation, exactly as a mint does first =="
+echo "== 2. relay BOTH halves of the signed bundle, exactly as a mint does first =="
+#
+# BOTH HALVES. The signer produces two signatures per vault from one observation:
+# attestSig for SolvencyRegistry.attestSigned, and markSig for CertOracle.setMarkPriceSigned.
+# This script, and the app it stands in for, used to relay only the first. The corrective
+# re-audit of 2026-09-25 named the omission: the registry relay reopens capacity, but the
+# oracle keeps whatever mark it was last given, so the basis cross-check runs against a stale
+# price and mintAllowed() can close on a divergence that is not real. Refreshing half a bundle
+# buys freshness for the number an auditor reads and not for the number the mint gate uses.
 python3 -c "
 import json, urllib.request
 d = json.load(urllib.request.urlopen('http://127.0.0.1:8787/attestations', timeout=20))
 a = [x for x in d['attestations'] if x['symbol'] == 'uTSLA'][0]
 json.dump(a, open('/tmp/att.json', 'w'))
 print('  signer batch %s  observedAt %s  deadline %s' % (a['batchId'], a['observedAt'], a['deadline']))
+print('  markPx18 %s  markNonce %s' % (a['markPx18'], a['markNonce']))
 "
-BID=$(python3 -c "import json;print(json.load(open('/tmp/att.json'))['batchId'])")
-NOT=$(python3 -c "import json;print(json.load(open('/tmp/att.json'))['notional18'])")
-MAR=$(python3 -c "import json;print(json.load(open('/tmp/att.json'))['margin18'])")
-OI=$(python3 -c "import json;print(json.load(open('/tmp/att.json'))['openInterest18'])")
-OBS=$(python3 -c "import json;print(json.load(open('/tmp/att.json'))['observedAt'])")
-DL=$(python3 -c "import json;print(json.load(open('/tmp/att.json'))['deadline'])")
-SIG=$(python3 -c "import json;print(json.load(open('/tmp/att.json'))['attestSig'])")
+g() { python3 -c "import json;print(json.load(open('/tmp/att.json'))['$1'])"; }
+BID=$(g batchId); NOT=$(g notional18); MAR=$(g margin18); OI=$(g openInterest18)
+OBS=$(g observedAt); DL=$(g deadline); SIG=$(g attestSig)
+MPX=$(g markPx18); MNONCE=$(g markNonce); MSIG=$(g markSig); ORACLE=$(g certOracle)
+
+# The oracle refuses a nonce that is not ahead of the one it holds (CertOracle_StaleNonce),
+# so skip rather than spend gas on a transaction that cannot succeed. Two mints off one
+# bundle is the ordinary case.
+ONCHAIN_NONCE=$(cast call "$ORACLE" 'markNonce()(uint64)' --rpc-url "$R" | num)
+say "oracle" "$ORACLE"
+say "markNonce on chain / signed" "$ONCHAIN_NONCE / $MNONCE"
+if [ "$MNONCE" -gt "$ONCHAIN_NONCE" ]; then
+  say "setMarkPriceSigned" "$(send "$ORACLE" 'setMarkPriceSigned(uint256,uint64,uint64,bytes)' "$MPX" "$MNONCE" "$DL" "$MSIG")"
+  say "markPx18 after" "$(cast call "$ORACLE" 'markPx18()(uint256)' --rpc-url "$R" | num)"
+else
+  say "setMarkPriceSigned" "skipped - the oracle already holds nonce $ONCHAIN_NONCE"
+fi
+say "mintAllowed() after mark" "$(cast call "$ORACLE" 'mintAllowed()(bool)' --rpc-url "$R")"
+
 say "attestSigned" "$(send "$REG" 'attestSigned(address,uint64,uint256,uint256,uint256,uint64,uint64,bytes)' "$V" "$BID" "$NOT" "$MAR" "$OI" "$OBS" "$DL" "$SIG")"
 say "attestation age now" "$(cast call "$REG" 'ageSec(address)(uint256)' "$V" --rpc-url "$R" | num)s"
 bufcap=$(cast call "$V" 'bufferCapacity18()(uint256)' --rpc-url "$R" | num)
