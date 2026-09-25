@@ -573,10 +573,11 @@ The audit's headline finding. See `AUDIT-RESPONSE-2026-09-25.md` §1 and
 hashes recorded. The observation (stale attestations, zero capacity) was right; the conclusion
 (a dead attestation process) was not — that is the on-demand design.
 
-### 4.3 Commit the `/api/attestations` route as deployable config — **S** — open
+### 4.3 Commit the `/api/attestations` route as deployable config — **S** — ✅ done 2026-09-25
 
-The route works and is proxied on the host, but the configuration is not in the repository, so
-nothing here proves the client and the signer are connected.
+Closed by **5.5**, which went further than this item asked: the corrective re-audit specified an
+edge policy the first audit had not. See there for what was installed and how each clause was
+proven.
 
 ### 4.4 Product and legal copy — **M** — open, *and it is 1.3 / 1.4 / 1.5*
 
@@ -694,12 +695,56 @@ capacity constraint, and **submitted vs confirmed** — a transaction hash is no
 The runbook and monitor still carry "MINTING HALTED" language that the on-demand design
 contradicts.
 
-### 5.5 Version and harden the signer path — **M** — open, *and it is 4.3*
+### 5.5 Version and harden the signer path — **M** — ✅ done 2026-09-25, *and it closes 4.3*
 
-`/api/attestations` routing still is not in the repository. The re-audit adds specifics: loopback
-upstream, GET/HEAD/OPTIONS only, bounded per-IP and global rate limits, deterministic 429/503,
-telemetry — and alerting on signer readiness before the 60-second validity budget expires, rather
-than on registry age alone.
+The route worked and lived nowhere: four lines inside `sites-available/use-cert.com`, one
+`nginx -t` away from being gone with nothing to restore them from. Both audits called it P0, and
+it is the same gap the header policy had.
+
+`deploy/nginx/usecert-api-attestations.conf` now holds the route **and** its failure path — a
+named location is server-context, and splitting them would put half the behaviour back outside
+the repository. `deploy/nginx/20-signer-limits.conf` holds the zones and log format, which have
+to be in the HTTP context. The site file now just includes the snippet.
+
+What the policy actually does, with what the re-audit asked for in brackets:
+
+* **[methods]** GET/HEAD/OPTIONS; anything else is **405**, not `limit_except`'s 403 — "this
+  endpoint does not do that" is the answer a client can act on. OPTIONS is answered at the edge
+  rather than waking the signer to say nothing.
+* **[rate]** per-IP 10 r/s burst 30, plus a global 200 r/s ceiling, plus 12 concurrent
+  connections — a per-IP limit does not protect a single Node process holding a key from a
+  distributed flood, and a rate limit does not bound slow readers at all. `nodelay` on both:
+  queueing a request for a 60-second signature can deliver one that is already expired.
+* **[429 vs 503]** 429 for "you asked too often", 503 for "the signer is down". nginx's default
+  for a throttled request is 503, which conflates the two — the difference between a client that
+  backs off and one that retries into the same wall.
+* **[loopback]** unchanged and now **verified** rather than assumed.
+* **[deterministic 503]** `proxy_intercept_errors` plus a named location, so a fault is always
+  one JSON shape instead of whatever the process printed.
+* **[telemetry]** a dedicated access log separating upstream time from total time — a slow signer
+  and a slow client are different incidents and one number cannot tell them apart.
+
+**Installing it found two things review would not have.** `limit_req_status` was already set in
+`00-hardening.conf`, and a second declaration is a hard `nginx -t` failure rather than an
+override — caught before any reload. And the endpoint was sending `cache-control: no-store`
+**twice** plus an `Access-Control-Allow-Origin: *` that was nobody's decision: `add_header`
+appends rather than replaces, so the Node signer's own headers were going out alongside ours.
+Both are now hidden and re-set deliberately. The wildcard is kept — these signatures are public
+by construction and a third-party relay UI is a legitimate use — but it is now a choice recorded
+here rather than a default inherited from an upstream process.
+
+**Every clause was made to fire**, because a policy nobody has tested is a policy nobody knows
+the behaviour of. GET/HEAD 200, OPTIONS 204, POST/PUT/DELETE 405. Eighty rapid requests → 25
+served, 55 refused with 429, and a 200 again after backing off — a limit that never reopens is an
+outage. Port 8787 from the public address → connection refused. And the signer was **stopped**:
+the endpoint returned exactly `{"error":"signer_unavailable","attestations":[],"stale":true}` with
+`Retry-After: 5`, valid JSON the client can branch on, with no stack trace, no `ECONNREFUSED` and
+no nginx version leaked — then 200 again on restart. The access log settles the OPTIONS claim on
+its own: `urt=-` where nothing reached the upstream, `urt=0.001` where it did.
+
+*Still open, and the reason this is 5.5 and not the whole of it:* **alerting**. Monitoring still
+watches registry age rather than signer readiness, and nothing pages before the 60-second
+validity budget expires. Tracked in 5.4.
 
 ### 5.6 Runtime-validate the signer payload — **S** — open
 
@@ -741,8 +786,8 @@ three, since all three are the same question — what does the project claim, an
 1.5 is now narrower than the other two: 3.6 built the mechanism, so the per-chain claims follow
 the deployment on their own and what remains is the **wording**, not the plumbing.
 
-**Ahead of all of it.** The corrective re-audit's remaining P0 items (5.3, 5.5) gate a public
-testnet pilot, not mainnet, and they are small. 5.1's acceptance evidence — one recorded wallet
+**Ahead of all of it.** 5.5 is closed; the corrective re-audit's remaining P0 is 5.3, which gates
+a public testnet pilot rather than mainnet and is small. 5.1's acceptance evidence — one recorded wallet
 journey from an aged-out attestation through to a confirmed mint — is the single cheapest piece of
 evidence this project is missing, and it is the one that would have caught 5.1 before an auditor
 did.
