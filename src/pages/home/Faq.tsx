@@ -10,7 +10,7 @@ export const FAQ_ROWS: AccordionRow[] = [
   {
     title: "Are certificates real shares?",
     body: [
-      "No. Certificates are synthetic: price exposure backed by perp positions and tUSDG margin on Robinhood Chain, not custody of shares. There are no dividends and no shareholder rights. What you get is the stock's price, holdable as a plain token, redeemable at oracle price any time.",
+      "No. Certificates are synthetic: price exposure backed by perp positions and tUSDG margin on Robinhood Chain, not custody of shares. There are no dividends and no shareholder rights. What you get is the stock’s price, holdable as a plain token, redeemable at oracle price any time — in the same transaction below the vault’s instant cap, and queued and paid by claim above it.",
     ],
   },
   {

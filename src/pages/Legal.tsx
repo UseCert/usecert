@@ -83,7 +83,7 @@ const DOCS: Record<LegalDoc, { title: string; updated: string; sections: LegalSe
       {
         heading: "3. Minting, redemption, and fees",
         paragraphs: [
-          "Redemption is never gated and settles at oracle price. Minting may pause automatically when oracle prices are stale or deviate beyond published guard bands; in that case redemption continues at the last good price. Sustained negative funding is absorbed by a per-asset buffer first and, past a published threshold, passes through as a transparent holding fee. All parameters, thresholds, and the live buffer balance are public on chain.",
+          "Redemption is never gated and settles at oracle price. Below a vault’s instant cap the collateral returns in the same transaction; above it redemption is queued and paid by claim, which takes two batch round-trips in the expected case and, in the worst case the venue allows, up to its 14-day priority expiration. Queued is not refused. That guarantee is a property of these contracts and stops where they do: submitting the transaction at all requires Robinhood Chain to include it, which is the chain’s concern and not something UseCert can promise on its behalf. Minting may pause automatically when oracle prices are stale or deviate beyond published guard bands; in that case redemption continues at the last good price. Sustained negative funding is absorbed by a per-asset buffer first and, past a published threshold, passes through as a transparent holding fee. All parameters, thresholds, and the live buffer balance are public on chain.",
         ],
       },
       {
