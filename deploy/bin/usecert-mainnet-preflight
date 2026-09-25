@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Refuse to deploy a market the venue does not list.
+
+WHY THIS EXISTS. On 2026-09-25 six vaults were deployed to mainnet with market indices
+112/128/129/110/113/115. None of those markets EXISTS on the venue they were deployed against.
+They were read from `mainnet.zklighter.elliot.ai`, which serves **Lighter** (USDC collateral).
+Robinhood Chain runs a SEPARATE EXCHANGE, **Robinhood Chain Lighter** (USDG collateral), with a
+separate API at `api.rh.lighter.xyz`, a separate account space and its own market numbering.
+Lighter's own docs list the two side by side; nothing in the numbers themselves says which
+exchange they came from.
+
+`CertVault.marketIndex` is IMMUTABLE, so the error cost a redeploy. Worse, a mint against a
+non-existent market does not revert - the hedge simply never places, the vault records the
+position in its own ledger, and every on-chain reading looks healthy. There is no on-chain check
+that can catch this, because the market list only exists off chain.
+
+So: this runs BEFORE the deploy, compares what `DeployMainnet.s.sol` is about to deploy against
+what the venue actually lists, and exits non-zero on any mismatch.
+
+Usage:  usecert-mainnet-preflight [path/to/DeployMainnet.s.sol]
+"""
+import json
+import re
+import sys
+import urllib.request
+
+API = "https://api.rh.lighter.xyz/api/v1/orderBooks"
+SRC = sys.argv[1] if len(sys.argv) > 1 else "/opt/usecert/script/DeployMainnet.s.sol"
+
+
+def planned(path):
+    """(symbol, marketIndex, priceDecimals, sizeDecimals) for each asset in the deploy script."""
+    text = open(path, encoding="utf-8").read()
+    out = []
+    for m in re.finditer(
+        r'symbol:\s*"(u[A-Z]+)".*?marketIndex:\s*(\d+).*?priceDecimals:\s*(\d+).*?sizeDecimals:\s*(\d+)',
+        text, re.S,
+    ):
+        out.append((m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))))
+    return out
+
+
+def live():
+    """{symbol: (market_id, price_decimals, size_decimals, status, min_base)} from the venue."""
+    with urllib.request.urlopen(API, timeout=30) as r:
+        books = json.load(r)["order_books"]
+    return {
+        b["symbol"]: (
+            b["market_id"],
+            b["supported_price_decimals"],
+            b["supported_size_decimals"],
+            b.get("status"),
+            b.get("min_base_amount"),
+        )
+        for b in books
+    }
+
+
+def main():
+    rows = planned(SRC)
+    if not rows:
+        print("  FAIL  no assets parsed out of %s" % SRC)
+        return 1
+    try:
+        venue = live()
+    except Exception as exc:                                   # noqa: BLE001
+        print("  FAIL  could not reach %s: %s" % (API, exc))
+        print("        refusing to deploy unverified. This check is not optional.")
+        return 1
+
+    print("  venue lists %d markets (Robinhood Chain Lighter)" % len(venue))
+    print()
+    print("  %-7s %-6s %-6s %-9s %-9s %-8s %s" % ("SYM", "PLAN", "LIVE", "PLAN d", "LIVE d", "STATUS", ""))
+    bad = 0
+    for sym, mi, pd, sd in rows:
+        base = sym[1:]                                         # uTSLA -> TSLA
+        if base not in venue:
+            print("  %-7s %-6s %-6s %-9s %-9s %-8s <<< SYMBOL NOT ON THIS VENUE" % (sym, mi, "-", "%d/%d" % (pd, sd), "-", "-"))
+            bad += 1
+            continue
+        lmi, lpd, lsd, status, minbase = venue[base]
+        note = "OK"
+        if mi != lmi:
+            note = "<<< WRONG MARKET INDEX"
+        elif (pd, sd) != (lpd, lsd):
+            note = "<<< WRONG DECIMALS"
+        elif status != "active":
+            note = "<<< MARKET NOT ACTIVE"
+        if note != "OK":
+            bad += 1
+        print("  %-7s %-6s %-6s %-9s %-9s %-8s %s  minBase=%s"
+              % (sym, mi, lmi, "%d/%d" % (pd, sd), "%d/%d" % (lpd, lsd), status, note, minbase))
+
+    print()
+    if bad:
+        print("  REFUSING: %d of %d assets disagree with the venue." % (bad, len(rows)))
+        print("  marketIndex is immutable - deploying these means redeploying to fix them.")
+        return 1
+    print("  all %d assets match the venue. Safe to deploy." % len(rows))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
