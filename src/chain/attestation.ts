@@ -20,7 +20,7 @@
  * passed through exactly as signed, or not sent at all.
  */
 
-import { SHARED } from "./contracts";
+import { MIRRORS, SHARED } from "./contracts";
 
 const ENDPOINT = "/api/attestations";
 
@@ -83,6 +83,14 @@ export function attestationFor(
   // follow: it means the endpoint and this build disagree about which deployment is
   // current, and relaying it would either revert or reach a contract nobody here chose.
   if (found.registry.toLowerCase() !== SHARED.solvencyRegistry.toLowerCase()) return null;
+  // Same rule for the oracle, for the same reason. The bundle carries a `certOracle` and
+  // the mark half of the refresh is sent to one; the endpoint does not get to choose which.
+  // The transaction is addressed from the bundled mirror regardless, so this check is not
+  // what makes it safe - it is what makes the DISAGREEMENT visible instead of relaying a
+  // signature that was produced for a different deployment and letting it revert.
+  const mirror = MIRRORS.find((m) => m.vault.toLowerCase() === lower);
+  if (!mirror) return null;
+  if (found.certOracle.toLowerCase() !== mirror.certOracle.toLowerCase()) return null;
   return found;
 }
 
