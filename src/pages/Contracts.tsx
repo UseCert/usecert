@@ -2,6 +2,7 @@ import { motion } from "framer-motion";
 import { ArrowUpRight } from "lucide-react";
 import { CHAIN, MIRRORS, SHARED } from "@/chain/contracts";
 import { explorerAddressUrl } from "@/chain/config";
+import { FAUCET_ADDRESS, VENUE_SIM_ADDRESS } from "@/chain/deployment";
 import { MARKET_INDEX_UNVERIFIED_NOTE, isMarketIndexVerified } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
 
@@ -51,17 +52,24 @@ const SHARED_ROWS: Row[] = [
     address: SHARED.collateral,
     note: "The test collateral, 6 decimals. On mainnet this is replaced by real USDG and nothing here mints it.",
   },
-  {
-    label: "TestFaucet",
-    address: SHARED.testFaucet,
-    note: "The only way a tester gets collateral. It does not exist on mainnet — free money is a testnet feature.",
-  },
-  {
-    label: "LighterSim (venue)",
-    address: SHARED.lighterSim,
-    note: "The perp venue, simulated. Lighter is not deployed on this testnet, so this contract stands in for it — and every margin and position figure on the dashboard describes a position it holds.",
-  },
 ];
+
+// Appended only where the contract is actually deployed. The address book is generated from
+// the deployment, so a row whose address does not exist would be a row about another chain.
+if (FAUCET_ADDRESS) {
+  SHARED_ROWS.push({
+    label: "TestFaucet",
+    address: FAUCET_ADDRESS,
+    note: "The only way a tester gets collateral. It does not exist on mainnet — free money is a testnet feature.",
+  });
+}
+if (VENUE_SIM_ADDRESS) {
+  SHARED_ROWS.push({
+    label: "LighterSim (venue)",
+    address: VENUE_SIM_ADDRESS,
+    note: "The perp venue, simulated. Lighter is not deployed on this testnet, so this contract stands in for it — and every margin and position figure on the dashboard describes a position it holds.",
+  });
+}
 
 function Address({ address }: { address: string }) {
   return (

@@ -18,6 +18,8 @@ import { useCountUp } from "./hooks";
 import { EM_DASH, NO_POSITION, fmtCompactUSD, fmtNum, fmtOrDash, fmtUSD } from "./format";
 import { TickerStrip, BackingComposition, FundingMonitor, NetworkStrip, PegMonitor } from "./OverviewExtras";
 import { capacityLegsLabel, type CapacityView } from "@/chain/useVaults";
+import { CHAIN } from "@/chain/contracts";
+import { IS_TESTNET } from "@/chain/deployment";
 import { cn } from "@/lib/utils";
 
 /**
@@ -235,7 +237,7 @@ export default function Overview() {
           the real age of the current proof. */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b hairline-dark pb-4 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
         <span className="flex items-center gap-2">
-          <PulseDot /> Testnet 46630
+          <PulseDot /> {IS_TESTNET ? `Testnet ${CHAIN.id}` : CHAIN.name}
         </span>
         <span className="hidden md:block">Robinhood Chain</span>
         <span>Solvency proven per attestation · age published</span>

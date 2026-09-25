@@ -32,6 +32,7 @@ import {
 } from "viem";
 
 import { CHAIN_ID } from "./config";
+import { CHAIN_LABEL, FAUCET_ADDRESS } from "./deployment";
 import {
   attestationFor,
   fetchSignedAttestations,
@@ -723,14 +724,18 @@ export function useFaucetActions(): FaucetActions {
   const { mutateAsync, isPending, error, reset } = useWriteContract();
 
   const claim = useCallback(
-    async (): Promise<TxHash> =>
-      mutateAsync({
+    async (): Promise<TxHash> => {
+      // No faucet is deployed on mainnet, so this hook has nothing to call. Throwing names the
+      // reason; the UI should not offer the button at all, which is what HAS_FAUCET is for.
+      if (!FAUCET_ADDRESS) throw new Error("No faucet is deployed on " + CHAIN_LABEL + ".");
+      return mutateAsync({
         chainId: CHAIN_ID,
-        address: SHARED.testFaucet,
+        address: FAUCET_ADDRESS,
         abi: TestFaucetABI,
         functionName: "claim",
         args: [],
-      }),
+      });
+    },
     [mutateAsync],
   );
 

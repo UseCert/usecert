@@ -9,6 +9,7 @@ import { truncHash } from "./format";
 import { MicroLabel } from "./ui";
 import { explorerAddressUrl } from "@/chain/config";
 import { CHAIN } from "@/chain/contracts";
+import { IS_TESTNET } from "@/chain/deployment";
 import { decodeRevert } from "@/chain/useActions";
 import {
   TESTNET_MODE_HINT,
@@ -144,8 +145,9 @@ export function WalletModal() {
           MetaMask will ask to add chain 46630, and a user who was not told to expect that
           reasonably reads the request as hostile. */}
       <p className="mt-4 font-mono text-[11px] leading-[1.6] text-white-60">
-        Testnet only, chain 46630 — your wallet will ask to add or switch to it, and no
-        real-world value is at stake. UseCert is independent and not affiliated with,
+        {IS_TESTNET
+          ? `Testnet only, chain ${CHAIN.id} — your wallet will ask to add or switch to it, and no real-world value is at stake.`
+          : `${CHAIN.name}, chain ${CHAIN.id} — your wallet will ask to add or switch to it. Real value is at stake here.`}{" "} UseCert is independent and not affiliated with,
         endorsed by, or sponsored by Robinhood Markets, Inc. or any issuer whose ticker a
         certificate mirrors. This prompt requests an address only; every approval you are asked
         for later is for an exact amount, never an unlimited allowance.
