@@ -1,0 +1,167 @@
+{
+  "_status": "PLAN — NOT DEPLOYED. Every protocol address below is null on purpose.",
+  "_warning": "NEVER hand-write a protocol address into this file. The generator refuses to emit a front-end bundle while any of them is null, and that refusal is the only thing standing between a typo and a UI pointed at a contract nobody deployed. Re-run script/DeployMainnet.s.sol and let it write the addresses.",
+  "_provenance": "External addresses and venue parameters MEASURED on 2026-09-25 against Robinhood Chain mainnet (chain 4663) and Lighter's live market list at mainnet.zklighter.elliot.ai/api/v1/orderBookDetails (235 active markets). Nothing here is copied from the testnet book.",
+  "chainId": 4663,
+  "chainName": "Robinhood Chain",
+  "rpcUrl": "https://rpc.mainnet.chain.robinhood.com",
+  "explorerUrl": "https://explorer.chain.robinhood.com",
+  "blockNumber": null,
+  "timestamp": null,
+  "commit": null,
+
+  "external": {
+    "_note": "Already live on mainnet and NOT deployed by us. All four return 0x on testnet 46630, which is why src/sim/LighterSim.sol exists at all.",
+    "usdg": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+    "_usdgNote": "Global Dollar. Verified live: symbol() returns \"USDG\", decimals() returns 6 — matching COLLATERAL_DECIMALS, which CertVault reads ONCE at construction.",
+    "zkLighterProxy": "0x94bab9693ba2f6358507effcbd372b0660afff9d",
+    "_zkLighterNote": "The venue. 1,367 bytes of proxy in front of a 23,168-byte implementation at 0x82DE5B1161C93afDFE21bA0D5343f01Cd7401d90. Implementations rotate on upgrade; the PROXY is the stable address and the only one to wire.",
+    "robinhoodDepositRouter": "0x8062df5b3220ad1f528365650a3eb3e8c7b0dad1",
+    "_routerNote": "Sweeps Robinhood in-app deposits into deposit(). UseCert does not call it; recorded so nobody mistakes it for the venue."
+  },
+
+  "interfaceCheck": {
+    "_note": "src/interfaces/ILighter.sol checked against the DEPLOYED implementation on 2026-09-25. All seven selectors present, and live view calls decode rather than revert. The ABI is not the risk; LighterCore's model of the venue's BEHAVIOUR is, and that is untested against the real engine.",
+    "checkedAt": "2026-09-25",
+    "implementation": "0x82DE5B1161C93afDFE21bA0D5343f01Cd7401d90",
+    "selectors": {
+      "addressToAccountIndex(address)": "0xabf6a038",
+      "deposit(address,uint16,uint8,uint256)": "0x8a857083",
+      "createOrder(uint48,uint16,uint48,uint32,uint8,uint8)": "0x3c40c676",
+      "withdraw(uint48,uint16,uint8,uint64)": "0xd20191bd",
+      "cancelAllOrders(uint48)": "0xa4b6f756",
+      "getPendingBalance(address,uint16)": "0xd1cbc64f",
+      "withdrawPendingBalance(address,uint16,uint128)": "0x2f25807e"
+    },
+    "matched": 7,
+    "missing": 0
+  },
+
+  "shared": {
+    "_note": "Deployed by script/DeployMainnet.s.sol. null until it runs. `collateral` is the REAL USDG above — no TestUSDG, and there is no faucet on mainnet.",
+    "collateral": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+    "collateralDecimals": 6,
+    "testFaucet": null,
+    "_testFaucetNote": "Intentionally null and must stay null. TestFaucet is how a tester gets collateral without buying it; on mainnet that is a mint of free money.",
+    "lighterSim": null,
+    "_lighterSimNote": "Intentionally null and must stay null. The venue is external.zkLighterProxy.",
+    "solvencyRegistry": null,
+    "capacityOracle": null,
+    "certFactory": null,
+    "batchKeeper": null,
+    "_batchKeeperNote": "On testnet this address drove LighterSim.settleBatch. The real venue settles its own batches, so this keeper leg does not exist on mainnet."
+  },
+
+  "vaults": [
+    {
+      "symbol": "uTSLA",
+      "name": "UseCert TSLA",
+      "marketIndex": 112,
+      "marketIndexVerified": true,
+      "_marketIndexSource": "Lighter live market list, symbol TSLA, status active, 2026-09-25. Testnet deployed 16, which is a different market.",
+      "priceDecimals": 2,
+      "sizeDecimals": 4,
+      "minBaseAmount": "0.0150",
+      "vault": null,
+      "certificate": null,
+      "bufferBook": null,
+      "certOracle": null,
+      "priceFeed": null,
+      "_priceFeedNote": "A REAL feed, not a ReplayAggregator. Must be a live Chainlink-shaped aggregator for TSLA with 8 decimals; _readFeed does not bound decimals(), so a feed with any other decimals is a deployment-time constraint, not a runtime check."
+    },
+    {
+      "symbol": "uSPY",
+      "name": "UseCert SPY",
+      "marketIndex": 128,
+      "marketIndexVerified": true,
+      "_marketIndexSource": "Lighter live market list, symbol SPY, status active, 2026-09-25. Testnet deployed 26, a placeholder that was never read from any venue.",
+      "priceDecimals": 2,
+      "sizeDecimals": 4,
+      "minBaseAmount": "0.0070",
+      "vault": null,
+      "certificate": null,
+      "bufferBook": null,
+      "certOracle": null,
+      "priceFeed": null
+    },
+    {
+      "symbol": "uQQQ",
+      "name": "UseCert QQQ",
+      "marketIndex": 129,
+      "marketIndexVerified": true,
+      "_marketIndexSource": "Lighter live market list, symbol QQQ, status active, 2026-09-25. Testnet deployed 27, a placeholder.",
+      "priceDecimals": 2,
+      "sizeDecimals": 4,
+      "minBaseAmount": "0.0075",
+      "vault": null,
+      "certificate": null,
+      "bufferBook": null,
+      "certOracle": null,
+      "priceFeed": null
+    },
+    {
+      "symbol": "uNVDA",
+      "name": "UseCert NVDA",
+      "marketIndex": 110,
+      "marketIndexVerified": true,
+      "_marketIndexSource": "Lighter live market list, symbol NVDA, status active, 2026-09-25. Testnet deployed 15, a different market.",
+      "priceDecimals": 3,
+      "sizeDecimals": 3,
+      "minBaseAmount": "0.025",
+      "_decimalsNote": "NVDA is the ONE mirror whose venue decimals differ from the other three — 3 and 3, not 2 and 4. The testnet book carries 2 and 4 for it, copied from its neighbours. _quantiseToVenue rounds size by 10**sizeDecimals, so shipping 4 here would quantise every NVDA order to the wrong lot.",
+      "vault": null,
+      "certificate": null,
+      "bufferBook": null,
+      "certOracle": null,
+      "priceFeed": null
+    }
+  ],
+
+  "parameters": {
+    "_note": "Mainnet values. Where a value differs from the testnet book the reason is stated; where it is the same, it was re-confirmed rather than assumed.",
+    "targetMarginBps": 9000,
+    "instantCap18": "1000000000000000000000",
+    "settleWindow": 86400,
+    "settleBandBps": 500,
+    "mintFeeBps": 10,
+    "redeemFeeBps": 10,
+
+    "stalenessSeconds": 93600,
+    "_stalenessSecondsNote": "CHANGED from the testnet 900. 900 was a testnet reachability value and the testnet book says in terms that it must not be carried over. 93600 is 26 hours, per TESTNET-PLAN.md S1 — long enough to span a weekend close plus a holiday.",
+
+    "pokeConfirmationSeconds": 300,
+    "deviationBps": 500,
+    "basisBandBps": 500,
+
+    "singleSource": null,
+    "_singleSourceNote": "DELIBERATELY null — this is a decision, not a parameter to copy. It declares the price feed and the venue mark economically independent. On testnet it was set false while both keepers ran on our own keys, which made the declaration organisational rather than economic. On mainnet it must be answered honestly against whatever real feed is wired, and the deploy script must refuse to run until it is.",
+
+    "depthBps": 1000,
+    "minDepthBps": 100,
+    "maxDepthBps": 3000,
+    "maxAttestationAgeSec": 300,
+    "maxAbsoluteCap18": "1000000000000000000000000000",
+    "venueWithdrawCap": "18446744073709551615",
+    "feedDecimals": 8,
+    "collateralAssetIndex": null,
+    "_collateralAssetIndexNote": "DELIBERATELY null. Testnet used 3, which was LighterSim's own numbering. The real venue's asset index for USDG is not exposed by any public endpoint checked on 2026-09-25 (api/v1/assets and api/v1/info both return 403). It must be read from the venue — a wrong asset index deposits margin against the wrong asset.",
+    "simRequiredMarginBps": null,
+    "_simRequiredMarginBpsNote": "Simulator-only knob. No meaning on mainnet."
+  },
+
+  "seed": {
+    "_note": "No faucet, no free collateral. Whatever float the buffers start with is real USDG that somebody has to send.",
+    "seedCollateral": null,
+    "perVaultBufferFloat": null
+  },
+
+  "blockedBeforeDeploy": [
+    "parameters.singleSource — an honest answer about feed/venue independence",
+    "parameters.collateralAssetIndex — USDG's asset index read from the venue, not guessed",
+    "vaults[].priceFeed — a real 8-decimal aggregator per mirror",
+    "LighterCore's model of venue behaviour validated against the real engine with one small deposit",
+    "the signed-attestation path re-audited: it landed after the C1 audit and sits on the gate that admits minting",
+    "test_A5 — margin must be recallable without a queued receipt; currently fails",
+    "attester key custody: a plain env file on one VPS is not a mainnet answer"
+  ]
+}
