@@ -386,11 +386,37 @@ in the caveat note.
 operational side: where the signing key lives, who can rotate it, and what happens between
 proposal and effect. Compounds with 2.1 — the whole mint path now depends on that signer.
 
-### 3.4 Release provenance — **M**
+### 3.4 Release provenance — **M** — 🟡 two of three done
 
-No commits on this branch are signed, and there is no CI. Before mainnet: signed commits or
-tags, a build that pins the contract bundle to a real commit hash (0.3), and a published
-address book that a user can verify against the explorer.
+Three parts, and they had very different shapes.
+
+| part | state |
+|---|---|
+| A build that pins the bundle to a real commit hash | ✅ done — 0.3 |
+| A published address book a user can verify | ✅ done 2026-09-25 — `/contracts` |
+| Signed commits or tags, and CI | ⛔ needs a signing key and a decision that are Chris's |
+
+**The address book found a worse problem than the one it was meant to solve.** The milestones
+page told readers "every address is in the dashboard and on the explorer" as the way to check
+that four mirrors are live. **No contract address was rendered anywhere on this site** — the
+only address that ever linked to the explorer was the reader's own connected wallet. A
+verification instruction that cannot be followed is worse than none: it borrows the credibility
+of being checkable without supplying it. That line now points at `/contracts`.
+
+`/contracts` lists all 26 with a link to each one's verified source. The addresses come from
+the **same generated module the app transacts against**, not a list maintained beside it, so
+the page cannot drift from the contracts the dashboard is actually using — which is precisely
+the failure it exists to prevent. It also states the two caveats a reader would otherwise have
+to discover for themselves: the partial-match status, and that no mirror's venue market index
+matches the live venue.
+
+Verified as served: 26 distinct addresses, 26 explorer links, and the set compared against
+`deployments/46630.json` in both directions — nothing on the page absent from the book, nothing
+in the book missing from the page.
+
+**What remains is not code.** Signing needs a key and a decision about who holds it; CI is
+excluded from the front-end repo by a deliberate, monitored property (no lifecycle scripts, no
+CI), so any check has to live on the contracts side or in a separate runner.
 
 ---
 
