@@ -327,6 +327,45 @@ contract DeployTestnet is Script {
     address internal govAddr;
     address internal attesterAddr;
 
+    // --------------------------------------------------------------------- overridable parameters
+    //
+    // These five were `constant`, which made a mainnet subclass impossible: Solidity cannot
+    // override a constant, and every one of them has to change on mainnet. They are now virtual
+    // getters returning the same testnet literals, so this contract and its tests are unaffected,
+    // and `DeployMainnet` can answer differently.
+    //
+    // The literals stay where they were, with their reasoning attached. Moving the VALUES here
+    // would have separated each number from the paragraph explaining it, which is most of what
+    // makes them reviewable.
+
+    /// @dev The chain this script refuses to run anywhere but.
+    function _chainId() internal view virtual returns (uint256) {
+        return CHAIN_ID;
+    }
+
+    /// @dev Feed staleness budget. 900 here is a TESTNET REACHABILITY VALUE; mainnet is 93_600.
+    function _stalenessSeconds() internal view virtual returns (uint256) {
+        return STALENESS_SECONDS;
+    }
+
+    /// @dev The venue's asset index for the collateral. 3 is LighterSim's own numbering and
+    ///      means nothing on a real venue.
+    function _collateralAssetIndex() internal view virtual returns (uint16) {
+        return COLLATERAL_ASSET_INDEX;
+    }
+
+    /// @dev Declares the feed and the venue mark economically independent. See SINGLE_SOURCE:
+    ///      on testnet that independence is organisational, not economic.
+    function _singleSource() internal view virtual returns (bool) {
+        return SINGLE_SOURCE;
+    }
+
+    /// @dev Buffer float seeded per vault at deploy. Free on testnet because the deployer owns
+    ///      the collateral's mint; on mainnet this is real money and there is no mint to call.
+    function _seedCollateral() internal view virtual returns (uint256) {
+        return SEED_COLLATERAL;
+    }
+
     // ------------------------------------------------------------------------------------ setup
 
     /// @dev DELIBERATELY NOT read from `script/config/testnet.json`. A Foundry script parsing JSON
@@ -335,7 +374,7 @@ contract DeployTestnet is Script {
     ///      in exchange for nothing, since every value is immutable at the vault. The JSON is
     ///      documentation of these values; the compiler is the source of truth. Keep them in sync
     ///      by review.
-    function _loadAssets() internal {
+    function _loadAssets() internal virtual {
         // uTSLA FIRST: market 16, for continuity with the existing suite (the whole test fixture
         // is built at TSLA's price and market index).
         assets.push(
@@ -422,7 +461,7 @@ contract DeployTestnet is Script {
     // ------------------------------------------------------------------------------------- run
 
     function run() external {
-        if (block.chainid != CHAIN_ID) revert DeployTestnet_WrongChain(block.chainid, CHAIN_ID);
+        if (block.chainid != _chainId()) revert DeployTestnet_WrongChain(block.chainid, _chainId());
 
         (uint256 deployerPk, uint256 govPk, uint256 attesterPk) = _senderKeys();
 
@@ -507,11 +546,11 @@ contract DeployTestnet is Script {
                     _aggregatorOf(i),
                     attesterAddr,
                     assets[i].priceDecimals,
-                    STALENESS_SECONDS,
+                    _stalenessSeconds(),
                     DEVIATION_BPS,
                     BASIS_BAND_BPS,
                     POKE_CONFIRMATION_SECONDS,
-                    SINGLE_SOURCE
+                    _singleSource()
                 )
             );
         }
@@ -571,7 +610,7 @@ contract DeployTestnet is Script {
         //   - the deployer's seed collateral: `SEED_COLLATERAL` is spent once per vault in phase 5
         //     (`seedBuffer` then `bootstrap`), so the deployer needs `assets.length` copies of it.
         //   - the faucet's opening float, so testers can `claim()` from block one.
-        TestUSDG(collateral).mint(deployerAddr, SEED_COLLATERAL * assets.length);
+        TestUSDG(collateral).mint(deployerAddr, _seedCollateral() * assets.length);
         TestUSDG(collateral).mint(testFaucet, FAUCET_OPENING_FLOAT);
 
         // The venue. `_owner` is the deployer, standing in for the venue operator: the allowlist,
@@ -593,7 +632,7 @@ contract DeployTestnet is Script {
         lighter = address(
             new LighterSim(
                 IERC20(collateral),
-                COLLATERAL_ASSET_INDEX,
+                _collateralAssetIndex(),
                 assets[0].sizeDecimals,
                 SIM_REQUIRED_MARGIN_BPS,
                 deployerAddr
@@ -658,7 +697,7 @@ contract DeployTestnet is Script {
                 }),
                 CertVault.VaultConfig({
                     collateral: collateral,
-                    collateralAssetIndex: COLLATERAL_ASSET_INDEX,
+                    collateralAssetIndex: _collateralAssetIndex(),
                     routeType: ROUTE_TYPE,
                     marketIndex: assets[i].marketIndex,
                     sizeDecimals: assets[i].sizeDecimals,
@@ -749,8 +788,8 @@ contract DeployTestnet is Script {
             // `10 ** collateralDecimals` as registering dust and reverts without it. `seedBuffer`
             // is the permissionless way in and also lifts `bufferCapacity18()` off zero, which is
             // one of the three legs of `maxNotional18`'s `min()`.
-            IERC20(collateral).approve(deployed[i].vault, SEED_COLLATERAL);
-            CertVault(deployed[i].vault).seedBuffer(SEED_COLLATERAL);
+            IERC20(collateral).approve(deployed[i].vault, _seedCollateral());
+            CertVault(deployed[i].vault).seedBuffer(_seedCollateral());
 
             // §6 step 7. One-time, permissionless.
             CertVault(deployed[i].vault).bootstrap();
@@ -899,10 +938,10 @@ contract DeployTestnet is Script {
 
         // ---- §2: the oracle's configuration, and the two values that must never be wrong
         require(address(o.feed()) == d.aggregator, "S9: oracle.feed != aggregator");
-        require(o.singleSource() == SINGLE_SOURCE, "S9: oracle.singleSource != declared mode");
+        require(o.singleSource() == _singleSource(), "S9: oracle.singleSource != declared mode");
         require(o.deviationBps() == DEVIATION_BPS, "S9: oracle.deviationBps wrong");
         require(o.deviationBps() != 0, "S9: deviationBps == 0 locks minting shut on the first tick");
-        require(o.stalenessSeconds() == STALENESS_SECONDS, "S9: oracle.stalenessSeconds wrong");
+        require(o.stalenessSeconds() == _stalenessSeconds(), "S9: oracle.stalenessSeconds wrong");
         require(o.pokeConfirmationSeconds() == POKE_CONFIRMATION_SECONDS, "S9: pokeConfirmationSeconds wrong");
         require(o.pokeConfirmationSeconds() != 0, "S9: pokeConfirmationSeconds == 0");
         require(o.basisBandBps() == BASIS_BAND_BPS, "S9: oracle.basisBandBps wrong");
@@ -990,7 +1029,7 @@ contract DeployTestnet is Script {
         (address cCollateral, uint16 cAssetIdx, uint8 cRouteType, uint16 cMarketIndex, uint8 cSizeDecimals,,,,,) =
             CertVault(deployed[i].vault).cfg();
         require(cCollateral == collateral, "S9: cfg.collateral wrong");
-        require(cAssetIdx == COLLATERAL_ASSET_INDEX, "S9: cfg.collateralAssetIndex wrong");
+        require(cAssetIdx == _collateralAssetIndex(), "S9: cfg.collateralAssetIndex wrong");
         require(cRouteType == ROUTE_TYPE, "S9: cfg.routeType wrong");
         require(cMarketIndex == assets[i].marketIndex, "S9: cfg.marketIndex != venue market_id");
         require(cSizeDecimals == assets[i].sizeDecimals, "S9: cfg.sizeDecimals != venue size_decimals");
