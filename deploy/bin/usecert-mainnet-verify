@@ -1,0 +1,92 @@
+#!/bin/bash
+# Publish source for all 27 mainnet contracts on Sourcify.
+#
+# NOT Blockscout. robinhoodchain.blockscout.com sits behind Cloudflare bot protection: every
+# API request - verification submit AND the read-back - returns a "Just a moment..." challenge
+# page instead of JSON, which is why forge reported "Failed to deserialize" and why the first
+# read-back reported 0/27 verified. That number was not a measurement of anything; it was an
+# HTML page being parsed as an absent field. Working around a bot challenge is not on the table,
+# so verification goes to Sourcify, which is the other standard source registry and is open.
+#
+# Sourcify also gives a STRONGER result: it reports creation and runtime bytecode matches
+# separately, and the first contract came back exact_match on both - where testnet Blockscout
+# only ever managed a partial match (runtime agreed, metadata hash did not).
+#
+# The result is read back from Sourcify's own API per contract, not from forge's output.
+set -uo pipefail
+cd /opt/usecert || exit 1
+export PATH=/home/usecert/.foundry/bin:$PATH
+
+R=https://rpc.mainnet.chain.robinhood.com
+S=https://sourcify.dev/server
+BOOK=/opt/usecert/deployments/4663.json
+RUN=/opt/usecert/broadcast/DeployMainnet.s.sol/4663/run-latest.json
+
+declare -A SRC=(
+  [SolvencyRegistry]=src/SolvencyRegistry.sol
+  [CapacityOracle]=src/CapacityOracle.sol
+  [CertFactory]=src/CertFactory.sol
+  [CertVault]=src/CertVault.sol
+  [CertOracle]=src/CertOracle.sol
+  [Certificate]=src/Certificate.sol
+  [BufferBook]=src/BufferBook.sol
+)
+
+mapfile -t TARGETS < <(python3 -c "
+import json
+run=json.load(open('$RUN')); book=json.load(open('$BOOK'))
+out=[]
+for t in run['transactions']:
+    if t.get('transactionType')=='CREATE' and t.get('contractName'):
+        out.append('%s %s' % (t['contractName'], t['contractAddress']))
+for v in book['vaults']:
+    if v.get('certificate'): out.append('Certificate %s' % v['certificate'])
+    if v.get('bufferBook'):  out.append('BufferBook %s' % v['bufferBook'])
+seen=set()
+for o in out:
+    a=o.split()[1].lower()
+    if a in seen: continue
+    seen.add(a); print(o)
+")
+
+echo "  submitting ${#TARGETS[@]} contracts"
+for t in "${TARGETS[@]}"; do
+  set -- $t
+  NAME=$1; ADDR=$2; P=${SRC[$NAME]:-}
+  [ -z "$P" ] && { printf "  %-18s SKIP\n" "$NAME"; continue; }
+  sudo -u usecert env PATH=/home/usecert/.foundry/bin:/usr/bin:/bin \
+    forge verify-contract "$ADDR" "$P:$NAME" \
+      --verifier sourcify --chain-id 4663 --rpc-url "$R" \
+      --guess-constructor-args >/dev/null 2>&1
+  printf "  %-18s %s submitted\n" "$NAME" "$ADDR"
+done
+
+echo
+echo "  waiting for the registry to settle..."
+sleep 20
+
+echo
+echo "== what SOURCIFY actually holds =="
+OK=0; NO=0
+for t in "${TARGETS[@]}"; do
+  set -- $t
+  NAME=$1; ADDR=$2
+  J=$(curl -s --max-time 25 "$S/v2/contract/4663/$ADDR")
+  M=$(printf '%s' "$J" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    c=d.get('creationMatch'); r=d.get('runtimeMatch')
+    print('%s/%s' % (c or '-', r or '-') if (c or r) else 'none')
+except Exception:
+    print('none')
+")
+  case "$M" in
+    exact_match/exact_match) OK=$((OK+1)); ST="EXACT" ;;
+    none) NO=$((NO+1)); ST="<<< NOT VERIFIED" ;;
+    *) OK=$((OK+1)); ST="partial: $M" ;;
+  esac
+  printf "  %-18s %s  %s\n" "$NAME" "$ADDR" "$ST"
+done
+echo
+echo "  verified: $OK   unverified: $NO   of ${#TARGETS[@]}"

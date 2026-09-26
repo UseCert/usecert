@@ -792,6 +792,152 @@ should produce a clean user error, not calldata.
 
 ---
 
+## Phase 6 — mainnet, deployed 25 September 2026
+
+**UseCert is live on Robinhood Chain mainnet (4663).** Six mirrors, deployed, bootstrapped and
+registered at the real Lighter venue. This section records what it took and what is still true
+about the risk, because a deployment is not an endorsement of readiness — the two external
+audits' NO-GO verdicts are unchanged and their open items are listed below.
+
+### 6.1 The four unanswered inputs, answered — ✅ 2026-09-25
+
+`DeployMainnet.s.sol` refused to guess four values. Three turned out not to be judgement calls
+at all, only unmeasured ones.
+
+**Price feeds — they exist.** Chainlink deployed feeds for ~95 tokenized equities when Robinhood
+Chain's mainnet launched on 2026-07-01. All six we need are live, 8 decimals, 86,400s heartbeat
+(inside `MAINNET_STALENESS_SECONDS = 93,600`), verified on chain by reading `decimals()`,
+`description()` and `latestRoundData()` from each:
+
+| | |
+|---|---|
+| TSLA | `0x4A1166a659A55625345e9515b32adECea5547C38` |
+| SPY | `0x319724394D3A0e3669269846abE664Cd621f9f6A` |
+| QQQ | `0x80901d846d5D7B030F26B480776EE3b29374C2ae` |
+| NVDA | `0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15` |
+| AAPL | `0x6B22A786bAa607d76728168703a39Ea9C99f2cD0` |
+| MSFT | `0x45C3C877C15E6BA2EBB19eA114Ea508d14C1Af2E` |
+
+**One thing to keep watching.** These are **total-return** feeds — underlying spot × a dividend
+multiplier read from the Robinhood token contract — while Lighter marks **spot**. Measured against
+the live venue marks the divergence was **12–46 bps** against a **500 bps** basis band, so roughly
+a tenth of the budget. It widens with dividends. That is a thing to monitor, not a thing that is
+solved.
+
+**`singleSource` = false**, and it is forced rather than chosen: `true` caps `deviationBps` at 200
+and construction reverts at our 500.
+
+**`collateralAssetIndex` = 3**, and **the first answer was wrong**. `api/v1/orderBooks` is public
+and carries `quote_asset_id` per market; all six report 0, so 0 went in and was written up as
+"measured, not assumed". The dry run reverted `AdditionalZkLighter_InvalidAssetIndex`. The order
+book's quote asset id and `deposit()`'s asset index are **different numberings** — reading one and
+calling it the other was measuring the wrong thing and describing it as a measurement. Settled by
+`eth_call` of `deposit(deployer, i, 0, 1e6)` across i = 0..24: 0 and 2 reject the index, 1 and
+4..24 reject the amount, and 3 alone reached the ERC-20 transfer and failed only on allowance.
+Granting 1 USDG turned that inference into a pass. The allowance was revoked immediately.
+
+### 6.2 forge cannot deploy against this venue — ✅ worked around 2026-09-25
+
+`CertVault.bootstrap()` calls `lighter.deposit(...)`, which delegates to
+`0xDa2B59fFB41485a6f21E14e479AE7B7AB29a997c` — an Arbitrum **Stylus (WASM)** contract that
+foundry's EVM cannot execute. It aborts `NotActivated` after ~963M gas, which is the signature of
+that rather than of a contract fault: the USDG transfer completes first and the venue's balance
+visibly increments.
+
+**`--skip-simulation` does not help**, and the name is misleading. `forge script` ALWAYS executes
+the script locally to collect the transactions to send; the flag only skips the separate on-chain
+simulation pass. A script calling `bootstrap()` therefore never broadcasts anything — it dies
+building the list. Confirmed by running it: nothing sent, no address book, not one wei moved.
+
+So bootstrap left the script. `deploy/bin/usecert-mainnet-bootstrap` sends the six directly and
+reads back `lighterAccountIndex()` rather than `bootstrapped()`, because the flag flipping only
+proves we called it — the account index becoming non-zero is what proves the venue registered
+anything. Three inherited §9 assertions had to become virtual seams to make this possible
+(`_verifyCollateralAndFaucet`, `_verifyVenueWiring`, `_bootstrapsInScript`); every one is
+**replaced** on mainnet rather than dropped, because the testnet versions assert things about
+`TestUSDG`, a faucet and `LighterSim` that would revert against the real venue.
+
+### 6.3 What is actually on chain — ✅ 2026-09-25
+
+```
+registry   0x0A82423F30036766160E82eDC0B173Aed77b03E8
+capacity   0xE93c79FDf3DB76E9bF77D7fA7034216D5a61ea09
+factory    0x6627a1F40B1da972F0C9Dbe8705ecC590178221A
+collateral 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168  (real USDG, 6dp)
+venue      0x94bAB9693Ba2f6358507eFfcbd372b0660AFfF9d  (real Lighter proxy)
+```
+
+| mirror | vault | Lighter account |
+|---|---|---|
+| uTSLA | `0xFE4e5Ad7e07918D6D6fb87bd0706f85B09B1524c` | 32989 |
+| uSPY | `0x74abEbFC54b396544B8C74E0dFC7988E788517AE` | 32990 |
+| uQQQ | `0x143d7aE7F69e777D6Da8582A2b041eff30d3ee55` | 32991 |
+| uNVDA | `0x6645c349Cc2e182d5bbA46341E87393Ccc341592` | 32992 |
+| uAAPL | `0x9C2658A1D78f92a28B772Ca3B523C4939d83B4d6` | 32993 |
+| uMSFT | `0x0F1B97efb2387cBa900D1cC3784dbB8250c5E069` | 32994 |
+
+Cost: **0.0042 ETH** of gas and **6 USDG** of seed (1 per vault), from 0.01 ETH and 50 USDG sent.
+Each vault posted 1 USDG of margin at the venue. **This is the first time this protocol has
+touched the real Lighter engine**, and it is the single thing every audit said was untested.
+
+**Mint capacity is currently zero, by arithmetic.** `bootstrap()` consumes exactly
+`10 ** decimals` as registering dust, so a 1 USDG seed leaves the ERC-20 buffer at 0 and
+`bufferCapacity18()` — which reads `freeCollateral18()`, the real balance — is 0. Nothing is
+misstated; there is simply nothing to mint against until more is seeded. 44 USDG remain.
+
+### 6.4 Source published — ✅ 27/27 on Sourcify
+
+**Not Blockscout.** `robinhoodchain.blockscout.com` sits behind Cloudflare bot protection: the
+verification submit and the read-back both return a "Just a moment..." challenge page instead of
+JSON, which is why forge reported "Failed to deserialize" and why the first read-back said 0/27.
+**That number measured nothing** — it was an HTML challenge being parsed as an absent field.
+Working around a bot challenge is not on the table, so verification went to Sourcify.
+
+Sourcify gives a **stronger** result than testnet ever got: the 15 script-created contracts are
+`exact_match` on **both** creation and runtime bytecode, where testnet Blockscout only managed a
+partial match (runtime agreed, metadata hash did not). The 12 nested `Certificate` and
+`BufferBook` contracts are exact on runtime with no creation match, which is correct rather than
+short: built inside `CertVault`'s constructor, they have no creation transaction of their own.
+
+### 6.5 The address book described the real venue as a simulator — ✅ caught 2026-09-25
+
+`_writeAddressBook` is inherited and writes the venue under the key **`lighterSim`**. True on
+testnet, where the venue is a simulator this repository deploys. On mainnet that slot held
+Lighter's real proxy — and 3.6's derivation decides whether to tell users *"the perp venue is a
+simulator this project runs"* by testing for **exactly that key's presence**. Left alone, the
+mainnet site would have described the real venue as a simulation: the precise inverse of the
+claim. It also wrote `testFaucet` as the zero address plus drip/float fields, and the generator's
+`if shared.get(key)` treats a zero-address STRING as present, so the faucet UI would have
+switched on.
+
+Renamed to `lighter`, faucet and batch-keeper rows removed, raw deploy output kept at
+`/root/4663.json.raw-from-deploy`.
+
+### 6.6 Still open, and unchanged by deploying — **OPEN**
+
+Deploying answered the engineering questions. It answered none of the governance ones.
+
+| | |
+|---|---|
+| 🔴 | **Governance and attester are single EOAs.** No multisig, no threshold custody, no rotation drill. Both audits call this a mainnet blocker and they are right. |
+| 🔴 | **No trade has been placed.** Bootstrap is a registering deposit, not a fill. Nothing has opened, closed, or been liquidated at the real venue. |
+| 🔴 | **No keepers are running on mainnet.** No attester cadence, no batch monitoring, no alerting. |
+| 🔴 | **The front end still points at testnet.** No mainnet bundle has been generated or deployed. |
+| 🔴 | **USDG is unqualified as collateral** (P2-6) and the C1 attestation trust model is unchanged (P2-5). |
+| 🔴 | **No independent review of the deployed system** (P2-8), no release provenance (3.4 / P3-1), no CI (4.5). |
+
+**The audits' mainnet verdict is NO-GO and this deployment does not change it.** What exists is a
+deployed, verified, venue-registered stack with zero mint capacity and no public interface —
+which is the right shape for proving the machinery works before anything is at stake, and the
+wrong thing to describe as a launch.
+
+**Next, in order:** place one small real trade through a mirror and watch what the venue does
+(P2-1); seed enough buffer for a single end-to-end mint; stand up the keepers; then generate the
+mainnet front-end bundle. Governance custody before any of it carries value.
+
+
+---
+
 ## Keeping the public page in sync
 
 **This file is not the only roadmap.** `/roadmap` on use-cert.com publishes a reader-facing
@@ -823,10 +969,14 @@ three, since all three are the same question — what does the project claim, an
 1.5 is now narrower than the other two: 3.6 built the mechanism, so the per-chain claims follow
 the deployment on their own and what remains is the **wording**, not the plumbing.
 
-**Ahead of all of it.** The corrective re-audit's P0 items are now closed (5.1, 5.2, 5.3, 5.5).
-What stands between here and a labelled no-value testnet pilot is P1 work: 5.4 (the remaining
-user-visible states, and signer-readiness alerting), 5.6 (runtime payload validation) and 4.5
-(a green enforced baseline). 5.1's acceptance evidence — one recorded wallet
+**Ahead of all of it.** Mainnet is deployed (Phase 6) and the corrective re-audit's P0 items are
+closed (5.1, 5.2, 5.3, 5.5). The next real milestone is **one small trade against the live Lighter
+engine** — P2-1, and the assumption every other Phase 3 item rests on. Nothing about the
+deployment tests it; a registering deposit is not a fill.
+
+After that: P1 work on the testnet pilot — 5.4 (remaining user-visible states, signer-readiness
+alerting), 5.6 (runtime payload validation), 4.5 (a green enforced baseline) — and governance
+custody before anything carries value. 5.1's acceptance evidence — one recorded wallet
 journey from an aged-out attestation through to a confirmed mint — is the single cheapest piece of
 evidence this project is missing, and it is the one that would have caught 5.1 before an auditor
 did.

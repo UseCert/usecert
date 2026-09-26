@@ -907,18 +907,76 @@ contract DeployTestnet is Script {
 
         // ---- §1: the collateral decimals, immutably baked into every vault
         require(IERC20Metadata(collateral).decimals() == COLLATERAL_DECIMALS, "S9: collateral decimals != 6");
-        require(TestUSDG(collateral).owner() == deployerAddr, "S9: collateral.owner != DEPLOYER");
-
-        // ---- Task 10: the faucet points at the token this deployment actually minted, and holds
-        //      the float this run put into it. A faucet pointed at a different token would hand
-        //      testers collateral no vault here accepts; a faucet not holding its float would fail
-        //      every claim from block one.
-        require(address(TestFaucet(testFaucet).token()) == collateral, "S9: faucet.token != collateral");
-        require(IERC20(collateral).balanceOf(testFaucet) == FAUCET_OPENING_FLOAT, "S9: faucet float wrong");
+        _verifyCollateralAndFaucet();
 
         for (uint256 i = 0; i < assets.length; ++i) {
             _verifyAsset(i);
         }
+    }
+
+    /// @dev The part of §9 that is about THIS deployment's collateral rather than about the
+    ///      protocol, split out because it is the only part a real-collateral chain cannot
+    ///      satisfy: mainnet USDG is owned by its issuer and there is no faucet to check.
+    ///
+    ///      Kept as assertions rather than deleted. `TestUSDG` being deployer-owned is what lets
+    ///      this script mint its own seed, and a faucet pointed at a different token would hand
+    ///      testers collateral no vault here accepts - both are worth failing the run over.
+    /// @dev The venue-shaped half of §9, split out because NONE of it survives a change of
+    ///      venue. `LighterSim` is a contract this repository deploys; the mainnet venue is
+    ///      Lighter's own proxy, which has no `depositorAllowed`, no `requiredMarginBps`, no
+    ///      `owner()` we control and no `keeper()` - calling them would revert rather than fail
+    ///      an assertion, which is a worse way to find out.
+    ///
+    ///      Split rather than weakened: every assertion below is unchanged and still runs on the
+    ///      chain it was written for.
+    function _verifyVenueWiring(uint256 i) internal view virtual {
+        AssetParams memory a = assets[i];
+        AssetDeployment memory d = deployed[i];
+        CertVault v = CertVault(d.vault);
+
+        // ---- §9: the registering deposit has EXECUTED (this is what the batch advance buys)
+        require(v.bootstrapped(), "S9: vault not bootstrapped");
+        require(v.lighterAccountIndex() != 0, "S9: lighterAccountIndex == 0 - registering deposit not executed");
+
+        // ---- plan step 3a: the allowlist row, read back
+        require(LighterSim(lighter).depositorAllowed(d.vault), "S9: depositorAllowed(vault) false");
+
+        // ---- §5 / Global Constraint 5: the simulator is not easier than the venue
+        require(
+            LighterSim(lighter).requiredMarginBps() >= LighterSim(lighter).VENUE_IMF_BPS(),
+            "S9: sim margin below the venue floor"
+        );
+        require(LighterSim(lighter).markPrice(a.marketIndex) != 0, "S9: venue mark unset - settleBatch would revert");
+        require(LighterSim(lighter).owner() == deployerAddr, "S9: sim owner != DEPLOYER");
+
+        // ---- Task 7 / Task 10: the keeper registered above is the one on file. A mismatch here is
+        //      the exact failure mode integration missed: every settleBatch from that bot's key
+        //      reverts LighterSim_OnlyOwnerOrKeeper, indistinguishable from a dead keeper.
+        require(
+            LighterSim(lighter).keeper() == batchKeeper,
+            "S9: sim keeper != BATCH_KEEPER - settleBatch will revert for that key"
+        );
+    }
+
+    /// @dev Does THIS script perform `bootstrap()` itself?
+    ///
+    ///      True here: the testnet venue is `LighterSim`, a contract this repository deploys and
+    ///      foundry can execute. False on mainnet, where the venue's deposit delegates to an
+    ///      Arbitrum Stylus (WASM) contract that foundry's EVM cannot run at all - so bootstrap
+    ///      is a direct transaction sent afterwards, and the assertions that depend on it belong
+    ///      to that step rather than to this one.
+    function _bootstrapsInScript() internal view virtual returns (bool) {
+        return true;
+    }
+
+    function _verifyCollateralAndFaucet() internal view virtual {
+        require(TestUSDG(collateral).owner() == deployerAddr, "S9: collateral.owner != DEPLOYER");
+
+        // ---- Task 10: the faucet points at the token this deployment actually minted, and holds
+        //      the float this run put into it. A faucet not holding its float would fail every
+        //      claim from block one.
+        require(address(TestFaucet(testFaucet).token()) == collateral, "S9: faucet.token != collateral");
+        require(IERC20(collateral).balanceOf(testFaucet) == FAUCET_OPENING_FLOAT, "S9: faucet float wrong");
     }
 
     /// @dev Split into four, and the split is forced rather than stylistic: `foundry.toml` sets
@@ -1072,28 +1130,8 @@ contract DeployTestnet is Script {
         require(v.venueWithdrawCap() <= type(uint64).max, "S9: venueWithdrawCap > uint64 max");
         require(v.settleWindow() == SETTLE_WINDOW, "S9: vault.settleWindow wrong");
 
-        // ---- §9: the registering deposit has EXECUTED (this is what the batch advance buys)
-        require(v.bootstrapped(), "S9: vault not bootstrapped");
-        require(v.lighterAccountIndex() != 0, "S9: lighterAccountIndex == 0 - registering deposit not executed");
-
-        // ---- plan step 3a: the allowlist row, read back
-        require(LighterSim(lighter).depositorAllowed(d.vault), "S9: depositorAllowed(vault) false");
-
-        // ---- §5 / Global Constraint 5: the simulator is not easier than the venue
-        require(
-            LighterSim(lighter).requiredMarginBps() >= LighterSim(lighter).VENUE_IMF_BPS(),
-            "S9: sim margin below the venue floor"
-        );
-        require(LighterSim(lighter).markPrice(a.marketIndex) != 0, "S9: venue mark unset - settleBatch would revert");
-        require(LighterSim(lighter).owner() == deployerAddr, "S9: sim owner != DEPLOYER");
-
-        // ---- Task 7 / Task 10: the keeper registered above is the one on file. A mismatch here is
-        //      the exact failure mode integration missed: every settleBatch from that bot's key
-        //      reverts LighterSim_OnlyOwnerOrKeeper, indistinguishable from a dead keeper.
-        require(
-            LighterSim(lighter).keeper() == batchKeeper,
-            "S9: sim keeper != BATCH_KEEPER - settleBatch will revert for that key"
-        );
+        // ---- everything that is true of THIS venue rather than of the protocol
+        _verifyVenueWiring(i);
 
         // ---- §9: the live price is inside the uint32 tick domain at the configured priceDecimals
         require(o.toTickPrice(o.px()) != 0, "S9: toTickPrice(px) == 0");

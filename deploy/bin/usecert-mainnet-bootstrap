@@ -1,0 +1,74 @@
+#!/bin/bash
+# Bootstrap the six mainnet vaults: the registering deposit into Lighter.
+#
+# This is a separate tool and not part of the deploy script because `CertVault.bootstrap()`
+# calls `lighter.deposit(...)`, which delegates to an Arbitrum Stylus (WASM) contract that
+# foundry's EVM cannot execute at all. `forge script` always runs the script locally to collect
+# its transactions, so a script containing this call can never broadcast anything - it dies
+# while building the list, before sending a single transaction. `cast send` has no such problem:
+# the node executes it.
+#
+# Each vault is bootstrapped and then READ BACK. `bootstrapped()` flipping is not enough on its
+# own; `lighterAccountIndex()` becoming non-zero is what proves the venue actually registered
+# the account, which is the thing the deposit is for.
+set -uo pipefail
+export PATH=/home/usecert/.foundry/bin:$PATH
+set -a; . /etc/usecert/mainnet-deployer.env; set +a
+
+R=https://rpc.mainnet.chain.robinhood.com
+U=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168
+BOOK=/opt/usecert/deployments/4663.json
+num() { sed 's/ .*//'; }
+
+mapfile -t ROWS < <(python3 -c "
+import json
+d=json.load(open('$BOOK'))
+for v in d['vaults']:
+    print('%s %s' % (v['symbol'], v['vault']))
+")
+
+echo "== before =="
+for r in "${ROWS[@]}"; do
+  set -- $r
+  printf "  %-7s bootstrapped=%-6s accountIndex=%-4s vaultUSDG=%s\n" "$1" \
+    "$(cast call "$2" 'bootstrapped()(bool)' --rpc-url "$R" 2>/dev/null)" \
+    "$(cast call "$2" 'lighterAccountIndex()(uint256)' --rpc-url "$R" 2>/dev/null | num)" \
+    "$(cast call "$U" 'balanceOf(address)(uint256)' "$2" --rpc-url "$R" 2>/dev/null | num)"
+done
+
+echo
+echo "== bootstrapping =="
+FAIL=0
+for r in "${ROWS[@]}"; do
+  set -- $r
+  OUT=$(cast send "$2" 'bootstrap()' --private-key "$MAINNET_DEPLOYER_PK" --rpc-url "$R" 2>&1)
+  H=$(printf '%s' "$OUT" | grep -oE '^transactionHash\s+0x[0-9a-f]+' | awk '{print $2}')
+  ST=$(printf '%s' "$OUT" | grep -oE '^status\s+[0-9]' | awk '{print $2}')
+  if [ "$ST" = "1" ]; then
+    printf "  %-7s OK   %s\n" "$1" "$H"
+  else
+    printf "  %-7s FAIL %s\n" "$1" "$(printf '%s' "$OUT" | grep -oE '\[Revert\].*|Error:.*' | head -1)"
+    FAIL=1
+  fi
+done
+
+echo
+echo "== after: read back what the VENUE says, not what we sent =="
+for r in "${ROWS[@]}"; do
+  set -- $r
+  B=$(cast call "$2" 'bootstrapped()(bool)' --rpc-url "$R" 2>/dev/null)
+  AI=$(cast call "$2" 'lighterAccountIndex()(uint256)' --rpc-url "$R" 2>/dev/null | num)
+  PM=$(cast call "$2" 'postedMargin()(uint256)' --rpc-url "$R" 2>/dev/null | num)
+  VB=$(cast call "$U" 'balanceOf(address)(uint256)' "$2" --rpc-url "$R" 2>/dev/null | num)
+  OK="OK"
+  [ "$B" = "true" ] || { OK="<<< not bootstrapped"; FAIL=1; }
+  [ "${AI:-0}" != "0" ] || { OK="<<< accountIndex still 0 - venue did NOT register"; FAIL=1; }
+  printf "  %-7s bootstrapped=%-5s accountIndex=%-6s postedMargin=%-9s vaultUSDG=%-9s %s\n" \
+    "$1" "$B" "$AI" "$PM" "$VB" "$OK"
+done
+
+echo
+D=$MAINNET_DEPLOYER_ADDR
+echo "  deployer USDG: $(cast call "$U" 'balanceOf(address)(uint256)' "$D" --rpc-url "$R" | num)"
+echo "  deployer ETH:  $(cast balance "$D" --rpc-url "$R" --ether)"
+[ "$FAIL" = "0" ] && echo "  ALL SIX REGISTERED AT THE VENUE" || { echo "  SOMETHING FAILED - read above"; exit 1; }
