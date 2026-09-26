@@ -10,9 +10,9 @@ import { MicroLabel } from "./ui";
 import { explorerAddressUrl } from "@/chain/config";
 import { decodeRevert } from "@/chain/useActions";
 import {
-  CUSTOM_CHAIN_WARNING,
-  cannotAddCustomChains,
+  TESTNET_MODE_HINT,
   explainChainFailure,
+  needsTestnetMode,
 } from "@/chain/walletSupport";
 
 /* ------------------------------------------------------------- modal shell */
@@ -90,10 +90,10 @@ export function ModalShell({
  * with no wallet installed is whether a choice needs an extension at all.
  */
 function connectorHint(c: { id: string; type: string; name: string }): string {
-  // The capability that matters here outranks the form factor. A wallet that cannot be
-  // given chain 46630 is a dead end whatever kind of wallet it is, and the user should
-  // read that before spending a click on it rather than after.
-  if (cannotAddCustomChains(c)) return CUSTOM_CHAIN_WARNING;
+  // What the user must DO outranks the form factor. Phantom reaches chain 46630 only
+  // with Testnet Mode on, and nothing here can read that setting - the failure surfaces
+  // only after they have approved a connection. One sentence up front saves the round trip.
+  if (needsTestnetMode(c)) return TESTNET_MODE_HINT;
   if (c.type === "walletConnect") return "Scan with a mobile wallet";
   if (c.id === "coinbaseWalletSDK" || c.type === "coinbaseWallet") {
     return "Extension, or a passkey - no install needed";
@@ -168,7 +168,10 @@ export function WalletModal() {
               <span
                 className={cn(
                   "block font-mono text-[11px]",
-                  cannotAddCustomChains(c) ? "text-warn" : "text-white-60",
+                  // Not amber: this wallet works, it just needs a setting turned on.
+                  // Amber would read as "broken" and send people to a different wallet,
+                  // which is the mistake this line previously made in words.
+                  needsTestnetMode(c) ? "text-green-bright/80" : "text-white-60",
                 )}
               >
                 {connectorHint(c)}
