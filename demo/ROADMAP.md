@@ -1476,8 +1476,13 @@ It alerts when the set of problems changes, not on every run, and backs off on t
 stuck receipt, an unsettled receipt and low gas were each reported. On the live host it says
 all clear.
 
-**Open.** Alerts go to the journal only until `/etc/usecert/telegram.env` holds a bot token and
-chat id. The attester holds 0.0047 ETH and the deployer 0.0034 ETH, both close to the 0.002
+**Alerts, 2026-09-26.** Telegram is wired on France: the owner's existing bot config was copied
+host to host from Montréal and never printed, and the hashes match. A test summary was delivered.
+Montréal's `usecert-health` and `usecert-summary` timers, which checked testnet only, are
+disabled. Its site uptime (`usecert-status`), nightly DB backup (`usecert-backup`) and host
+updates (`usecert-update`) are unchanged and still enabled.
+
+**Open.** The attester holds 0.0047 ETH and the deployer 0.0034 ETH, both close to the 0.002
 floor.
 
 ### 6.19 Unfilled mints refunded automatically — ✅ 2026-09-26 (`b1312f1`)
