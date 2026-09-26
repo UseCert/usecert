@@ -1,0 +1,72 @@
+#!/bin/bash
+# Has Lighter's sequencer picked up our accounts yet?
+#
+# WHY THIS EXISTS. Every on-chain operation against Lighter Core - deposit, order, withdrawal -
+# goes into a PRIORITY REQUEST QUEUE that the sequencer must process within
+# `PRIORITY_EXPIRATION`, which the mainnet contract reports as 1,209,600s = 14 DAYS. That is a
+# ceiling with an escape hatch behind it, not a schedule: if the sequencer misses it, the
+# contract freezes into desert mode and holders reconstruct state from Ethereum data blobs and
+# withdraw directly. Normal processing is supposed to be minutes.
+#
+# On 2026-09-25 the deployment's six vault accounts, and a control deposit from a plain EOA,
+# were all assigned indices by the L1 contract and all returned `21100 account not found` from
+# the sequencer more than an hour later. That is slow, and well inside the window, and NOT
+# evidence of a fault - which is exactly why it needs watching rather than fixing.
+#
+# TWO INDEX SPACES, do not confuse them. `addressToAccountIndex` is the L1 CONTRACT's registry.
+# The API's `account_index` is the SEQUENCER's. They collide numerically and mean different
+# accounts: contract index 32989 resolves in the API to an unrelated l1_address. Only a lookup
+# BY L1 ADDRESS proves one of our accounts exists in the sequencer, so that is the only check
+# this script trusts.
+#
+# Run it from cron, or by hand. Exit 0 once every vault is visible to the sequencer.
+set -uo pipefail
+export PATH=/home/usecert/.foundry/bin:$PATH
+
+R=${RPC:-https://rpc.mainnet.chain.robinhood.com}
+API=https://mainnet.zklighter.elliot.ai/api/v1/account
+ZK=0x94bAB9693Ba2f6358507eFfcbd372b0660AFfF9d
+BOOK=${BOOK:-/opt/usecert/deployments/4663.json}
+n() { sed 's/ .*//'; }
+
+# The escape hatch is the thing that would change the situation from "wait" to "act".
+DESERT=$(cast call "$ZK" 'desertMode()(bool)' --rpc-url "$R" 2>/dev/null || echo "?")
+EXP=$(cast call "$ZK" 'PRIORITY_EXPIRATION()(uint256)' --rpc-url "$R" 2>/dev/null | n)
+printf 'venue: desertMode=%s  PRIORITY_EXPIRATION=%ss (%s days)\n' \
+  "$DESERT" "${EXP:-?}" "$(python3 -c "print(int('${EXP:-0}')//86400)" 2>/dev/null || echo ?)"
+if [ "$DESERT" = "true" ]; then
+  echo 'DESERT MODE IS ACTIVE. The sequencer missed the window and the contract has frozen.'
+  echo 'Funds are recovered by proving ownership against Ethereum-posted data, NOT by waiting.'
+  exit 2
+fi
+echo
+
+seen=0; total=0
+while read -r SYM V; do
+  total=$((total + 1))
+  IDX=$(cast call "$ZK" 'addressToAccountIndex(address)(uint48)' "$V" --rpc-url "$R" 2>/dev/null | n)
+  SEQ=$(curl -s --max-time 25 "$API?by=l1_address&value=$V" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    print('api-unreadable'); raise SystemExit
+if d.get('code') != 200:
+    print('not-indexed')
+else:
+    a=d['accounts'][0]
+    print('INDEXED idx=%s collateral=%s' % (a.get('account_index'), a.get('collateral')))
+")
+  case "$SEQ" in INDEXED*) seen=$((seen + 1)) ;; esac
+  printf '  %-7s %s  l1Index=%-7s sequencer=%s\n' "$SYM" "$V" "${IDX:-?}" "$SEQ"
+done < <(python3 -c "
+import json
+d=json.load(open('$BOOK'))
+for v in d['vaults']: print(v['symbol'], v['vault'])
+")
+
+echo
+printf '  %d of %d vaults visible to the sequencer\n' "$seen" "$total"
+[ "$seen" = "$total" ] && { echo '  ALL INDEXED - the queue has been processed; retry recallMargin() and claimRedeem().'; exit 0; }
+echo '  still queued. Nothing to do but wait; the 14-day window is the backstop.'
+exit 1
