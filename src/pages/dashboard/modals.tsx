@@ -8,6 +8,7 @@ import { useDashboard } from "./store";
 import { truncHash } from "./format";
 import { MicroLabel } from "./ui";
 import { explorerAddressUrl } from "@/chain/config";
+import { CHAIN } from "@/chain/contracts";
 import { decodeRevert } from "@/chain/useActions";
 import {
   TESTNET_MODE_HINT,
@@ -189,8 +190,9 @@ export function WalletModal() {
       </div>
       {failure && <p className="mt-4 font-mono text-[11px] leading-[1.6] text-warn">{failure}</p>}
       <p className="mt-5 font-mono text-[10px] uppercase leading-[1.6] tracking-[0.06em] text-white-60">
-        Chain 46630 (Robinhood Chain testnet) only. Mainnet is deliberately not offered: that chain id
-        has never been verified from the contracts repo.
+        Chain {chainId} ({CHAIN.name}) only. Mainnet is not offered because nothing is deployed
+        there — the chain itself is real and verified (4663, and the venue and USDG are live on
+        it), but UseCert has no contracts on it. See deploy/mainnet/4663.plan.json.
       </p>
     </ModalShell>
   );
