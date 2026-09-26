@@ -449,9 +449,28 @@ export function useCertActions(id: ChainVaultId): CertActions {
   const { mutateAsync, isPending, error, reset } = useWriteContract();
   const publicClient = usePublicClient({ chainId: CHAIN_ID });
 
+  /**
+   * Send, then WAIT for the receipt, and throw if it reverted. A hash is not a completed action:
+   * the panel used to toast "Minted" / "Redeemed" / "Receipt claimed" the moment the wallet
+   * returned one (external checkup, 2026-09-26). Every user-facing write goes through here, so
+   * success is only ever reported for a transaction the chain confirmed.
+   */
+  const confirmed = useCallback(
+    async (request: Parameters<typeof mutateAsync>[0]): Promise<TxHash> => {
+      const hash = await mutateAsync(request);
+      if (!publicClient) return hash;
+      const rc = await publicClient.waitForTransactionReceipt({ hash });
+      if (rc.status !== "success") {
+        throw new Error(`The transaction was mined but reverted on chain (${hash}). Nothing changed.`);
+      }
+      return hash;
+    },
+    [mutateAsync, publicClient],
+  );
+
   const approve = useCallback(
     async (amountInput: string): Promise<TxHash> =>
-      mutateAsync({
+      confirmed({
         chainId: CHAIN_ID,
         address: SHARED.collateral,
         abi: TestUSDGABI,
@@ -459,43 +478,43 @@ export function useCertActions(id: ChainVaultId): CertActions {
         // SIX decimals. Using toCert here would over-approve by 10**12.
         args: [mirror.vault, toCollateral(amountInput)],
       }),
-    [mutateAsync, mirror.vault],
+    [confirmed, mutateAsync, mirror.vault],
   );
 
   const approveCertificate = useCallback(
     async (amountInput: string): Promise<TxHash> =>
-      mutateAsync({
+      confirmed({
         chainId: CHAIN_ID,
         address: mirror.certificate,
         abi: CertificateABI,
         functionName: "approve",
         args: [mirror.vault, toCert(amountInput)],
       }),
-    [mutateAsync, mirror.certificate, mirror.vault],
+    [confirmed, mutateAsync, mirror.certificate, mirror.vault],
   );
 
   const mintInstant = useCallback(
     async (amountInput: string): Promise<TxHash> =>
-      mutateAsync({
+      confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
         abi: CertVaultABI,
         functionName: "mintInstant",
         args: [toCollateral(amountInput)],
       }),
-    [mutateAsync, mirror.vault],
+    [confirmed, mutateAsync, mirror.vault],
   );
 
   const requestMint = useCallback(
     async (amountInput: string): Promise<TxHash> =>
-      mutateAsync({
+      confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
         abi: CertVaultABI,
         functionName: "requestMint",
         args: [toCollateral(amountInput)],
       }),
-    [mutateAsync, mirror.vault],
+    [confirmed, mutateAsync, mirror.vault],
   );
 
   /**
@@ -692,7 +711,7 @@ export function useCertActions(id: ChainVaultId): CertActions {
   const redeemInstant = useCallback(
     async (certInput: string): Promise<RedeemResult> => {
       try {
-        const hash = await mutateAsync({
+        const hash = await confirmed({
           chainId: CHAIN_ID,
           address: mirror.vault,
           abi: CertVaultABI,
@@ -708,19 +727,19 @@ export function useCertActions(id: ChainVaultId): CertActions {
         throw err;
       }
     },
-    [mutateAsync, mirror.vault],
+    [confirmed, mutateAsync, mirror.vault],
   );
 
   const requestRedeem = useCallback(
     async (certInput: string): Promise<TxHash> =>
-      mutateAsync({
+      confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
         abi: CertVaultABI,
         functionName: "requestRedeem",
         args: [toCert(certInput)],
       }),
-    [mutateAsync, mirror.vault],
+    [confirmed, mutateAsync, mirror.vault],
   );
 
   const redeem = useCallback(
@@ -753,20 +772,20 @@ export function useCertActions(id: ChainVaultId): CertActions {
   const forceExit = useCallback(
     async (certInput: string): Promise<TxHash> =>
       // No precondition. Design Law 2: forceExit reads no health signal, so the UI adds none.
-      mutateAsync({
+      confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
         abi: CertVaultABI,
         functionName: "forceExit",
         args: [toCert(certInput)],
       }),
-    [mutateAsync, mirror.vault],
+    [confirmed, mutateAsync, mirror.vault],
   );
 
   const claimRedeem = useCallback(
     async (receiptId: bigint): Promise<ClaimResult> => {
       try {
-        const hash = await mutateAsync({
+        const hash = await confirmed({
           chainId: CHAIN_ID,
           address: mirror.vault,
           abi: CertVaultABI,
@@ -782,55 +801,55 @@ export function useCertActions(id: ChainVaultId): CertActions {
         throw err;
       }
     },
-    [mutateAsync, mirror.vault],
+    [confirmed, mutateAsync, mirror.vault],
   );
 
   const stageRefund = useCallback(
     async (receiptId: bigint): Promise<TxHash> =>
-      mutateAsync({
+      confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
         abi: CertVaultABI,
         functionName: "stageRefund",
         args: [receiptId],
       }),
-    [mutateAsync, mirror.vault],
+    [confirmed, mutateAsync, mirror.vault],
   );
 
   const refundMint = useCallback(
     async (receiptId: bigint): Promise<TxHash> =>
-      mutateAsync({
+      confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
         abi: CertVaultABI,
         functionName: "refundMint",
         args: [receiptId],
       }),
-    [mutateAsync, mirror.vault],
+    [confirmed, mutateAsync, mirror.vault],
   );
 
   const recallMargin = useCallback(
     async (): Promise<TxHash> =>
-      mutateAsync({
+      confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
         abi: CertVaultABI,
         functionName: "recallMargin",
         args: [],
       }),
-    [mutateAsync, mirror.vault],
+    [confirmed, mutateAsync, mirror.vault],
   );
 
   const rebalance = useCallback(
     async (): Promise<TxHash> =>
-      mutateAsync({
+      confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
         abi: CertVaultABI,
         functionName: "rebalance",
         args: [],
       }),
-    [mutateAsync, mirror.vault],
+    [confirmed, mutateAsync, mirror.vault],
   );
 
   return {
