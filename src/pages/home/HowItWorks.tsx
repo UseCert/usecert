@@ -9,8 +9,8 @@ export const HOW_IT_WORKS_ROWS: AccordionRow[] = [
     title: "Mint",
     meta: "Delta: 1.0",
     body: [
-      "Deposit tUSDG into a per-asset vault. The vault opens an equivalent long on the corresponding equity perp on Robinhood Chain, and your certificate mints to your wallet at oracle price. uTSLA in, uTSLA out, at the stock's price, any hour of any day.",
-      "The delta target is 1.0 at all times. Every certificate in circulation is backed by exactly one token's worth of perp exposure plus tUSDG margin, and the backing math is proven on-chain at every attestation (~60s), with the age of the proof published.",
+      "Deposit USDG into a per-asset vault. The vault opens an equivalent long on the corresponding equity perp on Robinhood Chain, and your certificate mints to your wallet at oracle price. uTSLA in, uTSLA out, at the stock's price, any hour of any day.",
+      "The delta target is 1.0 at all times. Every certificate in circulation is backed by exactly one token's worth of perp exposure plus USDG margin, and the backing math is proven on-chain at every attestation (~60s), with the age of the proof published.",
     ],
     image: "/hiw-mint.jpg",
     imageAlt: "Steel vault door with locking wheel",
@@ -19,7 +19,7 @@ export const HOW_IT_WORKS_ROWS: AccordionRow[] = [
     title: "Hold & Use",
     meta: "Form: plain token",
     body: [
-      "Certificates are plain tokens on Robinhood Chain. Hold the stock 24/7, LP uTSLA against tUSDG, post it as collateral on lending markets, or send it like any token. No funding tabs, no liquidation price, nothing to babysit.",
+      "Certificates are plain tokens on Robinhood Chain. Hold the stock 24/7, LP uTSLA against USDG, post it as collateral on lending markets, or send it like any token. No funding tabs, no liquidation price, nothing to babysit.",
       "This is the missing primitive: equity-shaped exposure that finally behaves like an asset. The stock, finally composable.",
     ],
     image: "/hiw-hold.jpg",
@@ -49,7 +49,7 @@ export const HOW_IT_WORKS_ROWS: AccordionRow[] = [
     title: "Honest Boundaries",
     meta: "Risk: named plainly",
     body: [
-      "Certificates are synthetic: price exposure backed by perp positions and tUSDG margin, not custody of shares. No dividends, no shareholder rights, no claim on an issuer.",
+      "Certificates are synthetic: price exposure backed by perp positions and USDG margin, not custody of shares. No dividends, no shareholder rights, no claim on an issuer.",
       "Risks are named plainly: sustained negative funding (buffered, then fee'd, never hidden), market and operator dependency, and oracle or liquidation tail risk in extreme gaps. UseCert is infrastructure, not investment advice.",
     ],
     image: "/hiw-boundaries.jpg",
@@ -72,7 +72,7 @@ export default function HowItWorks() {
             transition={{ duration: 0.8, ease: EASE }}
           >
             The perps are the engine. UseCert is the asset. Every certificate is backed by exactly one token's worth
-            of perp exposure plus tUSDG margin.
+            of perp exposure plus USDG margin.
           </motion.p>
         </div>
         <motion.div

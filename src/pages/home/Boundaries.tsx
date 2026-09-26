@@ -39,7 +39,7 @@ export default function Boundaries() {
               viewport={{ once: true, amount: 0.4 }}
               variants={{ hidden: {}, show: { transition: { staggerChildren: 0.02 } } }}
             >
-              {"Certificates are synthetic, and we say that first. Backed by perp positions and tUSDG margin, not custody of shares. No dividends, no shareholder rights. The solvency dashboard is public and the stress parameters are published, because trust here should never require trusting us."
+              {"Certificates are synthetic, and we say that first. Backed by perp positions and USDG margin, not custody of shares. No dividends, no shareholder rights. The solvency dashboard is public and the stress parameters are published, because trust here should never require trusting us."
                 .split(" ")
                 .map((w, i) => (
                   <motion.span

@@ -2,7 +2,7 @@ import { motion } from "framer-motion";
 import { ArrowUpRight } from "lucide-react";
 import { CHAIN, MIRRORS, SHARED } from "@/chain/contracts";
 import { explorerAddressUrl } from "@/chain/config";
-import { FAUCET_ADDRESS, VENUE_SIM_ADDRESS } from "@/chain/deployment";
+import { COLLATERAL_SYMBOL, FAUCET_ADDRESS, IS_TESTNET, VENUE_SIM_ADDRESS } from "@/chain/deployment";
 import { MARKET_INDEX_UNVERIFIED_NOTE, isMarketIndexVerified } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
 
@@ -48,7 +48,7 @@ const SHARED_ROWS: Row[] = [
     note: "A registry, not a deployer. It stopped constructing vaults when doing so pushed it past the EIP-170 size limit.",
   },
   {
-    label: "TestUSDG (collateral)",
+    label: IS_TESTNET ? "TestUSDG (collateral)" : `${COLLATERAL_SYMBOL} (collateral)`,
     address: SHARED.collateral,
     note: "The test collateral, 6 decimals. On mainnet this is replaced by real USDG and nothing here mints it.",
   },

@@ -25,7 +25,7 @@ export function TickerStrip() {
   if (liveVaults.length === 0) {
     return (
       <div className="mt-4 border hairline-dark bg-section-deep-2 px-6 py-2.5 font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">
-        Reading chain 46630…
+        Reading chain {CHAIN_ID}…
       </div>
     );
   }
@@ -106,7 +106,7 @@ export function BackingComposition() {
             />
 
       {rows.rs.length === 0 ? (
-        <EmptyState className="mt-5" title="No chain data yet" detail="Reading chain 46630…" />
+        <EmptyState className="mt-5" title="No chain data yet" detail={`Reading chain ${CHAIN_ID}…`} />
       ) : (
         <div className="mt-5 flex flex-col gap-4">
           {rows.rs.map((r) => (
@@ -355,7 +355,7 @@ export function PegMonitor() {
         </span>
       </div>
       {liveVaults.length === 0 ? (
-        <EmptyState className="border-0" title="No chain data yet" detail="Reading chain 46630…" />
+        <EmptyState className="border-0" title="No chain data yet" detail={`Reading chain ${CHAIN_ID}…`} />
       ) : (
         <table className="w-full min-w-[900px] font-mono text-[12px]">
           <thead>

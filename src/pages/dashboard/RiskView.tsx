@@ -6,7 +6,7 @@ import { EM_DASH, NO_POSITION, fmtCompactUSD, fmtOrDash } from "./format";
 import { fromBps, fromPrice18 } from "@/chain/units";
 import { BASIS_ON_THIS_DEPLOYMENT } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
-import { VENUE_IS_SIMULATED } from "@/chain/deployment";
+import { CHAIN_ID, COLLATERAL_SYMBOL, VENUE_IS_SIMULATED } from "@/chain/deployment";
 
 /* --------------------------------------------------------------- content */
 
@@ -24,7 +24,7 @@ const DESIGN_LAWS: { n: string; title: string; body: string }[] = [
   {
     n: "03",
     title: "Funding buffered, never hidden",
-    body: "Funding accrues to and from the buffer the vault holds, and the balance is readable on-chain. The fee-passthrough threshold this law was written around is NOT deployed on chain 46630 — nothing takes over when the buffer is exhausted.",
+    body: "Funding accrues to and from the buffer the vault holds, and the balance is readable on-chain. The fee-passthrough threshold this law was written around is NOT deployed — nothing takes over when the buffer is exhausted.",
   },
   {
     n: "04",
@@ -104,7 +104,7 @@ const SCENARIOS: {
     name: "Accrual ledger goes non-positive",
     shock: "BufferBook.balance18 reaches zero or below",
     behaviour:
-      "BufferBook.capacity18 returns 0, which zeroes bufferCapacity18 and maxNotional18 with it, and EVERY mint is refused regardless of the collateral held — a vault sitting on $100,000 of tUSDG rejects a $100 mint. Redemption is untouched. This deployment publishes the ledger balance on the vault page so the halt is not silent.",
+      "BufferBook.capacity18 returns 0, which zeroes bufferCapacity18 and maxNotional18 with it, and EVERY mint is refused regardless of the collateral held — a vault sitting on $100,000 of collateral rejects a $100 mint. Redemption is untouched. This deployment publishes the ledger balance on the vault page so the halt is not silent.",
     severity: "warn",
     governedBy: "bufferLedger",
   },
@@ -456,7 +456,7 @@ export default function RiskView() {
       state: liveVaults.length === 0 ? "unknown" : verifiedIndexCount === liveVaults.length ? "ok" : "warn",
     },
     {
-      label: "Vaults routed on chain 46630",
+      label: `Vaults routed on chain ${CHAIN_ID}`,
       value: `${liveVaults.length} / ${vaults.length}`,
       /* Derived, not a fixed `warn`: the row was pinned amber while two of five were
          routed and would have stayed amber with every vault live. */
@@ -544,7 +544,7 @@ export default function RiskView() {
           </div>
 
           {cfgRows.length === 0 ? (
-            <EmptyState className="border-0" title="Reading chain 46630…" />
+            <EmptyState className="border-0" title={`Reading chain ${CHAIN_ID}…`} />
           ) : (
             cfgRows.map((row) => (
               <div key={row.id}>
@@ -606,7 +606,7 @@ export default function RiskView() {
                   "past this, capacity is 0 and minting is off",
                 ],
                 ["Redemption cap", "none", "forceExit reads no health signal at all"],
-                ["Collateral", "tUSDG · 6 decimals", "read once into an immutable at construction"],
+                ["Collateral", `${COLLATERAL_SYMBOL} · 6 decimals`, "read once into an immutable at construction"],
                 ["Certificate", "18 decimals", "6 dp in, 18 dp out on mint"],
               ] as [string, string, string][]
             ).map(([k, v, note]) => (

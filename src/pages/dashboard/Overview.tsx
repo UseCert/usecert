@@ -404,7 +404,7 @@ export default function Overview() {
         <Panel className="mt-3 overflow-x-auto">
           <div className="flex items-center justify-between border-b hairline-dark px-5 py-4">
             <MicroLabel>
-              Vaults · {vaults.filter(isRouted).length} of {vaults.length} routed on chain 46630
+              Vaults · {vaults.filter(isRouted).length} of {vaults.length} routed on chain {CHAIN.id}
             </MicroLabel>
             <button
               type="button"
@@ -556,7 +556,7 @@ export default function Overview() {
           </table>
           {isLoading && (
             <p className="border-t hairline-dark px-5 py-3 font-mono text-[10px] uppercase tracking-[0.08em] text-white-60">
-              Reading chain 46630…
+              Reading chain {CHAIN.id}…
             </p>
           )}
         </Panel>

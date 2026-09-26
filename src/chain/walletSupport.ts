@@ -1,3 +1,5 @@
+import { CHAIN } from "./contracts";
+
 /**
  * Wallets that reach chain 46630 only after the user changes a setting.
  *
@@ -115,9 +117,9 @@ export function explainChainFailure(err: unknown, connector?: ConnectorLike | nu
 
   if (unrecognised) {
     return (
-      "Your wallet would not switch to chain 46630. Add Robinhood Chain testnet manually " +
-      "(RPC https://rpc.testnet.chain.robinhood.com, chain id 46630), or enable its testnet " +
-      "setting if it has one."
+      `Your wallet would not switch to chain ${CHAIN.id}. Add ${CHAIN.name} manually ` +
+      `(RPC ${CHAIN.rpcUrls.default.http[0]}, chain id ${CHAIN.id})` +
+      (CHAIN.testnet ? ", or enable its testnet setting if it has one." : ".")
     );
   }
 
