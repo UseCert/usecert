@@ -275,11 +275,24 @@ def build(a):
         commits = extra.get("commits", [])
         if commits:
             body.append("<h2>On GitHub</h2><ul class=\"commits\">")
+            renders = []
             for c in commits:
                 full, date, subj = resolve(c, a.git)
                 body.append('<li><a href="%s/commit/%s" rel="noreferrer"><code>%s</code></a><span class="d">%s</span><span>%s</span></li>'
                             % (REPO_URL, full, full[:7], date, html.escape(subj)))
+                img = next((os.path.join(s, "commit-%s.jpg" % c) for s in a.shots
+                            if os.path.exists(os.path.join(s, "commit-%s.jpg" % c))), None)
+                if img:
+                    renders.append((c, full, subj, img))
             body.append("</ul>")
+            # The change itself, as git shows it: message, files touched, the start of the diff.
+            if renders:
+                body.append("<h2>The change itself</h2>")
+                for c, full, subj, img in renders:
+                    shutil.copy(img, os.path.join(d, "commit-%s.jpg" % c))
+                    body.append('<figure><a href="commit-%s.jpg"><img src="commit-%s.jpg" alt="git show %s" loading="lazy"></a>'
+                                '<figcaption><a href="%s/commit/%s" rel="noreferrer">%s</a> · %s</figcaption></figure>'
+                                % (c, c, c, REPO_URL, full, full[:7], html.escape(subj)))
         body.append(FOOT % gen_at)
         open(os.path.join(d, "index.html"), "w", encoding="utf-8").write("\n".join(body))
         rows.append((it, tok, cls, label, title))

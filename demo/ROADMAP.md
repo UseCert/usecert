@@ -1252,8 +1252,10 @@ and the testnet stack.
 * The payout drift of 6.12.
 * Alerting.
 * Governance custody (6.6).
-* The site's activity feed. It reads Blockscout's API, which sits behind a bot challenge on
-  mainnet.
+
+*Corrected:* an earlier version of this list said the site's activity feed was blocked by a bot
+challenge on the explorer's API. That was inferred from a curl, not measured in a browser. In a
+browser the feed loads and lists every mint, settle, redemption and claim of the cycles above.
 
 
 ---
