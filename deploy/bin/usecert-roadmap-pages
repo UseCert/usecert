@@ -176,7 +176,16 @@ def meta_of(head):
 
 
 # ------------------------------------------------------------------------ commits
+REMAP = {}   # old full hash -> new full hash (--remap: histories replayed onto dated branches)
+
+
 def resolve(short, repos):
+    for r in repos:
+        p = subprocess.run(["git", "-C", r, "rev-parse", "--verify", "--quiet", short + "^{commit}"],
+                           capture_output=True, text=True)
+        if p.returncode == 0 and p.stdout.strip() in REMAP:
+            short = REMAP[p.stdout.strip()]
+            break
     for r in repos:
         p = subprocess.run(["git", "-C", r, "show", "-s", "--format=%H|%ad|%s", "--date=short", short],
                            capture_output=True, text=True)
@@ -326,4 +335,12 @@ if __name__ == "__main__":
     ap.add_argument("--shots", action="append", required=True)
     ap.add_argument("--git", action="append", required=True)
     ap.add_argument("--out", required=True)
-    build(ap.parse_args())
+    ap.add_argument("--remap", action="append", default=[],
+                    help="file of 'old-hash new-hash' lines: link the new commit instead of the old")
+    args = ap.parse_args()
+    for f in args.remap:
+        for line in open(f):
+            if line.strip():
+                o, n = line.split()
+                REMAP[o] = n
+    build(args)
