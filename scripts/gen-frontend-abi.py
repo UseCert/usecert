@@ -50,13 +50,25 @@ KEEP = {
         "px", "pxUnguarded", "basisBps", "basisBpsChecked", "mintAllowed", "markPx18",
         "singleSource", "pokeLastGood", "lastGoodPx18", "lastGoodAt", "stalenessSeconds",
         "deviationBps", "basisBandBps", "priceDecimals", "toTickPrice", "attester", "feed",
+        # The mark-price half of the same relay. `markNonce` is needed to know which signature is
+        # still live; a client that relays a superseded one just burns gas on a revert.
+        "setMarkPriceSigned", "SET_MARK_TYPEHASH", "domainSeparator", "markNonce",
     },
     "TestUSDG": {
         "name", "symbol", "decimals", "totalSupply", "balanceOf", "allowance",
         "approve", "transfer", "transferFrom", "owner",
     },
     "TestFaucet": {"claim", "nextAvailableAt", "token", "dripAmount", "interval"},
-    "SolvencyRegistry": {"latest", "ageSec", "attester"},
+    # `attestSigned` is a WRITE the front end makes, which is unusual for this file and worth
+    # saying why: on the signed path the attester no longer broadcasts, it signs, and the MINTER
+    # relays the signature inside their own transaction. Without these in the ABI the UI can read
+    # an attestation's age but cannot refresh it, so it would show a correctly-shut protocol and
+    # offer no way to open it. `ATTEST_TYPEHASH`/`domainSeparator`/`SIGNATURE_VALIDITY` come along
+    # so a client can verify a signature it was handed before spending gas relaying it.
+    "SolvencyRegistry": {
+        "latest", "ageSec", "attester",
+        "attestSigned", "ATTEST_TYPEHASH", "domainSeparator", "SIGNATURE_VALIDITY",
+    },
     # `bufferCapacity18()` is the LOOSEST of three capacity legs and is NOT what blocks a mint.
     # Measured live on 46630: uTSLA bufferCapacity18 = $9,999,004 while the binding
     # `maxNotional18` = $90,000 (the absolute cap) - 111x apart. A UI that shows the former as
