@@ -165,6 +165,8 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
     setWalletModalOpen,
     wrongNetwork,
     switchToUseCert,
+    switchError,
+    isSwitchingChain,
     faucet,
     now,
     maxAttestationAgeSec,
@@ -502,17 +504,28 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
       <ViewHeader label="Primary Market" title={<>Mint / <span className="text-metallic">Redeem.</span></>} />
 
       {wrongNetwork && (
-        <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border border-warn/40 bg-[#12120d] px-4 py-3">
-          <p className="font-mono text-[11px] uppercase tracking-[0.06em] text-warn">
-            Your wallet is on another network. This app only talks to chain 46630.
-          </p>
-          <button
-            type="button"
-            onClick={switchToUseCert}
-            className="border border-warn/40 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.08em] text-warn hover:bg-warn/10"
-          >
-            Switch network
-          </button>
+        <div className="mt-6 border border-warn/40 bg-[#12120d] px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="font-mono text-[11px] uppercase tracking-[0.06em] text-warn">
+              Your wallet is on another network. This app only talks to chain 46630.
+            </p>
+            <button
+              type="button"
+              onClick={switchToUseCert}
+              disabled={isSwitchingChain}
+              className="border border-warn/40 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.08em] text-warn hover:bg-warn/10 disabled:opacity-60"
+            >
+              {isSwitchingChain ? "Switching…" : "Switch network"}
+            </button>
+          </div>
+          {/* The failure has to land somewhere. Without this the button was a no-op the
+              user could press indefinitely - the wallet refused, nothing said so, and the
+              app looked broken rather than the wallet unsuitable. */}
+          {switchError && (
+            <p className="mt-3 border-t hairline-dark pt-3 font-mono text-[11px] leading-[1.6] text-warn">
+              {switchError}
+            </p>
+          )}
         </div>
       )}
 

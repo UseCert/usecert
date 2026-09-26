@@ -104,6 +104,7 @@ import {
   type LiveVault,
   type VaultConfigView,
 } from "@/chain/useVaults";
+import { explainChainFailure } from "@/chain/walletSupport";
 import {
   signerCovers,
   useSignerFreshness,
@@ -454,6 +455,8 @@ interface DashboardCtx {
   wrongNetwork: boolean;
   switchToUseCert: () => void;
   isSwitchingChain: boolean;
+  /** Why the wallet refused to switch to 46630, or null. Empty is not "it worked". */
+  switchError: string | null;
   /** Real chain head. `0` until the first read lands — check `blockKnown` before showing it. */
   block: number;
   blockKnown: boolean;
@@ -567,6 +570,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const connection = useConnection();
   const { mutate: disconnectWallet } = useDisconnect();
   const { mutate: switchChain, isPending: isSwitchingChain } = useSwitchChain();
+  /** Why the last switch attempt failed, or null. Rendered beside the wrong-network banner. */
+  const [switchError, setSwitchError] = useState<string | null>(null);
 
   const address = connection.address;
   const connected = connection.isConnected;
@@ -715,12 +720,40 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     setView("mint");
   }, []);
 
-  const switchToUseCert = useCallback(
-    () => switchChain({ chainId: CHAIN_ID }),
-    [switchChain],
-  );
+  /**
+   * Switch the wallet to 46630, and SAY SO when it will not go.
+   *
+   * This was `switchChain({ chainId })` and nothing else - a fire-and-forget mutate with
+   * no error handler. A wallet that refuses the chain (Phantom cannot be given one at all)
+   * left the user pressing "Switch network" against a button that did nothing, with no
+   * message, forever. A control that cannot report its own failure is worse than no
+   * control: it reads as a broken app rather than an unsupported wallet.
+   */
+  const switchToUseCert = useCallback(() => {
+    setSwitchError(null);
+    switchChain(
+      { chainId: CHAIN_ID },
+      {
+        onError: (err) => {
+          const active = connection.connector
+            ? { id: connection.connector.id, name: connection.connector.name }
+            : null;
+          // A user who pressed Cancel gets nothing: they know what they did, and an error
+          // banner blaming their wallet would be a lie.
+          const explained = explainChainFailure(err, active);
+          if (explained) setSwitchError(explained);
+          else if (!/user rejected|user denied/i.test(String(err?.message ?? ""))) {
+            setSwitchError(err?.message ?? "The wallet would not switch network.");
+          }
+        },
+      },
+    );
+  }, [switchChain, connection.connector]);
 
-  const disconnect = useCallback(() => disconnectWallet(), [disconnectWallet]);
+  const disconnect = useCallback(() => {
+    setSwitchError(null);
+    disconnectWallet();
+  }, [disconnectWallet]);
 
   /* ---------------------------------------------------------------- flows */
 
@@ -760,6 +793,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     wrongNetwork: connected && !isSupportedChain(connection.chainId),
     switchToUseCert,
     isSwitchingChain,
+    switchError,
     block: blockNumber !== undefined ? Number(blockNumber) : 0,
     blockKnown: blockNumber !== undefined,
     now,
