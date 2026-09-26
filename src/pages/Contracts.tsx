@@ -205,15 +205,35 @@ export default function ContractsPage() {
           <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-green-bright">
             What "verified" does and does not mean here
           </p>
-          <p className="mt-3 max-w-[70ch] text-[14px] leading-[1.6] text-white-60">
-            The explorer reports these as a <strong className="text-white">partial match</strong>:
-            the runtime bytecode agrees with the published source, and the compiler metadata hash
-            does not. A full match needs the exact metadata settings used at deploy time. The code
-            you read is the code that runs; the build that produced it is not byte-reproducible
-            from this repository yet.
-          </p>
+          {IS_TESTNET ? (
+            <p className="mt-3 max-w-[70ch] text-[14px] leading-[1.6] text-white-60">
+              The explorer reports these as a <strong className="text-white">partial match</strong>:
+              the runtime bytecode agrees with the published source, and the compiler metadata hash
+              does not. A full match needs the exact metadata settings used at deploy time. The code
+              you read is the code that runs; the build that produced it is not byte-reproducible
+              from this repository yet.
+            </p>
+          ) : (
+            <p className="mt-3 max-w-[70ch] text-[14px] leading-[1.6] text-white-60">
+              Source for all {MIRRORS.length * 4 + 3} contracts is published on{" "}
+              <a
+                href="https://sourcify.dev/#/lookup"
+                target="_blank"
+                rel="noreferrer"
+                className="text-white underline underline-offset-4 hover:text-green-bright"
+              >
+                Sourcify
+              </a>{" "}
+              with an <strong className="text-white">exact match</strong> on the runtime bytecode.
+              The contracts this deployment created directly also match on creation bytecode; each
+              vault's certificate and buffer ledger are created inside the vault's own constructor,
+              so they have no creation transaction of their own to match.
+            </p>
+          )}
           <p className="mt-4 max-w-[70ch] text-[14px] leading-[1.6] text-white-60">
-            {MARKET_INDEX_UNVERIFIED_NOTE}
+            {MIRRORS.every((m) => isMarketIndexVerified(m.symbol.toLowerCase() as Parameters<typeof isMarketIndexVerified>[0]))
+              ? "Every mirror's venue market index was read from the venue's own market list before deploying, by a preflight that refuses a market the venue does not list. The index is immutable, so a wrong one could only be fixed by redeploying."
+              : MARKET_INDEX_UNVERIFIED_NOTE}
           </p>
         </div>
       </div>
