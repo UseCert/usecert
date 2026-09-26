@@ -121,7 +121,7 @@ is both the fix and the thing that was actually missing.
 
 ## 3. The mechanical switch
 
-1. Answer the three nulls in `deploy/mainnet/4663.plan.json`: `singleSource`,
+1. Answer the three nulls in `deployments/history/4663.0-plan-before-deploy.json` (history since deployment): `singleSource`,
    `collateralAssetIndex`, and a real 8-decimal price feed per mirror. Each is null because it
    is a decision or a measurement, not a value to copy.
 2. Deploy with `COMMIT=$(git rev-parse HEAD)` set, so the address book records a real commit

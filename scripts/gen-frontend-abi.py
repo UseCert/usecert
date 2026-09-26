@@ -44,12 +44,11 @@ CHAINS = {
         "explorer": "https://explorer.testnet.chain.robinhood.com",
         "testnet": True,
     },
-    # The mainnet book does NOT exist yet, and that is correct. Deploy scripts write
-    # deployments/<chainId>.json; until script/DeployMainnet.s.sol has run there is nothing
-    # to read. The measured inputs for that run - real USDG, the real venue proxy, the real
-    # market indices and the mainnet parameters - live in deploy/mainnet/4663.plan.json,
-    # which is hand-maintained on purpose because it describes a deployment that has not
-    # happened. The two must never be confused: a plan is not a record.
+    # The mainnet book is deployments/4663.json: stack 4, Safe-governed, tracked with
+    # `git add -f` (deployments/.gitignore ignores *.json on purpose). The pre-deploy plan that
+    # recorded the measured inputs now lives in deployments/history/4663.0-plan-before-deploy.json
+    # as history: its market indices predate ROADMAP 6.8 and must not be read as current.
+    # A plan is not a record.
     "4663": {
         "book": "4663.json",
         "out": "usecert-contracts.mainnet.ts",
@@ -89,9 +88,8 @@ def assert_book_exists():
     hint = ""
     if CHAIN == "4663":
         hint = (
-            " The measured inputs for that deployment - real USDG, the venue proxy, the"
-            " real market indices and mainnet parameters - are in"
-            " deploy/mainnet/4663.plan.json."
+            " The live book is deployments/4663.json, tracked with git add -f; copy it"
+            " from the France host (/opt/keeper/book-stack4.json) if it is missing."
         )
     sys.exit(
         "no address book at " + BOOK_PATH + " - nothing has been deployed to chain "

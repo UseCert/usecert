@@ -8,6 +8,7 @@ stacks before it, kept as the record of what those contracts are. None of them i
 |---|---|---|
 | `4663.1-six-vaults-wrong-market-indices.json` | first mainnet deploy, 2026-09-25 | market indices read from a different exchange (ROADMAP 6.8) |
 | `4663.2-six-vaults-onchain-hedging.json` | redeploy with the right indices | on-chain orders are reduce-only; these vaults cannot open a hedge (6.8) |
+| `4663.0-plan-before-deploy.json` | the hand-kept plan of measured inputs, written before the first deploy (was `deploy/mainnet/4663.plan.json`) | superseded by real deployments; its market indices are the wrong ones corrected in 6.8 |
 | `4663.3-one-keeper-mode-utsla.json` | the single keeper-mode vault that proved the design (6.11) | predates `recallMarginUpTo` and `retire()` (6.12, 6.13) |
 | `4663.4-six-vaults-keeper-mode-eoa-governance.json` | six keeper-mode vaults on the final code (6.14) | governed by a single EOA; replaced by the Safe-governed stack 4 (6.15) |
 
@@ -18,3 +19,7 @@ It happened again one stack later. Stack 4 went live on 2026-09-26 with its book
 France host (`/opt/keeper/book-stack4.json`), and the tracked file stayed on the EOA-governed
 stack until the same day, when a regeneration showed every address differing from the site's.
 The tracked book is now stack 4, copied from the host with only `commit` recorded.
+
+The live book is tracked with `git add -f` because `deployments/.gitignore` ignores `*.json`. A
+plain `git add` skips it silently; that is how 210dc33 ended up deleting it (fixed in the next
+commit). The France health check now compares the host's books with this file on GitHub.

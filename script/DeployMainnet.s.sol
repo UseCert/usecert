@@ -30,7 +30,8 @@ import {CertVault} from "../src/CertVault.sol";
 ///          only because Lighter is absent on testnet.
 ///
 ///      Addresses and market data measured 2026-09-25 and recorded, with provenance, in
-///      `deploy/mainnet/4663.plan.json`. They are literals here for the same reason every other
+///      `deployments/history/4663.0-plan-before-deploy.json` (moved there once deployed: its market
+///      indices predate ROADMAP 6.8). They are literals here for the same reason every other
 ///      parameter in the parent is a literal: a script parsing JSON for safety-critical
 ///      immutables turns a mistyped key into a zero, and `absoluteCap18 = 0` deploys clean.
 contract DeployMainnet is DeployTestnet {
