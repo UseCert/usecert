@@ -1521,6 +1521,56 @@ the new code.
 * **Missing strings.** The five strings the coverage crawl found were added: the idle-attestation
   copy, relative times, and the insufficient-balance message.
 
+### 6.21 My receipts, and the two-step mints the index was losing — ✅ 2026-09-26 (front end `7bd8641`)
+
+**Before.** Receipt ids cannot be listed on chain, and there is no `receiptsOf(user)`. Holders
+had to find their ids on an explorer.
+
+**Now.** The claim card lists the connected wallet's mint and redemption receipts on the
+selected vault.
+
+* **Which receipts exist** comes from the explorer index, and the list carries the explorer tag.
+* **What state each is in** is a chain read of `mintReceipts` / `redeemReceipts`. So a lagging
+  index can hide a receipt, but can never show a paid receipt as claimable.
+* **Actions.** Each row offers **Claim**, or **Refund now** once a mint's hedge has not filled
+  within 15 minutes. The keeper refunds those anyway (6.19).
+* **If the index is down,** the panel says so. It never shows an empty list.
+
+**A parser bug it exposed.** The explorer decodes `MintRequested` with the field names
+`requestId` / `depositAmount`, not `receiptId` / `amountIn`.
+
+* Every two-step mint lost its receipt id, never reached a wallet's list, and left its
+  `MintSettled` unattributed.
+* The parser now reads either name. The Activity view shows "MINT SETTLED · joined · receipt 1"
+  for each vault where it said "could not be tied to a wallet".
+
+**Verified live** with the deployer wallet on uTSLA, in English and Chinese:
+
+* redeem #2 reads *claimed*;
+* mint #1 reads *certificates issued*;
+* no page errors.
+
+### 6.22 The tracked book drifted again: stack 4 was never committed — ✅ 2026-09-26 (`210dc33`)
+
+Stack 4, the Safe-governed stack, went live with its address book only on the France host. The
+tracked `deployments/4663.json` stayed on the EOA-governed stack: the same drift as `d5ee46c`,
+one stack later.
+
+**Found by** regenerating the front-end module from the repo to record the deploy commit.
+Every address differed from the site's.
+
+**Fixed.**
+
+* The EOA stack is archived as `history/4663.4-six-vaults-keeper-mode-eoa-governance.json`.
+* The tracked book is stack 4, copied from the host.
+* `commit` is recorded as `91f7f2d`, the contract source. `src/` is unchanged since, and it
+  matched 27/27 on Sourcify. The deploy was run with `COMMIT` unset, so this is recorded by hand,
+  with a note naming the deploy scripts `aaffb74` and `3c6ebf9`.
+* The host's copy and the front-end header (`d762d4b`) now carry the same commit.
+
+**Still open.** The deploy script should refuse to write a book when `COMMIT` is unset, and the
+France deploy should commit the book it writes. Until then, each redeploy can drift the same way.
+
 ---
 
 ## Keeping the public page in sync
