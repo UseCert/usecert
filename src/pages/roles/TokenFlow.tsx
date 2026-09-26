@@ -1,5 +1,6 @@
 import { motion } from "framer-motion";
 import Counter from "@/components/Counter";
+import { useReveal } from "@/i18n";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -22,6 +23,7 @@ const STATS = [
 
 /** §3 TOKEN FLOW (full-bleed section-deep): counters left, metallic statement right. */
 export default function TokenFlow() {
+  const R = useReveal();
   return (
     <section className="grain section-glow relative bg-section-deep text-white">
       <div className="relative z-[2] mx-auto max-w-[1440px] px-4 py-16 md:px-6 md:py-24 lg:px-12 lg:py-32">
@@ -73,13 +75,13 @@ export default function TokenFlow() {
               viewport={{ once: true, amount: 0.3 }}
               variants={{ hidden: {}, show: { transition: { staggerChildren: 0.05 } } }}
             >
-              {"Fees flow to the people who keep the peg honest.".split(" ").map((w, i) => (
+              {R("Fees flow to the people who keep the peg honest.").map((w, i) => (
                 <motion.span
                   key={i}
                   className="inline-block whitespace-pre"
                   variants={{ hidden: { y: 24, opacity: 0 }, show: { y: 0, opacity: 1, transition: { duration: 0.6, ease: EASE } } }}
                 >
-                  {w}{" "}
+                  {w}{R.sep}
                 </motion.span>
               ))}
             </motion.h2>

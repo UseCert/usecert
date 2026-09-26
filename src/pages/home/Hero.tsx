@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { motion, useScroll, useTransform } from "framer-motion";
 import LetterReveal from "@/components/LetterReveal";
 import { IS_TESTNET } from "@/chain/deployment";
+import { useLang, useT } from "@/i18n";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -53,8 +54,13 @@ const PARA_SEGMENTS: { text: string; bold?: boolean }[] = [
 
 /** Headline paragraph with letter-by-letter reveal and bold spans. */
 function RevealParagraph() {
+  const lang = useLang();
+  const t = useT();
   const words: { word: string; bold?: boolean }[] = [];
-  PARA_SEGMENTS.forEach((seg) => {
+  // Chinese: the segments joined into one sentence and translated whole; the bold emphasis is an
+  // English word-level device and is not carried over.
+  if (lang === "zh") Array.from(t(PARA_SEGMENTS.map((sg) => sg.text).join(""))).forEach((c) => words.push({ word: c }));
+  else PARA_SEGMENTS.forEach((seg) => {
     seg.text.split(" ").forEach((w, i, arr) => {
       if (w) words.push({ word: w + (i < arr.length - 1 ? " " : ""), bold: seg.bold });
       else if (i < arr.length - 1) words.push({ word: " " });

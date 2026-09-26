@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import type { ElementType } from "react";
 import { cn } from "@/lib/utils";
+import { useLang, useT } from "@/i18n";
 
 interface LetterRevealProps {
   text: string;
@@ -32,11 +33,20 @@ export default function LetterReveal({
   once = true,
 }: LetterRevealProps) {
   const Tag = (as ?? "span") as ElementType;
+  // Translated as a whole sentence BEFORE it is split: word spans cannot be translated one by one.
+  // data-i18n-skip keeps the page-wide pass off the spans; data-i18n-src records the English.
+  const lang = useLang();
+  const t = useT();
+  const shown = t(text);
   const reduced =
     typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   if (reduced) {
-    return <Tag className={className}>{text}</Tag>;
+    return (
+      <Tag className={className} data-i18n-skip data-i18n-src={text}>
+        {shown}
+      </Tag>
+    );
   }
 
   const units = byWord ? text.split(" ") : Array.from(text);
@@ -51,7 +61,7 @@ export default function LetterReveal({
   };
 
   return (
-    <Tag className={cn("inline-block", className)} aria-label={text}>
+    <Tag className={cn("inline-block", className)} aria-label={shown} data-i18n-skip data-i18n-src={text}>
       <motion.span
         className="inline-block"
         variants={container}
@@ -60,7 +70,14 @@ export default function LetterReveal({
           ? { animate: "show" }
           : { whileInView: "show", viewport: { once, amount: 0.3 } })}
       >
-        {byWord
+        {lang === "zh"
+          ? // Chinese has no spaces: one span per character, free to wrap anywhere.
+            Array.from(shown).map((ch, i) => (
+              <motion.span key={`${ch}-${i}`} variants={child} className="inline-block will-change-transform" aria-hidden>
+                {ch}
+              </motion.span>
+            ))
+          : byWord
           ? units.map((u, i) => (
               <motion.span
                 key={`${u}-${i}`}
