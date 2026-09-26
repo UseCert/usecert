@@ -3,7 +3,7 @@
 //
 // UseCert - Robinhood Chain (chain 4663)
 // Deployment:   block 26058070
-// Address book: deployments/4663.json, sha256 d176f9c93342 (first 12)
+// Address book: deployments/4663.json, sha256 294350c7444a (first 12)
 // Deployed at:  unrecorded (address book carries 'UNKNOWN - COMMIT env unset; record it by hand before publishing', which is not a commit hash)
 // Generated at: commit unavailable (not a git checkout)
 //
@@ -31,11 +31,9 @@ export const DECIMALS = {
 
 export const SHARED = {
   collateral: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' as const,
-  testFaucet: '0x0000000000000000000000000000000000000000' as const,
   solvencyRegistry: '0x22a4a08c7951a7F8c2ff218d7DC6abbE6195D7F4' as const,
   capacityOracle: '0x3B9b13FBa877201635aeA0e1f2894fCDDdf73186' as const,
   certFactory: '0x864Ed1F419C5Dd716aadaA389a17A8620e8B7675' as const,
-  lighterSim: '0x94bAB9693Ba2f6358507eFfcbd372b0660AFfF9d' as const,
 } as const;
 
 export const MIRRORS = [
