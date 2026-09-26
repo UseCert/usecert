@@ -1568,8 +1568,13 @@ Every address differed from the site's.
   with a note naming the deploy scripts `aaffb74` and `3c6ebf9`.
 * The host's copy and the front-end header (`d762d4b`) now carry the same commit.
 
-**Still open.** The deploy script should refuse to write a book when `COMMIT` is unset, and the
-France deploy should commit the book it writes. Until then, each redeploy can drift the same way.
+**Closed the same day (`b62f316`).** On 4663, `_commit()` in both DeployTestnet and AddMirror
+reverts unless `COMMIT` is a 40-character lowercase hash. The book is written in forge's
+simulation pass, before anything is broadcast, so the whole run is refused. `CommitGuardTest`
+covers unset, malformed and uppercase values, a real hash, and testnet unchanged: 4 of 4 pass.
+
+**Still open.** The France deploy should commit the book it writes, so the tracked file cannot
+lag the host.
 
 ---
 
