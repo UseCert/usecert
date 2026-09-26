@@ -58,6 +58,10 @@ contract CertVault {
     ///      rather than being treated as a venue refusal - see _requestWithdraw.
     error CertVault_VenueCallStarvedOfGas();
     error CertVault_VenueMinimumOutOfBounds();
+    /// @dev Keeper mode: opening a position cannot go through the venue's L1 contract, whose
+    ///      orders are reduce-only. Mint through requestMint; the keeper opens the hedge.
+    error CertVault_OpenRequiresKeeper();
+    error CertVault_KeeperHedgingAlreadyEnabled();
     /// @dev C3: an unsettled mint receipt past its settleWindow. Not a dead end — refundMint()
     ///      is permissionless and returns the escrow, so the expiry is a fork, not a trap.
     error CertVault_SettleWindowExpired();
@@ -89,6 +93,11 @@ contract CertVault {
 
     event Minted(address indexed user, uint256 amountIn, uint256 certOut, uint256 px18, uint256 fee);
     event VenueMinimumsSet(uint256 minBase, uint256 minNotional18);
+    event KeeperHedgingEnabled();
+    event VenueApiKeySet(uint8 indexed apiKeyIndex);
+    /// @dev The keeper's work order: open `base` venue units on `side`, no worse than
+    ///      `limitPx18`, then call settleMint(receiptId, fillPx18).
+    event HedgeRequested(uint256 indexed receiptId, uint256 base, uint8 side, uint256 limitPx18);
     event MintRequested(uint256 indexed receiptId, address indexed user, uint256 amountIn);
     event MintSettled(uint256 indexed receiptId, uint256 certOut, uint256 fillPx18);
     /// @dev C3: the other side of the settle deadline — escrow returned, no certificates minted.
@@ -440,6 +449,24 @@ contract CertVault {
     uint256 public venueMinBase;
     uint256 public venueMinNotional18;
 
+    /// @notice Hedges are OPENED by the keeper off chain; closes stay on chain.
+    /// @dev MAINNET, 2026-09-26. On Robinhood Chain Lighter every order sent through the L1
+    ///      contract is REDUCE-ONLY - the venue's execution record for a correctly priced,
+    ///      correctly sized buy read `code 21738, "invalid reduce only direction"`. A contract
+    ///      therefore cannot open a position on chain at all; opening needs an order signed off
+    ///      chain with an API key. So in this mode:
+    ///        - requestMint escrows and emits HedgeRequested instead of sending a buy the venue
+    ///          will discard, and mints NOTHING until the keeper settles;
+    ///        - settleMint is the keeper's claim that the hedge filled, so only the attester may
+    ///          make it, and only then is the position recorded in the vault's ledger;
+    ///        - mintInstant and any other path that would OPEN on chain refuses;
+    ///        - every close stays on chain, where reduce-only is exactly what a close is.
+    ///      If the keeper never settles, the receipt expires and the existing refund path returns
+    ///      the escrow, so a dead keeper costs time and not principal.
+    ///      Off by default so the simulator suite is unchanged. One-way: the on-chain opening path
+    ///      it replaces does not work on this venue, so there is nothing to return to.
+    bool public keeperHedging;
+
     /// @notice How long a mint receipt stays settleable before it can only be refunded.
     /// @dev C3: settleMint bands against the price recorded at requestMint, so a receipt must not
     ///      be allowed to sit indefinitely and be settled against a price that has moved
@@ -648,6 +675,25 @@ contract CertVault {
         emit VenueMinimumsSet(minBase, minNotional18);
     }
 
+    /// @notice Switch to keeper-opened hedges. One-way; see keeperHedging.
+    function enableKeeperHedging() external {
+        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        if (keeperHedging) revert CertVault_KeeperHedgingAlreadyEnabled();
+        keeperHedging = true;
+        emit KeeperHedgingEnabled();
+    }
+
+    /// @notice Register the keeper's API key on this vault's own venue account.
+    /// @dev The key can trade the account, which is the trust this mode adds. It cannot move
+    ///      collateral to another account: the venue requires an Ethereum signature from the
+    ///      account's own L1 address for that, and this vault is a contract with no such key.
+    ///      Governance can overwrite the key at the same index to rotate or retire it.
+    function setVenueApiKey(uint8 apiKeyIndex, bytes calldata pubKey) external {
+        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        lighter.changePubKey(lighterAccountIndex(), apiKeyIndex, pubKey);
+        emit VenueApiKeySet(apiKeyIndex);
+    }
+
     /// @notice Pre-fund the buffer. Permissionless: it can only ever add value to the vault.
     function seedBuffer(uint256 amount) external {
         IERC20(cfg.collateral).safeTransferFrom(msg.sender, address(this), amount);
@@ -766,7 +812,16 @@ contract CertVault {
         pendingMintCerts += indicative;
 
         _postMargin(received - fee);
-        _hedge(indicative, px18, SIDE_BID);
+        if (keeperHedging) {
+            // The keeper opens it. Checked here rather than left to the venue, because the venue
+            // would reject an undersized order off chain after this escrow had been taken.
+            uint256 base = _baseAmount(indicative);
+            if (base == 0) revert CertVault_ZeroHedgeAmount();
+            if (_belowVenueMinimum(base, px18)) revert CertVault_BelowVenueMinimum();
+            emit HedgeRequested(receiptId, base, SIDE_BID, _limitPx18(px18, SIDE_BID));
+        } else {
+            _hedge(indicative, px18, SIDE_BID);
+        }
         emit MintRequested(receiptId, msg.sender, received);
     }
 
@@ -868,9 +923,17 @@ contract CertVault {
         uint256 diff = fillPx18 > refPx ? fillPx18 - refPx : refPx - fillPx18;
         if (refPx == 0 || diff * 10_000 / refPx > cfg.settleBandBps) revert CertVault_FillPriceOutOfBand();
 
+        // Keeper mode: settling is the claim that the off-chain hedge FILLED, so it is the
+        // keeper's to make - the same key already trusted for the solvency attestation.
+        if (keeperHedging && msg.sender != ICertOracleAttester(address(oracle)).attester()) {
+            revert CertVault_OnlyAttester();
+        }
+
         r.settled = true;
 
         uint256 certOut = r.indicativeCerts;
+        // The position enters the vault's ledger when it exists, not when it was asked for.
+        if (keeperHedging) _recordOrder(_baseAmount(certOut), SIDE_BID);
         // C-2: the promise this receipt reserved is now outstanding supply, so hand the reservation
         // over rather than counting it twice. Floored for the same reason the stageRefund clamp is
         // (see there): a counter underflow must never be the thing that reverts a mint path.
@@ -967,7 +1030,13 @@ contract CertVault {
         // unqualified: it is a backstop only from the next attestation onward, and only for the
         // portion the attester reports.
         bool placed = false;
-        if (r.indicativeCerts > 0) {
+        // Keeper mode: an unsettled receipt never entered the ledger, and the chain cannot tell
+        // whether the keeper opened its hedge before failing to settle. A reduce-only sell sent
+        // here would therefore either close that orphan - or, if it was never opened, cut into
+        // OTHER holders' legitimate hedge, because reduce-only happily reduces any long. So the
+        // refund leaves closing to the keeper, which knows what it opened; the user's escrow is
+        // returned either way.
+        if (r.indicativeCerts > 0 && !keeperHedging) {
             placed = _tryHedge(r.indicativeCerts, r.requestPx18, SIDE_ASK);
         }
 
@@ -1897,6 +1966,9 @@ contract CertVault {
     ///      mint must not pass silently (Law 1); closeAll() bypasses this helper entirely to reach
     ///      the primitive on purpose.
     function _hedge(uint256 certAmount18, uint256 px18, uint8 side) internal {
+        // The venue's L1 orders are reduce-only; an opening buy sent here would be discarded
+        // off chain while the ledger recorded it. See keeperHedging.
+        if (keeperHedging && side == SIDE_BID) revert CertVault_OpenRequiresKeeper();
         uint256 base = _baseAmount(certAmount18);
         if (base == 0) revert CertVault_ZeroHedgeAmount();
         // L-2: zero-checked on the wide value first (so a truncation to exactly zero still

@@ -26,6 +26,12 @@ interface ILighter {
 
     function cancelAllOrders(uint48 accountIndex) external;
 
+    /// @dev Register an API key on an account. The real contract resolves the MASTER account from
+    ///      msg.sender and queues it as a priority request, so a contract can call it for its own
+    ///      account - the only way a contract can hold a trading key, since the SDK's usual path
+    ///      needs an Ethereum signature a contract cannot produce. `pubKey` is 40 bytes.
+    function changePubKey(uint48 accountIndex, uint8 apiKeyIndex, bytes calldata pubKey) external;
+
     function getPendingBalance(address owner, uint16 assetIndex) external view returns (uint128);
 
     function withdrawPendingBalance(address owner, uint16 assetIndex, uint128 baseAmount) external;
