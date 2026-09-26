@@ -1678,6 +1678,35 @@ result.
   journals, attester env, book.
 * **Watched.** `usecert-health-mainnet` alerts if the last confirmed copy is over 36 h old.
 
+### 6.25 Site audit: two missing vault pages, fake 200s, shared links without a picture — ✅ 2026-09-26 (front end, see commit)
+
+**The crawl.** 19 routes, 46 external links, and a phone-width pass. No page errors and no
+horizontal overflow. The one failing external link was X returning 403 to bots.
+
+**What it found, and the fixes.**
+
+* **Two vault pages missing.** uSPY and uMSFT, two of the six live vaults, had no page.
+  `getVault` fell back to the first vault, so `/vaults/uspy`, `/vaults/umsft` and any made-up
+  slug rendered the uTSLA page with a 200. Both now have pages, with no testimonial. Unknown
+  vault and article slugs are real 404s.
+* **Duplicate titles.** Every article was "Article - UseCert Research" and every vault "Vault
+  Detail". Each now has its own title and description.
+* **No share image.** Shared links rendered without a picture. There is now a 1200×630
+  `og:image` / `twitter:image` and an `apple-touch-icon`.
+* **Copy promising too much.** The root and dashboard descriptions said "stake", and the home
+  share text said "SPX". Both now name the live six.
+* **No sitemap.** `sitemap.xml` (22 URLs, no `/u/`) is in place, and robots.txt points to it.
+
+**Awaiting the owner (artwork and copy).**
+
+* **Third-party brands in artwork.** The uTSLA image is a Hyundai IONIQ 6 with the badge
+  visible. The uQQQ image is Times Square, with Roku and AWS billboards readable. Both need
+  replacing.
+* **Testimonials with no one behind them.** The vault pages show quotes attributed only to
+  "Holder" or "DeFi Builder", for vaults nobody holds yet. They read as real testimonials.
+* **Undeployed fee language.** The funding paragraph on the vault pages says the remainder
+  "becomes a transparent holding fee" past a threshold. No fee pass-through is deployed.
+
 ---
 
 ## Keeping the public page in sync
