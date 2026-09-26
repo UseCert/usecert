@@ -43,6 +43,7 @@ contract InsuranceStaking is ERC4626 {
     error InsuranceStaking_ExceedsCooldownShares();
     error InsuranceStaking_ExceedsBalance();
     error InsuranceStaking_ProposalTooSoon();
+    error InsuranceStaking_AboveDepositCap();
 
     event WithdrawRequested(address indexed owner, uint256 shares, uint64 readyAt, uint64 closesAt);
     event WithdrawRequestCancelled(address indexed owner);
@@ -65,6 +66,10 @@ contract InsuranceStaking is ERC4626 {
     uint256 public immutable withdrawWindow;
     uint256 public immutable drawDelay;
     uint256 public immutable maxDrawBps;
+    /// @notice The most the pool may hold from deposits. Immutable: the first deployment is
+    ///         unaudited, and a hard ceiling is what bounds what anyone can lose to a bug in it.
+    ///         A donation or income can take totalAssets past it; only deposits are refused.
+    uint256 public immutable depositCap;
 
     struct WithdrawRequest {
         uint256 shares;
@@ -91,6 +96,7 @@ contract InsuranceStaking is ERC4626 {
         uint256 withdrawWindow_,
         uint256 drawDelay_,
         uint256 maxDrawBps_,
+        uint256 depositCap_,
         string memory name_,
         string memory symbol_
     ) ERC20(name_, symbol_) ERC4626(asset_) {
@@ -105,6 +111,7 @@ contract InsuranceStaking is ERC4626 {
                 // a pending draw (delay + execution window) must end well inside the proposal
                 // gap, so exits reopen between cycles
                 || drawDelay_ + DRAW_EXECUTION_WINDOW + 1 days > MIN_PROPOSAL_GAP
+                || depositCap_ == 0
         ) revert InsuranceStaking_BadConfig();
         governance = governance_;
         registry = registry_;
@@ -112,6 +119,7 @@ contract InsuranceStaking is ERC4626 {
         withdrawWindow = withdrawWindow_;
         drawDelay = drawDelay_;
         maxDrawBps = maxDrawBps_;
+        depositCap = depositCap_;
     }
 
     // ------------------------------------------------------------------ withdrawals
@@ -149,11 +157,13 @@ contract InsuranceStaking is ERC4626 {
     }
 
     function maxDeposit(address) public view override returns (uint256) {
-        return drawPending() ? 0 : type(uint256).max;
+        if (drawPending()) return 0;
+        uint256 held = totalAssets();
+        return held >= depositCap ? 0 : depositCap - held;
     }
 
-    function maxMint(address) public view override returns (uint256) {
-        return drawPending() ? 0 : type(uint256).max;
+    function maxMint(address receiver) public view override returns (uint256) {
+        return convertToShares(maxDeposit(receiver));
     }
 
     /// @dev Every exit path (withdraw and redeem) lands here. The checks are explicit rather than
@@ -173,6 +183,7 @@ contract InsuranceStaking is ERC4626 {
 
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
         if (drawPending()) revert InsuranceStaking_DrawPending();
+        if (totalAssets() + assets > depositCap) revert InsuranceStaking_AboveDepositCap();
         super._deposit(caller, receiver, assets, shares);
     }
 

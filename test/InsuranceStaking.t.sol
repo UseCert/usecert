@@ -30,13 +30,14 @@ contract InsuranceStakingTest is Test {
     uint256 constant WINDOW = 2 days;
     uint256 constant DELAY = 1 days;
     uint256 constant CAP_BPS = 3_000;
+    uint256 constant POOL_CAP = 2_000_000e6;
 
     function setUp() public {
         vm.warp(1_790_000_000);
         usdg = new MockERC20("USDG", "USDG", 6);
         reg = new MockRegistry();
         reg.set(vault, true);
-        pool = new InsuranceStaking(usdg, reg, gov, COOLDOWN, WINDOW, DELAY, CAP_BPS, "UseCert Insurance", "sUSDG");
+        pool = new InsuranceStaking(usdg, reg, gov, COOLDOWN, WINDOW, DELAY, CAP_BPS, POOL_CAP, "UseCert Insurance", "sUSDG");
         for (uint256 i = 0; i < 3; i++) {
             address u = [alice, bob, eve][i];
             usdg.mint(u, 1_000_000e6);
@@ -60,17 +61,41 @@ contract InsuranceStakingTest is Test {
 
     function test_constructor_rejects_bad_config() public {
         vm.expectRevert(InsuranceStaking.InsuranceStaking_BadConfig.selector);
-        new InsuranceStaking(usdg, reg, gov, DELAY, WINDOW, DELAY, CAP_BPS, "x", "x"); // cooldown == delay
+        new InsuranceStaking(usdg, reg, gov, DELAY, WINDOW, DELAY, CAP_BPS, POOL_CAP, "x", "x"); // cooldown == delay
         vm.expectRevert(InsuranceStaking.InsuranceStaking_BadConfig.selector);
-        new InsuranceStaking(usdg, reg, gov, COOLDOWN, WINDOW, DELAY, 5_001, "x", "x"); // cap above 50%
+        new InsuranceStaking(usdg, reg, gov, COOLDOWN, WINDOW, DELAY, 5_001, POOL_CAP, "x", "x"); // cap above 50%
         vm.expectRevert(InsuranceStaking.InsuranceStaking_BadConfig.selector);
-        new InsuranceStaking(usdg, reg, gov, COOLDOWN, WINDOW, DELAY, 0, "x", "x");
+        new InsuranceStaking(usdg, reg, gov, COOLDOWN, WINDOW, DELAY, 0, POOL_CAP, "x", "x");
         vm.expectRevert(InsuranceStaking.InsuranceStaking_BadConfig.selector);
-        new InsuranceStaking(usdg, reg, gov, COOLDOWN, 12 hours, DELAY, CAP_BPS, "x", "x"); // window < 1 day
+        new InsuranceStaking(usdg, reg, gov, COOLDOWN, 12 hours, DELAY, CAP_BPS, POOL_CAP, "x", "x"); // window < 1 day
         vm.expectRevert(InsuranceStaking.InsuranceStaking_BadConfig.selector);
-        new InsuranceStaking(usdg, reg, gov, 30 days, WINDOW, 4 days, CAP_BPS, "x", "x"); // delay+3d+1d > 7d gap
+        new InsuranceStaking(usdg, reg, gov, 30 days, WINDOW, 4 days, CAP_BPS, POOL_CAP, "x", "x"); // delay+3d+1d > 7d gap
         vm.expectRevert(InsuranceStaking.InsuranceStaking_ZeroAddress.selector);
-        new InsuranceStaking(usdg, reg, address(0), COOLDOWN, WINDOW, DELAY, CAP_BPS, "x", "x");
+        new InsuranceStaking(usdg, reg, address(0), COOLDOWN, WINDOW, DELAY, CAP_BPS, POOL_CAP, "x", "x");
+    }
+
+    function test_constructor_rejects_zero_deposit_cap() public {
+        vm.expectRevert(InsuranceStaking.InsuranceStaking_BadConfig.selector);
+        new InsuranceStaking(usdg, reg, gov, COOLDOWN, WINDOW, DELAY, CAP_BPS, 0, "x", "x");
+    }
+
+    function test_deposit_cap_is_a_hard_ceiling() public {
+        InsuranceStaking small = new InsuranceStaking(usdg, reg, gov, COOLDOWN, WINDOW, DELAY, CAP_BPS, 1_000e6, "s", "s");
+        vm.startPrank(alice);
+        usdg.approve(address(small), type(uint256).max);
+        small.deposit(600e6, alice);
+        assertEq(small.maxDeposit(alice), 400e6, "room left under the cap");
+        vm.expectRevert();
+        small.deposit(400e6 + 1, alice);
+        small.deposit(400e6, alice);
+        assertEq(small.maxDeposit(alice), 0);
+        assertEq(small.maxMint(alice), 0);
+        vm.expectRevert();
+        small.deposit(1, alice);
+        vm.stopPrank();
+        usdg.mint(address(small), 50e6); // income can take it past the cap; only deposits stop
+        assertEq(small.totalAssets(), 1_050e6);
+        assertEq(small.maxDeposit(bob), 0);
     }
 
     // ------------------------------------------------------------------ deposits and exits
