@@ -127,7 +127,8 @@ const SHIPPED: Milestone[] = [
   },
   {
     title: "External security audit, criticals closed",
-    copy: "The contracts were audited by an outside reviewer. Every critical finding is closed in code, and the proof-of-concept exploits are kept in the repository as executable evidence rather than summarised.",
+    copy: "The contracts were audited by an outside reviewer. The reported Critical is fixed, as is a blocker that would have left one contract undeployable. The auditor's proof-of-concept exploits are kept in the repository as executable evidence rather than summarised: all eight were written to fail, and five now pass. Of the three that do not, two can no longer set their exploit up at all because the guard stops them first; the third asserts margin is recallable in one permissionless call, which an asynchronous venue cannot satisfy — the margin is recoverable, in two steps.",
+    verify: "test/AuditPoC.t.sol and test/AttackSuite.t.sol are in the repository and runnable.",
   },
 ];
 

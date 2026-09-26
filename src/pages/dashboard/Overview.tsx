@@ -223,9 +223,12 @@ export default function Overview() {
   return (
     <div className="relative">
       {/* Top mono stat row, same rhythm as the landing deep-green section.
-          "C1 Live" is gone: C1 is the identifier of an audit, not a release badge, and
-          that audit reported open criticals — so the string could only ever be read as a
-          certification the project does not have. What is factually true is which chain
+          "C1 Live" is gone: C1 is the identifier of an audit, not a release badge, so the
+          string could only ever be read as a certification the project does not have. When that
+          was written the audit still had open criticals; it no longer does — the reported
+          Critical is fixed, and five of the auditor's eight proof-of-concept exploits now pass
+          where all eight were written to fail. The badge stays gone for the first reason: an
+          audit identifier is not a release state. What is factually true is which chain
           this is reading and how solvency is proven, so that is what it says.
           "Solvency public / every block" is gone for the same reason: solvency is proven
           per attestation, on roughly a 60-second cadence, and the AgeLine below publishes
