@@ -141,7 +141,8 @@ export function SolvencyChart({
       ctx.moveTo(PAD.l, y);
       ctx.lineTo(PAD.l + iw, y);
       ctx.stroke();
-      ctx.fillText(fmtCompactUSD(v), PAD.l + iw + 8, y + 3);
+      // Below $100 the compact form rounds to whole dollars and repeats labels ($2 $2 $1 $1).
+      ctx.fillText(max - min < 100 ? fmtUSD(v, 2) : fmtCompactUSD(v), PAD.l + iw + 8, y + 3);
     }
     // x labels
     ctx.textAlign = "center";
