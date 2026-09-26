@@ -284,12 +284,9 @@ export function isMarketIndexVerified(id: ChainVaultId): boolean {
  * harmless, and the honest statement is what it would be elsewhere, not what it is here.
  */
 export const MARKET_INDEX_UNVERIFIED_NOTE =
-  "This mirror's venue market index does not match the live venue's market list. Checked " +
-  "2026-09-25 against Lighter on Robinhood Chain mainnet: the real ids are 112 for TSLA, " +
-  "128 for SPY, 129 for QQQ and 110 for NVDA. On the testnet simulator setMarkPrice() " +
-  "creates any index implicitly, so nothing here misbehaves; against the real venue these " +
-  "would hedge the wrong market, and every mirror must be redeployed with the real id " +
-  "before it points at one.";
+  "A mirror's venue market index is fixed at deployment. Where it has not been read back " +
+  "from the venue's own market list, it could name a different market, and the mirror would " +
+  "hedge the wrong asset until it is redeployed with the right one.";
 
 function mirrorFor(id: ChainVaultId): Mirror {
   const mirror = MIRRORS.find((m) => MIRROR_META[m.symbol].id === id);
