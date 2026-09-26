@@ -124,6 +124,19 @@ contract DeployMainnet is DeployTestnet {
         return "lighter";
     }
 
+    /// @dev ROADMAP 6.15: governance is the UseCert 2-of-3 Safe. Unset means an EOA key, as before.
+    function _externalGovernance() internal view override returns (address) {
+        return vm.envOr("MAINNET_GOVERNANCE_SAFE", address(0));
+    }
+
+    function _externalRegistry() internal view override returns (address) {
+        return vm.envAddress("MAINNET_SAFE_REGISTRY");
+    }
+
+    function _externalOracle(uint256 i) internal view override returns (address) {
+        return vm.envAddress(string.concat("MAINNET_SAFE_ORACLE_", assets[i].symbol));
+    }
+
     function _bootstrapsInScript() internal view override returns (bool) {
         return false;
     }

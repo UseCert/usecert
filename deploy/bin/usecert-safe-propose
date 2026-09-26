@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Put a transaction in the UseCert Safe's queue on the Safe Transaction Service.
+
+    usecert-safe-propose TO DATA_FILE OPERATION "description"
+
+The proposer is the deployer address, registered by a Safe owner as a *proposer* (Safe app,
+Settings -> Setup -> Proposers). A proposer can only queue: its signature here is not an owner
+signature and counts for nothing toward the 2-of-3 threshold. Owners then review, sign and
+execute in the Safe app.
+
+The Safe transaction hash is computed BY THE SAFE (getTransactionHash on chain), not here, so
+what the owners sign is exactly what the contract will check.
+"""
+import json
+import subprocess
+import sys
+import urllib.request
+
+SAFE = "0x848c91323f720DEf985adbCC85FA40E3405B70DF"
+RPC = "https://rpc.mainnet.chain.robinhood.com"
+TXS = "https://api.safe.global/tx-service/robinhood"
+CAST = "/home/usecert/.foundry/bin/cast"
+ZERO = "0x0000000000000000000000000000000000000000"
+
+
+def cast(*a):
+    return subprocess.run([CAST, *a], capture_output=True, text=True, check=True).stdout.strip()
+
+
+def main():
+    to, data_file, op, what = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+    data = open(data_file).read().strip()
+    env = dict(l.strip().split("=", 1) for l in open("/etc/usecert/mainnet-deployer.env") if "=" in l and not l.startswith("#"))
+    proposer = cast("to-check-sum-address", env["MAINNET_DEPLOYER_ADDR"])
+    # Next nonce: after anything already queued, so proposals do not collide.
+    with urllib.request.urlopen(urllib.request.Request(TXS + "/api/v1/safes/%s/multisig-transactions/?executed=false&limit=20" % SAFE,
+                                                       headers={"User-Agent": "usecert-ops/1.0"}), timeout=30) as r:
+        queued = [int(t["nonce"]) for t in json.load(r)["results"]]
+    nonce = max([int(cast("call", SAFE, "nonce()(uint256)", "--rpc-url", RPC).split()[0])] + [q + 1 for q in queued])
+    h = cast("call", SAFE, "getTransactionHash(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,uint256)(bytes32)",
+             to, "0", data, str(op), "0", "0", "0", ZERO, ZERO, str(nonce), "--rpc-url", RPC)
+    sig = cast("wallet", "sign", "--no-hash", h, "--private-key", env["MAINNET_DEPLOYER_PK"])
+    body = {"to": cast("to-check-sum-address", to), "value": "0", "data": data, "operation": op,
+            "safeTxGas": "0", "baseGas": "0", "gasPrice": "0", "gasToken": ZERO, "refundReceiver": ZERO,
+            "nonce": nonce, "contractTransactionHash": h, "sender": proposer, "signature": sig, "origin": what}
+    req = urllib.request.Request(TXS + "/api/v1/safes/%s/multisig-transactions/" % SAFE, json.dumps(body).encode(),
+                                 {"Content-Type": "application/json", "User-Agent": "usecert-ops/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            print("queued: nonce %d safeTxHash %s (HTTP %d)" % (nonce, h, r.status))
+    except urllib.error.HTTPError as e:
+        sys.exit("refused (HTTP %d): %s" % (e.code, e.read().decode()[:500]))
+
+
+if __name__ == "__main__":
+    main()
