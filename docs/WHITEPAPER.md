@@ -291,8 +291,8 @@ No keeper trading key. No pool operator. The vault's own code is the only author
 | `BufferBook` | 2,192 B | Cumulative P&L ledger and published thresholds |
 | `CertFactory` | 2,323 B | Registry of `{vault, certificate}` pairs |
 
-Deferred to later phases: `InsuranceStaking` and `CERT` (C3), `FeeVault` (fee split 80/10/5/5:
-buyback / staker pay / treasury / ops).
+Deferred to later phases: `InsuranceStaking` and `CERT` (C3), `FeeVault` (fee split 70/20/5/5:
+stakers / buyback fund / keeper and ops gas / treasury, set by the owner on 2026-09-26).
 
 ### 5.1 Why not a pool wrapper
 
@@ -647,7 +647,7 @@ dashboard beside the solvency figure. Capacity is a fact about the market, not a
 | Funding | Either direction, continuous | `BufferBook` |
 | Execution variance (fill vs oracle) | Either direction | `BufferBook` |
 | Realised basis | Either direction | `BufferBook` |
-| Protocol fee split | — | 80 / 10 / 5 / 5 — buyback / staker pay / treasury / ops (`FeeVault`, later phase) |
+| Protocol fee split | — | 70 / 20 / 5 / 5 — stakers (insurance pool) / buyback fund (USDG until a CERT market exists) / keeper and ops gas / treasury, the 2-of-3 Safe (`FeeVault`, later phase; set 2026-09-26) |
 
 ### 11.2 The buffer as implemented — a cliff, not a ramp
 

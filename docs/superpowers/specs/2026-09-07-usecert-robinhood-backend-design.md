@@ -308,7 +308,8 @@ Names match the front-end's architecture display, which is a hard constraint.
 //   (ATTESTER_ROTATION_DELAY, a constant with no setter). CertOracle's attester rotates the same
 //   way. Governance itself stays immutable, and nothing else in C1 is rotatable.
 
-// FeeVault.sol — fee split 80/10/5/5: buyback / staker pay / treasury / ops.
+// FeeVault.sol — fee split 70/20/5/5: stakers / buyback fund / keeper+ops gas / treasury
+//   (owner decision 2026-09-26; was 80/10/5/5 buyback / staker pay / treasury / ops).
 
 // CERT.sol — governance and staking token. C3.
 

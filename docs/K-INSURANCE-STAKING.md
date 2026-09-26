@@ -51,8 +51,9 @@ Constructor bounds, so no deployment can misconfigure it:
   for example governance forwarding treasury income. At today's volume that is roughly zero.
   No emissions: the design rules them out.
 * **K2 (a new vault version, stack 5, Safe redeploy and migration):** vaults forward a share of
-  mint and redeem fees to a `FeeVault`, which splits them. The designed split is 80/10/5/5
-  (buyback / stakers / treasury / ops). The staker part is sent to `InsuranceStaking`.
+  mint and redeem fees to a `FeeVault`, which splits them. The split, set by the owner on
+  2026-09-26, is 70/20/5/5: stakers (sent to `InsuranceStaking`) / a buyback fund held in USDG
+  until a CERT market exists / keeper and operations gas / the treasury (the 2-of-3 Safe).
 * **Funding surplus** only exists when funding is *received*. The vaults are long, and today
   longs *pay* (for example 0.0004%/h on TSLA). So this leg is currently a cost, not a yield.
 

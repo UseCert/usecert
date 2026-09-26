@@ -1818,8 +1818,10 @@ the tree is clean.
   - 27 new tests; the full suite passes 545, with only the 3 deliberate AuditPoC failures.
     CertVault is 22,224 B against the 24,576 B limit.
   - **Deploying K2 means a new stack 5** through the Safe, plus holder migration.
-  - **The owner decides the split.** The docs disagree: 80/10/5/5 buyback / stakers / treasury /
-    ops, or the Learn page's version.
+  - **The split, set by the owner the same day: 70/20/5/5.** 70% to stakers in the insurance
+    pool, 20% to a buyback fund (USDG until a CERT market exists), 5% to keeper and ops gas, 5%
+    to the treasury (the Safe). The whitepaper, the spec, the Roles page and the Learn page had
+    published three different splits; all now say this one (front end `65af023`).
 * **Monday-gap idea: principle agreed** (owner, 2026-09-26). A free weekly prediction
   leaderboard with no deposit and no bet, rewarded from a marketing budget, once staking is
   live. Not the deposit-and-forfeit-yield version, which is a binary option on equities.
