@@ -7,7 +7,7 @@ const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 const COPY_SEGMENTS: { text: string; bold?: boolean }[] = [
   { text: "UseCert is not one product. It is " },
   { text: "four ways", bold: true },
-  { text: " to hold, build, backstop, and balance the first stock certificates on Robinhood Chain. Every role " },
+  { text: " to hold, build, backstop, and balance stock certificates on Robinhood Chain. Every role " },
   { text: "earns its keep", bold: true },
   { text: "." },
 ];

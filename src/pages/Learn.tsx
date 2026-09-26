@@ -37,8 +37,8 @@ export default function Learn() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.3, duration: 0.6, ease: EASE }}
           >
-            We write about what we have learned building the first holdable stock certificates on
-            Robinhood Chain.
+            We write about what we have learned building holdable stock certificates on Robinhood
+            Chain.
           </motion.p>
 
           {/* Filter tabs */}
