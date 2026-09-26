@@ -41,7 +41,7 @@ export default function Faq() {
         <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-60">FAQ</p>
         <div className="mt-4 grid gap-12 lg:grid-cols-2 lg:gap-20">
           <div>
-            <h2 className="max-w-[10ch] text-[44px] font-semibold uppercase leading-[0.85] tracking-[-0.05em] md:text-[60px] lg:text-[78px]">
+            <h2 className="whitespace-nowrap text-[44px] font-semibold uppercase leading-[0.85] tracking-[-0.05em] md:text-[60px] lg:text-[78px]">
               <LetterReveal text="Before you mint." byWord stagger={0.05} />
             </h2>
             <motion.div
