@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useFlows } from "@/chain/useFlows";
 import { useDashboard } from "./store";
+import { FundingHistory } from "./history";
 import { AgeLine, EmptyState, Flash, MicroLabel, Panel, PulseDot, UnverifiedTag } from "./ui";
 import { EM_DASH, fmtCompactUSD, fmtNum, fmtOrDash, fmtUSD } from "./format";
 import { fromBps, fromPrice18 } from "@/chain/units";
@@ -199,11 +200,9 @@ export function FundingMonitor() {
         ))}
       </div>
 
-      <EmptyState
-        className="mt-4"
-        title="No funding history yet: needs an indexer"
-        detail="No view function returns a funding series, and there is no 8-hour rate to publish — the only figure the chain gives is the cumulative accrual claim above. The 48 hourly bars are not drawn rather than guessed."
-      />
+      <div className="mt-4">
+        <FundingHistory symbols={liveVaults.map((v) => v.name)} />
+      </div>
 
       <p className="mt-auto pt-4 font-mono text-[10px] leading-[1.6] uppercase tracking-[0.06em] text-white-60">
         Funding lands in the buffer, which is a real ERC-20 balance. The claim above is the attester's

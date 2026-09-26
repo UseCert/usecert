@@ -1,11 +1,10 @@
 /**
  * Canvas charts for a solvency series and a funding-bar series.
  *
- * NOTE: both are currently unmounted. No view function on the UseCert contracts returns a
- * time series, so there is no 60-point solvency curve and no 48-bar funding history to
- * draw; the views render an honest empty state instead of a curve derived from one point.
- * These are kept, unchanged, for whenever an event indexer exists to feed them — do not
- * wire them to interpolated or repeated values in the meantime.
+ * Fed by src/chain/useHistory.ts: solvency from the UseCert server's 5-minute recording of
+ * the dashboard's own chain reads, funding from the venue's hourly history. No view function
+ * returns a series, which is why a recorder exists; do not feed these interpolated or
+ * repeated values - useHistory resamples to the latest real sample and ends at a gap.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FundingBar, SeriesPoint, Timeframe } from "./store";
@@ -363,11 +362,16 @@ export function FundingChart({ bars, height = 260 }: { bars: FundingBar[]; heigh
             RATE {hoverBar.rate >= 0 ? "+" : ""}
             {hoverBar.rate.toFixed(4)}%
           </p>
-          <p className="text-silver">
-            ACCRUED {hoverBar.accrued >= 0 ? "+" : ""}
-            {fmtUSD(hoverBar.accrued, 0)}
-          </p>
-          <p className="text-white-60">BUFFER AFTER {fmtCompactUSD(hoverBar.bufferAfter)}</p>
+          <p className="text-white-60">{hoverBar.rate >= 0 ? "THE LONG VAULT RECEIVES" : "THE LONG VAULT PAYS"}</p>
+          {hoverBar.accrued !== null && (
+            <p className="text-silver">
+              ACCRUED {hoverBar.accrued >= 0 ? "+" : ""}
+              {fmtUSD(hoverBar.accrued, 0)}
+            </p>
+          )}
+          {hoverBar.bufferAfter !== null && (
+            <p className="text-white-60">BUFFER AFTER {fmtCompactUSD(hoverBar.bufferAfter)}</p>
+          )}
         </div>
       )}
     </div>

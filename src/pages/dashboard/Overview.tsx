@@ -3,7 +3,6 @@ import { isRouted, STATUS_HINT, STATUS_LABEL, useDashboard } from "./store";
 import type { Vault } from "./store";
 import {
   AgeLine,
-  EmptyState,
   Flash,
   HedgeRatio,
   MicroLabel,
@@ -14,6 +13,7 @@ import {
   ViewHeader,
 } from "./ui";
 import { RecentFlows } from "./flows";
+import { SolvencyHistory } from "./history";
 import { useCountUp } from "./hooks";
 import { EM_DASH, NO_POSITION, fmtCompactUSD, fmtNum, fmtOrDash, fmtUSD } from "./format";
 import { TickerStrip, BackingComposition, FundingMonitor, NetworkStrip, PegMonitor } from "./OverviewExtras";
@@ -374,12 +374,9 @@ export default function Overview() {
               : ""}
           </p>
 
-          <EmptyState
-            className="mt-4"
-            height={220}
-            title="No solvency history yet: needs an indexer"
-            detail="No view function on these contracts returns a time series, so there is no 60-point curve to draw. The figures above are a single point, proven at the attestation age shown. A curve would have to be invented."
-          />
+          <div className="mt-4">
+            <SolvencyHistory height={240} />
+          </div>
         </Panel>
       </Stagger>
 

@@ -180,8 +180,8 @@ export interface SeriesPoint {
 
 export interface FundingBar {
   rate: number; // percent, hourly
-  accrued: number; // USD to buffer that hour
-  bufferAfter: number; // USD
+  accrued: number | null; // USD to buffer that hour; null when the source does not say
+  bufferAfter: number | null; // USD; null when the source does not say
 }
 
 /**

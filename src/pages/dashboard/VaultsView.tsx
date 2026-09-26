@@ -18,7 +18,8 @@ import { EM_DASH, fmtCompactUSD, fmtNum, fmtOrDash, fmtUSD } from "./format";
 import { fromBps, fromPrice18 } from "@/chain/units";
 import { MARKET_INDEX_UNVERIFIED_NOTE } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
-import { COLLATERAL_SYMBOL } from "@/chain/deployment";
+import { CHAIN_ID, COLLATERAL_SYMBOL } from "@/chain/deployment";
+import { FundingHistory, SolvencyHistory } from "./history";
 
 function MiniStat({
   label,
@@ -169,7 +170,7 @@ export default function VaultsView() {
             <EmptyState
               className="border-0"
               height={240}
-              title={`${vault.name} is not deployed on chain 46630`}
+              title={`${vault.name} is not deployed on chain ${CHAIN_ID}`}
               detail={`${STATUS_HINT[vault.status]} There is no vault, no certificate token and no oracle for it, so no supply, backing, buffer or price can be shown — and none is invented here.`}
             />
           </Panel>
@@ -234,25 +235,17 @@ export default function VaultsView() {
                     </p>
                   </div>
                 </div>
-                <EmptyState
-                  className="mt-3"
-                  height={140}
-                  title="No solvency history yet: needs an indexer"
-                  detail="One provable point, at the attestation age above. The 60-point curve has no on-chain source and is not drawn."
-                />
+                <div className="mt-3">
+                  <SolvencyHistory symbols={[vault.name]} height={160} />
+                </div>
               </Panel>
             </Stagger>
             <Stagger index={3}>
               <Panel className="p-5">
                 <div className="mb-3 flex items-center justify-between">
                   <MicroLabel>Funding History</MicroLabel>
-                  <UnverifiedTag />
                 </div>
-                <EmptyState
-                  height={240}
-                  title="No funding history yet: needs an indexer"
-                  detail="The chain publishes a cumulative accrual claim, not a rate and not a series. The 48 hourly bars are not drawn rather than interpolated."
-                />
+                <FundingHistory symbols={[vault.name]} height={240} />
               </Panel>
             </Stagger>
           </div>
