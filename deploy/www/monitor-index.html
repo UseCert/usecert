@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vps-763bd629 · status</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter+Tight:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --bg:#0B0D0F; --panel:#12161A; --panel-2:#171C21; --rule:#232A31; --rule-soft:#1B2127;
+    --text:#E6EBEF; --dim:#98A4AF; --faint:#66727D;
+    --ok:#3FBF6F; --warn:#E0A94D; --crit:#E05B4D; --accent:#4DA3E0;
+    --mono:"IBM Plex Mono",ui-monospace,monospace;
+    --sans:"Inter Tight",ui-sans-serif,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5}
+  .wrap{max-width:1280px;margin:0 auto;padding:1.5rem 1.25rem 4rem}
+
+  header{display:flex;align-items:baseline;justify-content:space-between;gap:1rem;flex-wrap:wrap;
+         border-bottom:1px solid var(--rule);padding-bottom:.9rem;margin-bottom:1.25rem}
+  h1{font-family:var(--mono);font-size:1rem;font-weight:600;letter-spacing:.02em;margin:0}
+  h1 .dot{color:var(--ok)}
+  .meta{font-family:var(--mono);font-size:.7rem;color:var(--faint);letter-spacing:.06em;text-transform:uppercase}
+
+  h2{font-family:var(--mono);font-size:.7rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+     color:var(--faint);margin:2rem 0 .7rem}
+  h2:first-of-type{margin-top:0}
+
+  /* ---- metric tiles ---- */
+  .grid{display:grid;gap:1px;background:var(--rule-soft);border:1px solid var(--rule-soft);
+        grid-template-columns:repeat(auto-fit,minmax(178px,1fr))}
+  .tile{background:var(--panel);padding:.95rem 1rem;display:flex;flex-direction:column;gap:.5rem;min-height:104px}
+  .tile .k{font-family:var(--mono);font-size:.625rem;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+  .tile .v{font-family:var(--mono);font-size:1.5rem;font-weight:600;font-variant-numeric:tabular-nums;line-height:1}
+  .tile .v small{font-size:.75rem;font-weight:500;color:var(--dim);margin-left:.15rem}
+  .tile .s{font-family:var(--mono);font-size:.688rem;color:var(--dim);font-variant-numeric:tabular-nums}
+
+  /* usage bar: a bar is honest only when its maximum is real, so each has a stated denominator */
+  .bar{height:4px;background:var(--rule);overflow:hidden}
+  .bar>i{display:block;height:100%;background:var(--ok);transition:width .45s ease,background .45s ease}
+  .bar.w>i{background:var(--warn)} .bar.c>i{background:var(--crit)}
+
+  /* ---- sparkline ---- */
+  .spark{width:100%;height:30px;display:block}
+
+  /* ---- tables ---- */
+  .tbl{width:100%;border-collapse:collapse;font-size:.813rem}
+  .tbl th{font-family:var(--mono);font-size:.625rem;letter-spacing:.12em;text-transform:uppercase;
+          color:var(--faint);font-weight:500;text-align:left;padding:.5rem .8rem;background:var(--panel-2)}
+  .tbl td{padding:.55rem .8rem;border-top:1px solid var(--rule-soft);font-variant-numeric:tabular-nums}
+  .tbl tr td:first-child{font-family:var(--mono);font-size:.75rem}
+  .tblwrap{border:1px solid var(--rule-soft);overflow-x:auto}
+
+  .pill{font-family:var(--mono);font-size:.625rem;letter-spacing:.06em;text-transform:uppercase;
+        padding:.16rem .45rem;border:1px solid currentColor;white-space:nowrap}
+  .up{color:var(--ok)} .down{color:var(--crit)} .warnc{color:var(--warn)} .dimc{color:var(--faint)}
+
+  .note{font-size:.75rem;color:var(--faint);margin:.55rem 0 0;max-width:68ch}
+  a{color:var(--accent)}
+  .links{display:flex;gap:.9rem;flex-wrap:wrap;font-family:var(--mono);font-size:.75rem;margin-top:.35rem}
+  .err{color:var(--crit);font-family:var(--mono);font-size:.75rem}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1><span class="dot" id="livedot">●</span> vps-763bd629</h1>
+      <div class="links">
+        <a href="/v3/">full netdata</a>
+        <a href="https://use-cert.com" target="_blank" rel="noopener">use-cert</a>
+        <a href="https://qwilon.com" target="_blank" rel="noopener">qwilon</a>
+        <a href="https://orion-safe.com" target="_blank" rel="noopener">orion-safe</a>
+      </div>
+    </div>
+    <div class="meta" id="hdr">connecting…</div>
+  </header>
+
+  <h2>System</h2>
+  <div class="grid" id="sys"></div>
+
+  <h2>Network — <span id="ifname" style="text-transform:none;letter-spacing:0">…</span></h2>
+  <div class="grid" id="net"></div>
+
+  <h2>Availability — rolling 7 days</h2>
+  <div class="tblwrap"><table class="tbl" id="avail"><thead><tr>
+    <th>endpoint</th><th>now</th><th>code</th><th>response</th><th>uptime</th><th>samples</th>
+  </tr></thead><tbody></tbody></table></div>
+  <p class="note">Measured server-side once a minute. A browser cannot check these itself — they are
+    different origins and CORS blocks it. Percentages start thin and become meaningful as samples accumulate.</p>
+
+  <h2>Chain — attestation age</h2>
+  <div class="grid" id="chain"></div>
+  <p class="note">Minting halts on any mirror whose attestation passes <strong>300s</strong>: the capacity
+    oracle returns 0 while <code>mintAllowed()</code> still reads true. Amber from 240s.</p>
+
+  <h2>Backups</h2>
+  <div class="grid" id="backup"></div>
+  <p class="note" id="backupnote"></p>
+
+  <h2>Services</h2>
+  <div class="tblwrap"><table class="tbl" id="svc"><thead><tr>
+    <th>unit</th><th>state</th><th>unit</th><th>state</th><th>unit</th><th>state</th>
+  </tr></thead><tbody></tbody></table></div>
+
+  <p class="note" id="footnote"></p>
+</div>
+
+<script>
+const API = '/api/v1/data';
+const hist = { cpu: [], net_in: [], net_out: [] };
+const MAXPTS = 60;
+
+const fmt = (n, d = 1) => (n === null || n === undefined || isNaN(n)) ? '—' : Number(n).toFixed(d);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function dur(sec) {
+  if (sec == null || isNaN(sec)) return '—';
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
+}
+
+// Netdata returns { labels:[time,dim...], data:[[t,v...]] }; take the newest row.
+async function chart(name, points = 1) {
+  const r = await fetch(`${API}?chart=${encodeURIComponent(name)}&after=-${points}&points=${points}&format=json&group=average`);
+  if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
+  const j = await r.json();
+  if (!j.data || !j.data.length) throw new Error(`${name}: no data`);
+  const labels = j.labels.slice(1);
+  const row = j.data[0].slice(1);
+  const out = {};
+  labels.forEach((l, i) => out[l] = row[i]);
+  return out;
+}
+
+function tile(k, v, unit, sub, pct, cls) {
+  const bar = pct === null || pct === undefined ? '' :
+    `<div class="bar ${cls || ''}"><i style="width:${Math.max(0, Math.min(100, pct))}%"></i></div>`;
+  return `<div class="tile"><div class="k">${esc(k)}</div>
+    <div class="v">${v}${unit ? `<small>${esc(unit)}</small>` : ''}</div>
+    ${bar}<div class="s">${sub || ''}</div></div>`;
+}
+
+function sparkline(series, colour) {
+  if (series.length < 2) return '';
+  const w = 160, h = 30, max = Math.max(...series, 1), min = Math.min(...series, 0);
+  const span = (max - min) || 1;
+  const pts = series.map((v, i) =>
+    `${(i / (series.length - 1)) * w},${h - ((v - min) / span) * (h - 2) - 1}`).join(' ');
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
+    <polyline points="${pts}" fill="none" stroke="${colour}" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+function push(arr, v) { arr.push(v); if (arr.length > MAXPTS) arr.shift(); }
+
+async function tickNetdata() {
+  const [cpu, ram, swap, disk, up, load, io] = await Promise.all([
+    chart('system.cpu'), chart('system.ram'), chart('mem.swap'),
+    chart('disk_space./'), chart('system.uptime'), chart('system.load'), chart('system.io')
+  ]);
+
+  // CPU: everything except idle. Netdata omits idle from system.cpu, so summing gives busy%.
+  const busy = Object.values(cpu).reduce((a, b) => a + (b || 0), 0);
+  push(hist.cpu, busy);
+
+  const ramUsed = ram.used || 0, ramTot = (ram.used || 0) + (ram.free || 0) + (ram.cached || 0) + (ram.buffers || 0);
+  const ramPct = ramTot ? ramUsed / ramTot * 100 : 0;
+  const swTot = (swap.used || 0) + (swap.free || 0), swPct = swTot ? swap.used / swTot * 100 : 0;
+  const dRes = disk['reserved for root'] || 0;   // Netdata labels this with spaces
+  const dTot = (disk.used || 0) + (disk.avail || 0) + dRes;
+  const dPct = dTot ? disk.used / dTot * 100 : 0;
+
+  const sev = p => p >= 90 ? 'c' : p >= 75 ? 'w' : '';
+
+  document.getElementById('sys').innerHTML =
+    tile('CPU', fmt(busy, 1), '%', sparkline(hist.cpu, '#4DA3E0') || 'busy, all cores', busy, sev(busy)) +
+    tile('Memory', fmt(ramUsed / 1024, 2), 'GiB',
+         `${fmt(ramPct, 0)}% of ${fmt(ramTot / 1024, 1)} GiB`, ramPct, sev(ramPct)) +
+    tile('Swap', fmt(swap.used || 0, 0), 'MiB',
+         swTot ? `${fmt(swPct, 1)}% of ${fmt(swTot / 1024, 1)} GiB` : 'not configured', swPct, sev(swPct)) +
+    tile('Disk /', fmt(disk.used, 1), 'GiB',
+         `${fmt(dPct, 0)}% of ${fmt(dTot, 0)} GiB · ${fmt(disk.avail, 1)} free`, dPct, sev(dPct)) +
+    tile('Uptime', dur(up.uptime), '', 'since last boot', null) +
+    tile('Load', fmt(load.load1, 2), '', `5m ${fmt(load.load5, 2)} · 15m ${fmt(load.load15, 2)}`, null) +
+    tile('Disk I/O', fmt(Math.abs(io.reads || 0) + Math.abs(io.writes || 0), 0), 'KiB/s',
+         `read ${fmt(Math.abs(io.reads || 0), 0)} · write ${fmt(Math.abs(io.writes || 0), 0)}`, null);
+
+  // network: pick the first real interface
+  const ifn = window.__ifname || 'ens3';
+  try {
+    const net = await chart(`net.${ifn}`);
+    const rx = Math.abs(net.received || 0), tx = Math.abs(net.sent || 0);
+    push(hist.net_in, rx); push(hist.net_out, tx);
+    document.getElementById('ifname').textContent = ifn;
+    document.getElementById('net').innerHTML =
+      tile('Inbound', fmt(rx / 1000, 2), 'Mbit/s', sparkline(hist.net_in, '#3FBF6F'), null) +
+      tile('Outbound', fmt(tx / 1000, 2), 'Mbit/s', sparkline(hist.net_out, '#E0A94D'), null) +
+      tile('Total', fmt((rx + tx) / 1000, 2), 'Mbit/s', 'combined throughput', null);
+  } catch (e) { document.getElementById('net').innerHTML = `<div class="tile"><div class="err">${esc(e.message)}</div></div>`; }
+}
+
+async function tickStatus() {
+  const r = await fetch('/dash/status.json', { cache: 'no-store' });
+  if (!r.ok) throw new Error(`status.json: HTTP ${r.status}`);
+  const s = await r.json();
+
+  const availBy = {};
+  (s.availability || []).forEach(a => availBy[a.name] = a);
+  document.querySelector('#avail tbody').innerHTML = (s.endpoints || []).map(e => {
+    const a = availBy[e.name] || {};
+    const pct = a.pct === undefined ? null : a.pct;
+    const pcls = pct === null ? 'dimc' : pct >= 99.5 ? 'up' : pct >= 97 ? 'warnc' : 'down';
+    return `<tr>
+      <td>${esc(e.name)}</td>
+      <td><span class="pill ${e.up ? 'up' : 'down'}">${e.up ? 'up' : 'down'}</span></td>
+      <td>${esc(e.code)}</td>
+      <td>${e.ms} ms</td>
+      <td class="${pcls}">${pct === null ? '—' : fmt(pct, 2) + '%'}</td>
+      <td class="dimc">${a.samples || 0}</td></tr>`;
+  }).join('');
+
+  document.getElementById('chain').innerHTML = (s.chain || []).map(c => {
+    const age = c.ageSec, cls = age === null ? '' : age >= 300 ? 'c' : age >= 240 ? 'w' : '';
+    const col = age === null ? 'dimc' : age >= 300 ? 'down' : age >= 240 ? 'warnc' : 'up';
+    return tile(c.symbol, age === null ? '—' : age, 's',
+      `<span class="${col}">${age === null ? 'unreadable' : age >= 300 ? 'MINTING HALTED' : age >= 240 ? 'approaching cutoff' : 'healthy'}</span> · budget 300s`,
+      age === null ? 0 : Math.min(100, age / 300 * 100), cls);
+  }).join('') || '<div class="tile"><div class="s">no chain data</div></div>';
+
+  // --- backups ---------------------------------------------------------------
+  // Two numbers that must agree: files written locally, and files present on the
+  // remote. A backup that ran and never left the machine is not an offsite backup,
+  // and only comparing the two shows the difference.
+  const b = s.backup || null;
+  if (b) {
+    const hrs = b.ageSec >= 0 ? (b.ageSec / 3600) : null;
+    // A nightly job is late once it is past a day; at two days something is wrong.
+    const ageCls = hrs === null || hrs > 48 ? "c" : hrs > 26 ? "w" : "";
+    const ageCol = hrs === null || hrs > 48 ? "down" : hrs > 26 ? "warnc" : "up";
+    const okRun = b.result === "success" && b.exit === 0;
+    const offsiteOk = b.offsite >= 0 && b.offsite >= b.files;
+    document.getElementById("backup").innerHTML =
+      tile("Last run", b.result === "unknown" ? "never" : (okRun ? "OK" : "FAILED"), "",
+           `<span class="${okRun ? "up" : "down"}">exit ${b.exit}</span> · set ${b.set}`, null) +
+      tile("Age", hrs === null ? "—" : dur(b.ageSec), "",
+           `<span class="${ageCol}">${hrs === null ? "no run recorded" : hrs > 26 ? "overdue" : "within the nightly window"}</span>`,
+           hrs === null ? 100 : Math.min(100, hrs / 48 * 100), ageCls) +
+      tile("Files in set", b.files, "", `${(b.bytes/1048576).toFixed(1)} MiB · ${b.sets} sets kept`, null) +
+      tile("Offsite", b.offsite < 0 ? "none" : b.offsite, "",
+           b.offsite < 0
+             ? '<span class="down">no remote configured</span>'
+             : `<span class="${offsiteOk ? "up" : "down"}">${offsiteOk ? "matches local" : "FEWER than local"}</span> · ${b.remote}`,
+           null);
+    document.getElementById("backupnote").textContent =
+      b.offsite < 0
+        ? "Backups exist only on this machine, on the same disk as the data."
+        : "Contents encrypted before upload; filenames left readable so a set can be identified without decrypting it.";
+  }
+  const svc = s.services || [];
+  let rows = '';
+  for (let i = 0; i < svc.length; i += 3) {
+    rows += '<tr>' + svc.slice(i, i + 3).map(u =>
+      `<td>${esc(u.name)}</td><td><span class="pill ${u.state === 'active' ? 'up' : 'down'}">${esc(u.state)}</span></td>`
+    ).join('') + '</tr>';
+  }
+  document.querySelector('#svc tbody').innerHTML = rows;
+
+  const age = Math.max(0, Math.floor(Date.now() / 1000) - s.generated);
+  document.getElementById('footnote').textContent =
+    `Availability and chain data collected server-side ${age}s ago, refreshed every 60s. System and network read live from Netdata every 2s.`;
+}
+
+async function loop() {
+  const hdr = document.getElementById('hdr'), dot = document.getElementById('livedot');
+  try {
+    await tickNetdata();
+    dot.style.color = 'var(--ok)';
+    hdr.textContent = new Date().toLocaleTimeString() + ' · live';
+  } catch (e) {
+    dot.style.color = 'var(--crit)';
+    hdr.innerHTML = `<span class="err">netdata unreachable — ${esc(e.message)}</span>`;
+  }
+}
+
+(async function init() {
+  // discover the primary interface rather than assuming ens3
+  try {
+    const r = await fetch('/api/v1/charts');
+    const j = await r.json();
+    // A net.* id alone is not enough - require the chart to actually carry
+    // received/sent, or a family chart would be charted as an interface.
+    const ifs = Object.keys(j.charts).filter(k => k.startsWith('net.') &&
+      j.charts[k].dimensions && j.charts[k].dimensions.received &&
+      !/docker|br-|veth|lo\b/.test(k)).map(k => k.slice(4));
+    if (ifs.length) window.__ifname = ifs[0];
+  } catch (e) { /* fall back to ens3 */ }
+
+  await loop(); setInterval(loop, 2000);
+  const st = async () => {
+    try { await tickStatus(); }
+    catch (e) { document.getElementById('footnote').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+  };
+  await st(); setInterval(st, 30000);
+})();
+</script>
+</body>
+</html>

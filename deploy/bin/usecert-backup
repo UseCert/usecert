@@ -8,10 +8,15 @@
 # on the same machine perfectly healthy.
 set -uo pipefail
 
+# The Drive remote is authorised under the `usecert` account; these scripts run as
+# root, and rclone reads the invoking user's config. Point it at the right file
+# rather than duplicating the credential into root's home.
+export RCLONE_CONFIG=/home/usecert/.config/rclone/rclone.conf
+
 STAMP=$(date -u +%Y-%m-%dT%H%M%SZ)
 DAY=$(date -u +%Y-%m-%d)
 DEST=/var/backups/pg/$DAY
-KEEP_LOCAL_DAYS=14
+KEEP_LOCAL_DAYS=7
 REMOTE=$(cat /etc/usecert/backup-remote 2>/dev/null || true)   # e.g. gdrive-crypt:usecert-backups
 LOG=$(mktemp)
 ERRORS=()
@@ -170,7 +175,24 @@ if [ -n "$REMOTE" ] && command -v rclone >/dev/null; then
     else
       fail "offsite: only $remote_n of $local_n files arrived"
     fi
-    rclone delete "$REMOTE" --min-age 90d 2>>"$LOG"
+    # Purge whole dated FOLDERS, not just their contents. `rclone delete --min-age`
+    # removes files and leaves the empty directories behind, so the remote slowly
+    # fills with hollow folders that look like backups from the Drive UI and are not.
+    # Dates come from the folder NAME rather than file mtimes: an upload that was
+    # retried touches mtimes and would keep resurrecting a set that should have gone.
+    CUTOFF=$(date -u -d "$KEEP_LOCAL_DAYS days ago" +%Y-%m-%d)
+    while read -r RDIR; do
+      RDIR=${RDIR%/}
+      [ -z "$RDIR" ] && continue
+      case "$RDIR" in 20[0-9][0-9]-[0-1][0-9]-[0-3][0-9]) ;; *) continue ;; esac
+      if [[ "$RDIR" < "$CUTOFF" ]]; then
+        if rclone purge "$REMOTE$RDIR" 2>>"$LOG"; then
+          note "offsite: purged $RDIR (older than $KEEP_LOCAL_DAYS days)"
+        else
+          fail "offsite: could not purge $RDIR"
+        fi
+      fi
+    done < <(rclone lsf "$REMOTE" --dirs-only 2>/dev/null)
   else
     fail "offsite: rclone copy failed"
   fi
@@ -182,8 +204,15 @@ else
 fi
 
 # --- retention ----------------------------------------------------------------
-find /var/backups/pg -maxdepth 1 -type d -name '20*' -mtime +$KEEP_LOCAL_DAYS \
-  -exec rm -rf {} + 2>/dev/null
+# Pruned by FOLDER NAME, not mtime. A set that was re-verified, re-uploaded or even
+# just listed can carry a fresh mtime and would then never age out under -mtime,
+# which is how a "7 day" retention quietly becomes forever.
+LOCAL_CUTOFF=$(date -u -d "$KEEP_LOCAL_DAYS days ago" +%Y-%m-%d)
+for d in /var/backups/pg/20*/; do
+  [ -d "$d" ] || continue
+  nm=$(basename "$d")
+  if [[ "$nm" < "$LOCAL_CUTOFF" ]]; then rm -rf "$d" && note "pruned local set $nm"; fi
+done
 note "local sets retained: $(find /var/backups/pg -maxdepth 1 -type d -name '20*' | wc -l)"
 
 # --- report -------------------------------------------------------------------
