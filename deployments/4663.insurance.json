@@ -1,0 +1,24 @@
+{
+  "_what": "InsuranceStaking (K1) on chain 4663. Deployed with cast send --create from the init code built at the commit below; a separate record because deployments/4663.json is written by the stack deploy script.",
+  "chainId": 4663,
+  "contract": "InsuranceStaking",
+  "address": "0xDbdA46671E0e97860493Ce149ad7B726407dAFb1",
+  "transactionHash": "0x97a2b1e4949c43753b5c55a4bd69a8915de20560f1b1f53adbd1b725ea047c27",
+  "blockNumber": 73180902,
+  "commit": "095093bf940f44cf68ae1dff34c4b328ec21d48d",
+  "deployer": "0x6381577a72266E6b89eE9E96dF604CC3cd3f8e92",
+  "constructor": {
+    "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "registry": "0x08117b198FCCeEC01427B13A4c9df908a3edd71E",
+    "governance": "0x848c91323f720DEf985adbCC85FA40E3405B70DF",
+    "cooldown": 864000,
+    "withdrawWindow": 259200,
+    "drawDelay": 172800,
+    "maxDrawBps": 3000,
+    "depositCap": "10000000000",
+    "name": "UseCert Insurance Pool",
+    "symbol": "ucINS"
+  },
+  "sourcify": "exact_match (creation and runtime), verifiedAt 2026-09-26T15:13:35Z",
+  "audited": false
+}
