@@ -14,10 +14,10 @@ import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 ///      stack too. That is deliberate. A split governance could retune would be a standing
 ///      governance decision over every fee.
 ///
-///      THE SPLIT IS NOT DECIDED HERE. The whitepaper says 80/10/5/5 buyback / staker pay /
-///      treasury / ops. The site's learn copy says 80/10/5/5 stakers / insurance buffer / keepers
-///      / treasury. Those are different contracts receiving different money. This contract takes
-///      whichever the owner decides as constructor input. See docs/K-INSURANCE-STAKING.md, K2.
+///      THE SPLIT IS CONSTRUCTOR INPUT. The owner set it on 2026-09-26: 70/20/5/5 - stakers
+///      (InsuranceStaking) / a buyback fund (USDG until a CERT market exists) / keeper and ops gas
+///      / the treasury (the 2-of-3 Safe). It replaced three conflicting published versions.
+///      test_ownerSplit_70_20_5_5 pins it. See docs/K-INSURANCE-STAKING.md, K2.
 ///
 ///      Rounding: each share is floored, so at most (recipients - 1) units stay behind per call.
 ///      They are not lost. They are part of the balance the next distribute() splits.

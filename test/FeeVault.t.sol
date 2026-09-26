@@ -6,9 +6,8 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {FeeVault} from "../src/FeeVault.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 
-/// @notice K2: the fixed fee split. The split itself is NOT decided in code (the whitepaper and
-///         the site disagree, see docs/K-INSURANCE-STAKING.md); these tests use 80/10/5/5 only as
-///         a shape, with neutral names.
+/// @notice K2: the fixed fee split. Most tests use 80/10/5/5 only as a shape, with neutral names;
+///         test_ownerSplit_70_20_5_5 pins the split the owner set on 2026-09-26.
 contract FeeVaultTest is Test {
     MockERC20 usdg;
     FeeVault fv;
@@ -123,6 +122,26 @@ contract FeeVaultTest is Test {
         assertEq(usdg.balanceOf(c), 50e6);
         assertEq(usdg.balanceOf(d), 50e6);
         assertEq(usdg.balanceOf(address(fv)), 0);
+    }
+
+    /// The deployment split: 70% stakers, 20% buyback fund, 5% keeper/ops gas, 5% treasury.
+    function test_ownerSplit_70_20_5_5() public {
+        address stakers = makeAddr("InsuranceStaking");
+        address buyback = makeAddr("buybackFund");
+        address ops = makeAddr("keeperOpsGas");
+        address treasury = makeAddr("safeTreasury");
+        address[] memory r = new address[](4);
+        uint256[] memory s = new uint256[](4);
+        (r[0], r[1], r[2], r[3]) = (stakers, buyback, ops, treasury);
+        (s[0], s[1], s[2], s[3]) = (7_000, 2_000, 500, 500);
+        FeeVault owner = new FeeVault(IERC20(address(usdg)), r, s);
+        usdg.mint(address(owner), 12_345_678); // 12.345678 USDG of fees
+        owner.distribute();
+        assertEq(usdg.balanceOf(stakers), 8_641_974);
+        assertEq(usdg.balanceOf(buyback), 2_469_135);
+        assertEq(usdg.balanceOf(ops), 617_283);
+        assertEq(usdg.balanceOf(treasury), 617_283);
+        assertEq(usdg.balanceOf(address(owner)), 3, "floored dust stays for the next distribute");
     }
 
     /// 7 units at 80/10/5/5 floors to 5/0/0/0: two units of dust stay, and they are paid out by

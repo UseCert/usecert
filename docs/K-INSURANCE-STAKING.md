@@ -51,9 +51,9 @@ Constructor bounds, so no deployment can misconfigure it:
   for example governance forwarding treasury income. At today's volume that is roughly zero.
   No emissions: the design rules them out.
 * **K2 (a new vault version, stack 5, Safe redeploy and migration):** vaults let anyone sweep
-  their fee income to a `FeeVault`, which splits it. **The split is not decided.** The sources
-  disagree (see K2 below), so `FeeVault` takes it as constructor input. Whatever share is
-  addressed to `InsuranceStaking` raises its share price.
+  their fee income to a `FeeVault`, which splits it. **The split, set by the owner on
+  2026-09-26, is 70/20/5/5** (see K2 below). The 70% addressed to `InsuranceStaking` raises
+  its share price.
 * **Funding surplus** only exists when funding is *received*. The vaults are long, and today
   longs *pay* (for example 0.0004%/h on TSLA). So this leg is currently a cost, not a yield.
 
@@ -63,7 +63,7 @@ Constructor bounds, so no deployment can misconfigure it:
 |---|---|---|
 | **K1** | `InsuranceStaking` contract and tests (this document) | — done, not deployed |
 | **K1-deploy** | Deploy with the Safe as governance and `CertFactory` as the registry; site panel (deposit / cooldown / redeem / pending draws) | external audit, legal read, owner decision |
-| **K2** | `FeeVault` plus a vault version whose fees can be swept to it (below) | — written and tested, not deployed. Deploying needs the split decision, a new stack and a migration plan |
+| **K2** | `FeeVault` plus a vault version whose fees can be swept to it (below) | — written and tested, not deployed. Deploying needs the recipient addresses, a new stack and a migration plan |
 | **K3** | An objective draw trigger (for example a redemption provably unpayable for N days) replaces the governance proposal | the K2 vault, audit |
 | **K4** | A CERT tranche behind the USDG tranche, with a defined swap route | CERT liquidity |
 
@@ -141,25 +141,23 @@ donation), up to the assessed amount.
   it by the same amount. `freeCollateral18()` still does not net out `escrowOutstanding`. Wiring
   that in would change mint admission control, which K2 is not about.
 
-### The split: an owner decision, not in code
+### The split: decided — 70/20/5/5 (owner, 2026-09-26)
 
-The sources disagree, and they describe different contracts receiving different money:
+| Share | Recipient | Notes |
+|---|---|---|
+| **70%** | `InsuranceStaking` | Pays stakers for taking the first loss; raises the share price. |
+| **20%** | A buyback fund | Held in USDG until a CERT market exists to buy on (K4). It must be an address that cannot revert a transfer: a Safe-controlled account, not a contract that can be paused. |
+| **5%** | A keeper and operations gas wallet | Pays the gas for settlements, refunds and recalls. |
+| **5%** | The treasury, the 2-of-3 Safe `0x848c…70DF` | |
 
-| Source | 80% | 10% | 5% | 5% |
-|---|---|---|---|---|
-| `docs/WHITEPAPER.md` (§ deferred phases, parameter table), the backend design spec, the C1 plan; the site's `TokenFlow.tsx` ("80% … open-market token buyback") | buyback | staker pay | treasury | ops |
-| The site's learn copy (`src/pages/learn/data.ts`) | stakers ("underwriting compensation") | top up the insurance buffer | keepers | treasury |
+It replaced three published versions that disagreed: the whitepaper's 80/10/5/5 (buyback /
+stakers / treasury / ops), the Roles page's, and the Learn page's (stakers / buffer / keepers /
+treasury). All of them now say 70/20/5/5. `test_ownerSplit_70_20_5_5` pins it: 12.345678 USDG
+splits to exactly 8.641974 / 2.469135 / 0.617283 / 0.617283, with 3 units of dust carried
+forward.
 
-The site also disagrees with itself: `TokenFlow` follows the whitepaper and the learn page does
-not. `FeeVault` takes recipients and shares as constructor input and picks neither. Before K2 is
-deployed, the owner must decide:
+Still to decide before K2 deploys: the buyback fund and ops wallet addresses.
 
-1. **Which split.** A buyback needs a CERT token and a swap route. Neither exists (that is K4).
-   Until they do, an 80% buyback share would have no contract to go to.
-2. **Where "buffer" goes, if it stays in the split.** Sending fee income back into a vault
-   through `seedBuffer` is the right route: it counts as that vault's `bufferCapital`, so it can
-   never be swept out again. A plain transfer would become spare and could be swept straight
-   back out.
 3. **Recipients that cannot be frozen out.** One recipient whose transfer reverts stalls every
    `distribute()`, and `FeeVault` has no owner to route around it. Suitable recipients: the Safe
    and `InsuranceStaking`.
