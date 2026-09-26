@@ -135,11 +135,11 @@ function RootShell({ children }: { children: ReactNode }) {
       <head>
         <HeadContent />
         {/* Chinese chosen earlier: hold the first paint until the page is translated, so English
-            does not flash. Released by I18nRuntime, or after 1.5 s whatever happens. */}
+            does not flash. Released by I18nRuntime, or after 2.5 s whatever happens. */}
         <script
           dangerouslySetInnerHTML={{
             __html:
-              "try{if(localStorage.getItem('usecert.lang')==='zh'){var d=document.documentElement;d.setAttribute('data-i18n-pending','');d.lang='zh-CN';setTimeout(function(){d.removeAttribute('data-i18n-pending')},1500)}}catch(e){}",
+              "try{if(localStorage.getItem('usecert.lang')==='zh'){var d=document.documentElement;d.setAttribute('data-i18n-pending','');d.lang='zh-CN';setTimeout(function(){d.removeAttribute('data-i18n-pending')},2500)}}catch(e){}",
           }}
         />
         <style>{"html[data-i18n-pending] body{visibility:hidden}"}</style>

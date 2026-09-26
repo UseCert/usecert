@@ -181,29 +181,43 @@ export function I18nRuntime() {
       }
       if (!raf) raf = requestAnimationFrame(flush);
     });
-    // Route chunks hydrate after this effect runs. Rewriting their text before React has
-    // hydrated them is a hydration mismatch (#418), so the first pass waits for the page to
-    // finish loading and for React to commit what it loaded; the paint is held until then.
+    // Route chunks hydrate after this effect runs, some after the load event (lazy chunks
+    // fetched late, then hydrated at idle priority). Rewriting their text before React has
+    // hydrated them is a hydration mismatch (#418). So the first pass waits until no script has
+    // arrived for 400 ms and the main thread is idle (capped at 4 s); the paint is held until then.
     let started = false;
     let dead = false;
-    const start = () => {
-      if (started) return;
+    let quiet = 0;
+    const go = () => {
+      if (dead || started) return;
       started = true;
-      requestAnimationFrame(() =>
-        requestAnimationFrame(() => {
-          if (dead) return;
-          pass(document.body);
-          flush();
-          mo.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: [...ATTRS] });
-          release();
-        }),
-      );
+      po?.disconnect();
+      pass(document.body);
+      flush();
+      mo.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: [...ATTRS] });
+      release();
     };
-    if (document.readyState === "complete") start();
-    else window.addEventListener("load", start, { once: true });
+    const idle = () => ("requestIdleCallback" in window ? requestIdleCallback(go, { timeout: 800 }) : setTimeout(go, 50));
+    const kick = () => {
+      clearTimeout(quiet);
+      quiet = window.setTimeout(idle, 400);
+    };
+    let po: PerformanceObserver | undefined;
+    try {
+      po = new PerformanceObserver((l) => {
+        if (l.getEntries().some((e) => /\.m?js(\?|$)/.test(e.name))) kick();
+      });
+      po.observe({ type: "resource" });
+    } catch {
+      /* no PerformanceObserver: the quiet timer alone */
+    }
+    kick();
+    const cap = window.setTimeout(go, 4000);
     return () => {
-      started = dead = true;
-      window.removeEventListener("load", start);
+      dead = true;
+      clearTimeout(quiet);
+      clearTimeout(cap);
+      po?.disconnect();
       mo.disconnect();
       if (raf) cancelAnimationFrame(raf);
     };
