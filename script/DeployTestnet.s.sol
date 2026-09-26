@@ -1182,10 +1182,13 @@ contract DeployTestnet is Script {
         require(basisKnown, "S9: basis unknown in dual-source mode");
         require(basisBps <= BASIS_BAND_BPS, "S9: basis outside the band at deployment");
         require(o.mintAllowed(), "S9: MINT GATE CLOSED - oracle.mintAllowed() is false");
-        require(
-            CapacityOracle(capacity).maxNotional18(d.vault, v.bufferCapacity18()) != 0,
-            "S9: MINT GATE CLOSED - maxNotional18 == 0"
-        );
+        // In Safe mode the cap is set by the Safe's phase-4 batch, after this deploy.
+        if (_phase4Applied()) {
+            require(
+                CapacityOracle(capacity).maxNotional18(d.vault, v.bufferCapacity18()) != 0,
+                "S9: MINT GATE CLOSED - maxNotional18 == 0"
+            );
+        }
     }
 
     // ------------------------------------------------------------------------ the address book
