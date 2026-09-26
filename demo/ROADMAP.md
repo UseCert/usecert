@@ -1619,9 +1619,19 @@ lag the host.
   100 from ordinary browsers). They now 302 to `/learn` and `/roles`.
 * **Testnet id in copy.** "not deployed on chain 46630" now names the live chain.
 
-**Awaiting the owner (copy).** `/learn` says "Every hour, a keeper settles accrued funding into
-the per-asset buffer." Nothing on this deployment does that. A correction is drafted for
-approval.
+**Copy, approved by the owner and shipped (`843234d`).** `/learn` said "Every hour, a keeper
+settles accrued funding into the per-asset buffer." Nothing on this deployment does that. It now
+says what happens:
+
+* funding moves in the vault's venue margin account every hour;
+* the dashboard charts the venue's hourly rates;
+* the buffer's on-chain balance moves only when collateral moves;
+* the accrual figure is a claim, not a transfer.
+
+The same false sentence in "Who pays what, when" is fixed too, and the Chinese updated.
+
+**Axis labels (`62c4b35`).** Below $100 the solvency axis now shows cents. The compact format
+repeated whole-dollar labels ($2 $2 $1 $1).
 
 ---
 
