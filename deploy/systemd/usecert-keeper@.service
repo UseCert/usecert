@@ -1,0 +1,31 @@
+[Unit]
+Description=UseCert hedge keeper for %i (opens hedges off chain, settles keeper-mode mints)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=keeper
+Group=keeper
+# The attester key, read by systemd as root and handed to the process; the file stays root-only.
+EnvironmentFile=/etc/usecert-keeper/attester.env
+# One config, one venue API key and one state file per vault: /opt/keeper/vaults/<instance>.json.
+# Instances share nothing but the attester key, so one vault's stuck receipt cannot stall another.
+ExecStartPre=/opt/keeper/venv/bin/python -m py_compile /opt/keeper/usecert-keeper.py
+ExecStart=/opt/keeper/venv/bin/python /opt/keeper/usecert-keeper.py /opt/keeper/vaults/%i.json
+Restart=on-failure
+RestartSec=15
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/keeper
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LockPersonality=true
+StandardOutput=append:/var/log/usecert-keeper-%i.log
+StandardError=append:/var/log/usecert-keeper-%i.log
+
+[Install]
+WantedBy=multi-user.target

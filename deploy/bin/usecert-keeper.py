@@ -35,6 +35,7 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 import lighter
@@ -77,19 +78,35 @@ class Keeper:
             raise RuntimeError("cast %s: %s" % (args[0], (r.stderr or r.stdout).strip()[:300]))
         return r.stdout
 
+    @staticmethod
+    def _http(req):
+        """urlopen with backoff on the failures that are the SERVER's, not ours: 429 and 5xx from
+        the chain RPC or the venue, and network errors. Six keepers share one IP and the RPC
+        rate-limits it; one 429 mid-hedge used to abort handle() after the order was placed."""
+        delay = 2
+        for attempt in range(6):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    return json.load(r)
+            except urllib.error.HTTPError as e:
+                if e.code != 429 and e.code < 500 or attempt == 5:
+                    raise
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                if attempt == 5:
+                    raise
+            time.sleep(delay)
+            delay = min(delay * 2, 30)
+
     def _rpc(self, method, params):
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
-        req = urllib.request.Request(self.rpc, body, {"Content-Type": "application/json", "User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            out = json.load(r)
+        out = self._http(urllib.request.Request(self.rpc, body, {"Content-Type": "application/json",
+                                                                 "User-Agent": UA}))
         if "error" in out:
             raise RuntimeError("%s: %s" % (method, out["error"]))
         return out["result"]
 
     def _get(self, path):
-        req = urllib.request.Request(self.api + path, headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.load(r)
+        return self._http(urllib.request.Request(self.api + path, headers={"User-Agent": UA}))
 
     def _load_state(self, start_block):
         if os.path.exists(self.state_path):
@@ -172,6 +189,12 @@ class Keeper:
     def handle(self, rid, base, side, limit_px18):
         key = str(rid)
         rec = self.state["receipts"].get(key)
+        if rec is not None and rec["status"] in ("filled", "FILLED_BUT_UNSETTLED_needs_human") \
+                and "fill_px18" in rec:
+            # The one mid-flight state that is SAFE to resume: the venue already confirmed the full
+            # fill and its price is journaled, so finishing means settling, never ordering again.
+            self._settle_journaled(rid, key, int(rec["fill_px18"]))
+            return
         if rec is not None:
             if rec["status"] not in ("settled", "unfilled_left_for_refund"):
                 log("receipt %d is '%s' from an earlier run - NOT retrying; needs a human" % (rid, rec["status"]))
@@ -206,11 +229,24 @@ class Keeper:
 
         deadline = time.time() + self.fill_timeout
         pos1, entry1 = pos0, entry0
+        seen = False
         while time.time() < deadline:
             time.sleep(5)
-            pos1, entry1 = self.position()
+            try:
+                pos1, entry1 = self.position()
+            except Exception as e:                                   # noqa: BLE001
+                log("receipt %d: position read failed, still polling: %s" % (rid, e))
+                continue
+            seen = True
             if pos1 - pos0 >= base:
                 break
+        if not seen:
+            # Not one read succeeded after the order left. "Unfilled" would be a guess, and the
+            # wrong guess refunds a user while an unsettled hedge stays open.
+            self.state["receipts"][key].update(status="PLACED_UNCONFIRMED_needs_human")
+            self._save()
+            log("receipt %d: order placed but the venue could not be read - needs a human" % rid)
+            return
         filled = pos1 - pos0
         if filled < base:
             status = "unfilled_left_for_refund" if filled == 0 else "PARTIAL_needs_human"
@@ -224,16 +260,34 @@ class Keeper:
         notional0 = pos0 * entry0
         fill_px = (notional1 - notional0) / filled
         fill_px18 = int(round(fill_px * 10 ** 6)) * 10 ** 12
-        self.state["receipts"][key].update(status="filled", filled=filled, fill_px=fill_px)
+        self.state["receipts"][key].update(status="filled", filled=filled, fill_px=fill_px,
+                                           fill_px18=str(fill_px18))
         self._save()
         log("receipt %d: filled %d at %.4f" % (rid, filled, fill_px))
+        self._settle_journaled(rid, key, fill_px18)
 
-        try:
-            h = self.settle(rid, fill_px18)
-        except Exception as e:                                       # noqa: BLE001
-            self.state["receipts"][key].update(status="FILLED_BUT_UNSETTLED_needs_human", error=str(e)[:300])
+    def _settle_journaled(self, rid, key, fill_px18):
+        """Settle a receipt whose full fill the venue has confirmed. Retried, because settleMint is
+        safe to resend: a second attempt after one that actually landed reverts, and the receipt
+        then reads closed on chain, which is the proof it settled."""
+        err = None
+        for attempt in range(3):
+            try:
+                h = self.settle(rid, fill_px18)
+                break
+            except Exception as e:                                   # noqa: BLE001
+                err = e
+                time.sleep(10)
+                try:
+                    if not self.receipt_open(rid):
+                        h = "(closed on chain after: %s)" % str(e)[:80]
+                        break
+                except Exception:                                    # noqa: BLE001
+                    pass
+        else:
+            self.state["receipts"][key].update(status="FILLED_BUT_UNSETTLED_needs_human", error=str(err)[:300])
             self._save()
-            log("receipt %d: FILLED but settle failed: %s" % (rid, e))
+            log("receipt %d: FILLED but settle failed 3 times (retried next pass): %s" % (rid, err))
             return
         self.state["receipts"][key].update(status="settled", settle_tx=h)
         self._save()
