@@ -1,0 +1,49 @@
+#!/bin/bash
+# Turn a freshly deployed, bootstrapped vault into a keeper-mode vault. Governance key.
+#
+#   usecert-keeper-setup VAULT PUBKEY [API_KEY_INDEX]
+#
+# PUBKEY is the public half of a key generated ON THE KEEPER SERVER with
+#   lighter-ops.py genkey KEYFILE <vault account index> <api key index>
+# so the private half never leaves it. This script never sees a private key but governance's.
+#
+# Order matters and each step is read back:
+#   1. setVenueApiKey    - needs the vault's venue account, so bootstrap must have run
+#   2. setVenueMinimums  - from the venue's own market list, never typed in
+#   3. enableKeeperHedging - last, so the vault never accepts a mint it cannot get hedged
+set -uo pipefail
+export PATH=/home/usecert/.foundry/bin:$PATH
+set -a; . /etc/usecert/mainnet-deployer.env; set +a
+
+V=${1:?vault address}; PUB=${2:?keeper public key}; IDX=${3:-3}
+R=https://rpc.mainnet.chain.robinhood.com
+API=https://api.rh.lighter.xyz
+n() { sed 's/ .*//'; }
+send() { local out; out=$(cast send "$V" "$@" --gas-limit 1500000 --private-key "$MAINNET_GOV_PK" --rpc-url "$R" 2>&1)
+  printf '%s' "$out" | grep -qE '^status\s+1' && printf 'ok' || { printf 'FAIL %s' "$(printf '%s' "$out" | grep -oE 'CertVault_[A-Za-z]+|Error:.*' | head -1)"; return 1; }; }
+
+[ "$(cast call "$V" 'bootstrapped()(bool)' --rpc-url "$R")" = "true" ] || { echo "vault not bootstrapped - run usecert-mainnet-bootstrap first"; exit 1; }
+[ "$(cast call "$V" 'keeperHedging()(bool)' --rpc-url "$R")" = "false" ] || { echo "keeper mode already on"; exit 1; }
+ACCT=$(cast call "$V" 'lighterAccountIndex()(uint48)' --rpc-url "$R" | n)
+MKT=$(cast call "$V" 'cfg()(address,uint16,uint8,uint16,uint8,uint256,uint256,uint256,uint256,uint256)' --rpc-url "$R" | sed -n 4p | n)
+echo "vault $V  venue account $ACCT  market $MKT"
+
+# The venue's minimums for THIS market, read live.
+read -r MINBASE MINQUOTE <<<"$(curl -s --max-time 20 "$API/api/v1/orderBookDetails?market_id=$MKT" | python3 -c "
+import json,sys
+b=json.load(sys.stdin)['order_book_details'][0]
+sd=int(b.get('size_decimals', b.get('supported_size_decimals', 4)))
+print(round(float(b['min_base_amount'])*10**sd), int(float(b['min_quote_amount'])*1e18))")"
+echo "venue minimums: base $MINBASE units, notional $MINQUOTE (18dp)"
+
+echo "1. setVenueApiKey($IDX)      $(send 'setVenueApiKey(uint8,bytes)' "$IDX" "$PUB")" || exit 1
+echo "2. setVenueMinimums          $(send 'setVenueMinimums(uint256,uint256)' "$MINBASE" "$MINQUOTE")" || exit 1
+echo "3. enableKeeperHedging       $(send 'enableKeeperHedging()')" || exit 1
+
+echo
+echo "read back:"
+echo "  keeperHedging      $(cast call "$V" 'keeperHedging()(bool)' --rpc-url "$R")"
+echo "  venueMinBase       $(cast call "$V" 'venueMinBase()(uint256)' --rpc-url "$R" | n)"
+echo "  venueMinNotional18 $(cast call "$V" 'venueMinNotional18()(uint256)' --rpc-url "$R" | n)"
+echo "Now confirm FROM THE KEEPER SERVER that the venue accepts the key:"
+echo "  lighter-ops.py check KEYFILE $API"

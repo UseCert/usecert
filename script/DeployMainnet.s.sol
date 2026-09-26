@@ -393,5 +393,21 @@ contract DeployMainnet is DeployTestnet {
                 bufferMintSlow18: 30_000e18
             })
         );
+
+        // ONE VAULT AT A TIME. The first two mainnet deploys created and seeded all six vaults
+        // before a single hedge had been proven, and every one of them was broken the same way.
+        // MAINNET_ONLY=<symbol> keeps exactly that asset, so the first deploy of a new design is
+        // one vault by construction rather than by someone remembering. Unset = all six.
+        string memory only = vm.envOr("MAINNET_ONLY", string(""));
+        if (bytes(only).length != 0) {
+            uint256 keep = type(uint256).max;
+            for (uint256 i = 0; i < assets.length; ++i) {
+                if (keccak256(bytes(assets[i].symbol)) == keccak256(bytes(only))) keep = i;
+            }
+            if (keep == type(uint256).max) revert DeployMainnet_AnswerRequired("MAINNET_ONLY names no asset");
+            AssetParams memory kept = assets[keep];
+            delete assets;
+            assets.push(kept);
+        }
     }
 }
