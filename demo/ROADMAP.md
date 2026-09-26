@@ -366,46 +366,46 @@ address book that a user can verify against the explorer.
 
 ---
 
-### 3.5 Publish verified sources on the explorer — **mostly done 2026-09-22**
+### 3.5 Publish verified sources on the explorer — **S** — ✅ done 2026-09-25 (26/26)
 
-None of the contracts were verified. Eight now are, submitted with `forge verify-contract`
-against Blockscout from this repo at `4a3dd5b`:
+Every contract in the deployment is now verified on Blockscout. `git grep` the address and
+the explorer shows you the source it was compiled from.
 
-| Contract | Address |
-|---|---|
-| `SolvencyRegistry` | `0xf0BA4fbc…a61c` |
-| `CapacityOracle` | `0xdB57D993…36C0` |
-| `CertOracle` (uTSLA) | `0xc3B2e8A6…3141` |
-| `CertVault` (uTSLA) | `0x31d6Ffd3…E105` |
-| `BufferBook` (uTSLA) | `0xcFd8Df3E…6d66` |
-| `CertFactory` | `0xD79e8311…C3ca` |
-| `TestFaucet` | `0x1E4331A0…c8Fc` |
-| `LighterSim` | `0x563fe254…1c39` |
+**This item had been recorded as "mostly done — three remain". It was not.** That count only
+ever considered the shared contracts and the uTSLA mirror. uSPY, uQQQ and uNVDA each have five
+contracts and **none of their four core contracts were verified** — including the `Certificate`
+tokens holders actually own. The true starting position was 14 of 26, not 23 of 26.
 
-That the source matched the deployed bytecode at all is a useful result on its own: it
-confirms `deployments/46630.json` describes what is actually running.
+Twelve contracts verified this pass: `CertVault`, `CertOracle`, `Certificate` and `BufferBook`
+for each of uSPY, uQQQ and uNVDA.
 
-**Three remain.** `Certificate` submitted but has not landed; `TestUSDG` is reported as
-already verified by `forge` while the v2 API still returns `is_verified: false`; and
-`ReplayAggregator` fails outright. `Certificate` matters most of the three — it is the token
-holders actually own.
+**Recovering the constructor arguments.** Neither broadcast file in this repo is usable — one
+holds an Anvil run, the other the previous deployment — so the chain was the only source. For
+`CertVault` and `CertOracle` the creation input is `creationCode || abi.encode(args)`, and the
+artifact supplies the creation code, so the tail is the arguments.
 
-Two caveats worth recording. Blockscout reports these as a **partial match**, so the
-metadata hash differs even though the runtime bytecode agrees; a full match needs the exact
-compiler metadata settings used at deploy. And constructor arguments had to be recovered from
-each creation transaction, because `broadcast/DeployTestnet.s.sol/46630/run-latest.json`
-holds an Anvil run and `AddMirror`'s holds the *previous* deployment. Keeping a real
-broadcast record for the deployment that is live would make the next verification a
-one-liner — and is the same provenance gap as 0.3 and 3.4.
+`Certificate` and `BufferBook` could not be recovered that way at all: `CertVault` creates both
+with `CREATE` from inside its own constructor (`CertVault.sol:465-466`), so their arguments
+appear in no transaction's calldata. They were **derived** from values that are themselves on
+chain rather than guessed — `Certificate(name_, symbol_, address(this))` where `name_` and
+`symbol_` are the last two fields of the vault's own recovered arguments, and
+`BufferBook(address(this), 200)` where 200 is a literal at the call site. That the explorer
+accepted all six is the check on that derivation: a wrong argument fails to match the deployed
+bytecode.
 
-## Suggested order
+**Two measurement traps worth recording, because both produced a confident wrong answer.**
 
-Phase 0 is four small, independent changes — do them in one pass.
+`is_verified` on the v2 API is not reliable. `TestUSDG`, and every `ReplayAggregator`, return
+`is_verified: false` while the same endpoint serves their full source. Counting that flag gave
+17 unverified when the real number was 12. Presence of `source_code` is the signal that matches
+what a reader actually gets.
 
-Do **0.0 first** — it is one line, and 2.1 is worthless without it.
+And the submission script reported **12 of 12 FAILED** while all twelve succeeded: it grepped
+forge's output for "successfully verified", and a successful submission prints a GUID and a URL
+instead. The status was only settled by re-reading the explorer, which is the thing that was
+being claimed in the first place.
 
-Then **2.1 out of order**, ahead of the rest of Phase 1: minting is off right now, and no
-amount of correct copy matters on a protocol nobody can mint from.
-
-Then Phase 1, taking 1.3 / 1.4 / 1.5 as one editorial session rather than three, since all
-three are the same question — what does the project claim, and in what tense.
+**Still outstanding:** Blockscout reports these as a **partial match**, so the metadata hash
+differs even though the runtime bytecode agrees. A full match needs the exact compiler metadata
+settings used at deploy. Keeping a real broadcast record for the live deployment would make the
+next verification a one-liner, and is the same provenance gap as 0.3 and 3.4.
