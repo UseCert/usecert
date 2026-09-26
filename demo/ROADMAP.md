@@ -1707,6 +1707,36 @@ horizontal overflow. The one failing external link was X returning 403 to bots.
 * **Undeployed fee language.** The funding paragraph on the vault pages says the remainder
   "becomes a transparent holding fee" past a threshold. No fee pass-through is deployed.
 
+### 6.26 UseCert's own event indexer — ✅ 2026-09-26 (`bf23f37`; front end `6b67658`)
+
+**Before.** Activity, recent flows and My receipts depended only on the public Blockscout
+index. It is a third party whose field names had already silently dropped every two-step mint
+once (6.21).
+
+**`usecert-indexer`** runs on France, a pass every 12 s.
+
+* **One call covers all six vaults.** Each block range is one `eth_getLogs` over all six vault
+  addresses, for the eight flow events.
+* **Decoding.** Events are decoded from their signatures by fixed word positions. A log of the
+  wrong shape is dropped and counted. Timestamps come from the chain.
+* **Output.** One Blockscout-shaped file per vault, served same-origin at `/data/logs/`, with no
+  directory listing. The site's single parser therefore stays the source of truth.
+* **Start block.** It starts at a fixed block: the public RPC is not an archive node, so a
+  deploy block cannot be searched for.
+* **Cost.** A caught-up pass is one RPC call.
+
+**Checked against the explorer.** 24 of 24 events, with every transaction, log index, decoded
+value and timestamp identical, and 0 dropped.
+
+**Site.** It reads the indexer first. It falls back to Blockscout when the indexer is
+unreachable or more than 5 minutes behind, all vaults from one source, and the tag names which
+source answered. Verified live:
+
+* normal path: 6 indexer requests, 0 explorer requests;
+* with `/data/logs/` blocked: it falls back and shows the same 24 rows under "Explorer index".
+
+**Watched.** `usecert-health-mainnet` alerts if the files go stale.
+
 ---
 
 ## Keeping the public page in sync
