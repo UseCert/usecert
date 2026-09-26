@@ -7,6 +7,7 @@ import { MARKET_INDEX_UNVERIFIED_NOTE, isMarketIndexVerified } from "@/chain/use
 import { cn } from "@/lib/utils";
 import { SourcifyEvidence, SourcifySummary } from "./contracts/Sourcify";
 import { INSURANCE_ADDRESS } from "@/chain/insurance";
+import { CERT_STAKING_ADDRESS } from "@/chain/certStaking";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -64,6 +65,11 @@ const SHARED_ROWS: Row[] = [
           label: "InsuranceStaking",
           address: INSURANCE_ADDRESS,
           note: "The insurance pool: stakers' USDG, drawn into a vault only after a public, capped, Safe-proposed draw. Unaudited; deposits capped at 10,000 USDG.",
+        },
+        {
+          label: "CertStaking",
+          address: CERT_STAKING_ADDRESS,
+          note: "CERT staking: a share of the buyback fund's fee income, paid in USDG and streamed over 7 days. Never drawn. Unaudited; stake capped at 10,000,000 CERT.",
         },
       ]),
 ];
