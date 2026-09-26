@@ -1633,6 +1633,51 @@ The same false sentence in "Who pays what, when" is fixed too, and the Chinese u
 **Axis labels (`62c4b35`).** Below $100 the solvency axis now shows cents. The compact format
 repeated whole-dollar labels ($2 $2 $1 $1).
 
+### 6.24 Fewer RPC calls, Montréal retired from UseCert, France backed up — ✅ 2026-09-26 (`2522862`, `54d09f5`, `f2198b6`)
+
+**RPC load.** Six keepers, the signer and the recorder share one IP. The public RPC answered 429:
+12 keeper passes failed in 6 h, and 2 signer cycles were lost to an unchecked empty `cast`
+result.
+
+* **Signer.** Its twelve reads a cycle are now one Multicall3 `aggregate3` call with backoff.
+  - Checked against the old path on the live chain before switching: 18 of 18 values and the
+    block timestamp are identical, and the served bundles are field-identical.
+  - A cycle takes 5–6 s instead of about 20, so a bundle reaches the site with more of its
+    60 s left.
+* **Keepers.** The idle recall check ran two `cast` calls on every 10 s pass. It is now one
+  `eth_call` with backoff; the second read only happens when something is owed.
+  `deploy/tests/test_keeper_recall.py` covers 4 cases. Rolled to uTSLA first, then the other
+  five.
+
+**Montréal.** Its UseCert services were testnet leftovers serving nobody.
+
+* `usecert-web`, `usecert-signer` (failing every cycle) and `usecert-keeper` are disabled, not
+  deleted.
+* The status job no longer lists them, and no longer reads testnet: six RPC calls a minute,
+  48 s a run, now about 5 s.
+* Still there, and needed:
+  - use-cert.com mail (the MX record points to Montréal);
+  - the forward for stale DNS;
+  - monitor.use-cert.com;
+  - the uptime monitor, DB backups and host updates.
+* The `usecert` database there is empty (no tables). UseCert never used a DB.
+
+**France is backed up.**
+
+* **What and when.** `usecert-backup-france` runs at 02:30 UTC. It archives the state that git
+  cannot rebuild: journals, the six venue keys, the attester env, the book, the history, the
+  tokens, units and tools.
+* **Torn copies can't ship.** Every JSON file is re-parsed from the archive before it is sent.
+* **Encryption.** openssl CMS, AES-256, to an RSA-4096 certificate. The private key is on
+  neither host; the owner holds it.
+* **Transport.** Pushed with a key restricted to one forced command on Montréal. That command
+  checks the file is CMS and keeps 14. No shell, no commands, no forwarding: sshd logged the
+  refusal.
+* **Host key.** Montréal's host key is pinned from the fingerprint already trusted locally.
+* **Tested by restoring.** Decrypted with the offline key: 85 files, 6 of 6 venue keys, 6 of 6
+  journals, attester env, book.
+* **Watched.** `usecert-health-mainnet` alerts if the last confirmed copy is over 36 h old.
+
 ---
 
 ## Keeping the public page in sync
