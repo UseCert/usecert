@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""Build the unlisted roadmap update pages: one page per item of demo/ROADMAP.md, plus an index.
+
+    usecert-roadmap-pages --roadmap demo/ROADMAP.md --map deploy/roadmap-pages.json \
+        --tokens TOKENS.json --shots DIR [--shots DIR ...] --git REPO [--git REPO ...] --out OUT
+
+Each page is served at https://use-cert.com/u/<token>/, where <token> is 128 random bits. Nothing
+on the site links to them, robots are told not to index them, and item pages do not link to each
+other or to the index, so sharing one update shares that update only.
+
+The tokens file is created on first run and only ever extended: an item keeps its link for good.
+It must not be committed - this repository is shared, and a token in it is a published link.
+The web host keeps the canonical copy at /etc/usecert/roadmap-tokens.json.
+
+Content comes from ROADMAP.md verbatim (converted from Markdown). Screenshots and commit links
+come from roadmap-pages.json; each commit is resolved against the given git repositories and
+linked on GitHub by its full hash.
+"""
+import argparse
+import html
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+
+REPO_URL = "https://github.com/UseCert/usecert"
+
+
+# ------------------------------------------------------------------------ markdown (subset)
+def inline(t):
+    t = html.escape(t, quote=False)
+    codes = []
+
+    def keep(m):
+        codes.append("<code>%s</code>" % m.group(1))
+        return "\x00%d\x00" % (len(codes) - 1)
+
+    t = re.sub(r"`([^`]+)`", keep, t)
+    t = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2" rel="noreferrer">\1</a>', t)
+    t = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", t)
+    t = re.sub(r"~~(.+?)~~", r"<s>\1</s>", t)
+    t = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<em>\1</em>", t)
+    return re.sub(r"\x00(\d+)\x00", lambda m: codes[int(m.group(1))], t)
+
+
+def md(lines):
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        l = lines[i]
+        if not l.strip():
+            i += 1
+            continue
+        if l.startswith("```"):
+            j = i + 1
+            while j < n and not lines[j].startswith("```"):
+                j += 1
+            out.append("<pre><code>%s</code></pre>" % html.escape("\n".join(lines[i + 1:j])))
+            i = j + 1
+            continue
+        if l.startswith("|"):
+            rows = []
+            while i < n and lines[i].startswith("|"):
+                rows.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
+                i += 1
+            head, body = rows[0], [r for r in rows[1:] if not all(re.fullmatch(r":?-+:?", c or "-") for c in r)]
+            th = "".join("<th>%s</th>" % inline(c) for c in head) if any(head) else ""
+            trs = "".join("<tr>%s</tr>" % "".join("<td>%s</td>" % inline(c) for c in r) for r in body)
+            out.append('<div class="tbl"><table>%s<tbody>%s</tbody></table></div>'
+                       % ("<thead><tr>%s</tr></thead>" % th if th else "", trs))
+            continue
+        if l.startswith(">"):
+            q = []
+            while i < n and lines[i].startswith(">"):
+                q.append(lines[i][1:].lstrip())
+                i += 1
+            out.append("<blockquote>%s</blockquote>" % md(q))
+            continue
+        if re.match(r"#{4,6} ", l):
+            out.append("<h3>%s</h3>" % inline(l.lstrip("#").strip()))
+            i += 1
+            continue
+        if re.match(r"\s*([*-]|\d+\.) ", l):
+            j = i
+            block = []
+            while j < n and (lines[j].strip() == "" and j + 1 < n and re.match(r"\s+\S|\s*([*-]|\d+\.) ", lines[j + 1])
+                             or re.match(r"\s*([*-]|\d+\.) ", lines[j]) or (lines[j].startswith(" ") and lines[j].strip())):
+                block.append(lines[j])
+                j += 1
+            out.append(lists(block))
+            i = j
+            continue
+        p = []
+        while i < n and lines[i].strip() and not re.match(r"(```|\||>|#{4,6} |\s*([*-]|\d+\.) )", lines[i]):
+            p.append(lines[i].strip())
+            i += 1
+        out.append("<p>%s</p>" % inline(" ".join(p)))
+    return "\n".join(out)
+
+
+def lists(block):
+    """Nested bullet / numbered lists by indentation; continuation lines join their item."""
+    html_out, stack = [], []          # stack of (indent, tag)
+    item_open = False
+    for l in block:
+        if not l.strip():
+            continue
+        m = re.match(r"(\s*)([*-]|\d+\.) (.*)", l)
+        if m:
+            ind, tag, text = len(m.group(1)), ("ol" if m.group(2)[0].isdigit() else "ul"), m.group(3)
+            while stack and stack[-1][0] > ind:
+                html_out.append("</li></%s>" % stack.pop()[1])
+            if not stack or stack[-1][0] < ind:
+                html_out.append("<%s>" % tag)
+                stack.append((ind, tag))
+            elif item_open:
+                html_out.append("</li>")
+            html_out.append("<li>" + inline(text))
+            item_open = True
+        else:
+            html_out.append(" " + inline(l.strip()))
+    while stack:
+        html_out.append("</li></%s>" % stack.pop()[1])
+    return "".join(html_out)
+
+
+# ------------------------------------------------------------------------ roadmap parsing
+def parse(path):
+    phase, items, cur = None, [], None
+    for raw in open(path, encoding="utf-8").read().replace("\r", "").split("\n"):
+        if raw.startswith("## "):
+            if cur:
+                items.append(cur)
+                cur = None
+            phase = raw[3:].strip()
+            continue
+        m = re.match(r"### (\d+\.\d+[a-z]?) (.*)", raw)
+        if m:
+            if cur:
+                items.append(cur)
+            cur = {"id": m.group(1), "head": m.group(2).strip(), "phase": phase, "body": []}
+            continue
+        if cur is not None:
+            if raw.strip() == "---":
+                items.append(cur)
+                cur = None
+                continue
+            cur["body"].append(raw)
+    if cur:
+        items.append(cur)
+    return [it for it in items if (it["phase"] or "").startswith("Phase")]
+
+
+def status(head):
+    h = head
+    if "SUPERSEDED" in h:
+        return "superseded", "Superseded"
+    if "BLOCKING" in h or "blocked" in h.lower():
+        return "blocked", "Blocked"
+    if "✅" in h:
+        return "done", "Done"
+    if "🟡" in h or "partly" in h.lower():
+        return "partial", "Partly done"
+    return "open", "Open"
+
+
+def title_of(head):
+    return re.split(r" — ", head)[0].strip()
+
+
+def meta_of(head):
+    parts = re.split(r" — ", head)[1:]
+    return " · ".join(re.sub(r"[*✅🟡]", "", p).strip() for p in parts if p.strip())
+
+
+# ------------------------------------------------------------------------ commits
+def resolve(short, repos):
+    for r in repos:
+        p = subprocess.run(["git", "-C", r, "show", "-s", "--format=%H|%ad|%s", "--date=short", short],
+                           capture_output=True, text=True)
+        if p.returncode == 0 and p.stdout.strip():
+            return p.stdout.strip().split("|", 2)
+    sys.exit("commit %s not found in %s" % (short, repos))
+
+
+# ------------------------------------------------------------------------ page
+CSS = """
+:root{--ink:#0b0c0b;--deep:#111311;--line:#232823;--white:#f2f4f2;--silver:#c5ccc5;--dim:#8d978d;--green:#b9e3a8;--warn:#e7c77a;--red:#e79a8a}
+*{box-sizing:border-box}html{background:var(--ink)}
+body{margin:0;background:var(--ink);color:var(--silver);font:16px/1.65 Geist,Inter,ui-sans-serif,system-ui,sans-serif;padding-inline:16px}
+main{max-width:980px;margin:0 auto;padding-block:48px 96px}
+a{color:var(--white);text-underline-offset:3px}a:hover{color:var(--green)}
+.eyebrow{font:500 11px/1.4 "Geist Mono",ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+h1{color:var(--white);font-weight:600;letter-spacing:-.03em;line-height:1.05;font-size:clamp(28px,5vw,46px);margin:.4em 0 .5em;text-wrap:balance}
+h2{color:var(--white);font:500 12px/1.4 "Geist Mono",ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;margin:56px 0 16px;padding-top:16px;border-top:1px solid var(--line)}
+h3{color:var(--white);font-size:17px;margin:28px 0 8px}
+p,li{max-width:72ch}strong{color:var(--white)}
+code{font:13.5px "Geist Mono",ui-monospace,monospace;background:var(--deep);border:1px solid var(--line);padding:1px 5px;border-radius:3px;color:var(--white);word-break:break-word}
+pre{background:var(--deep);border:1px solid var(--line);padding:14px 16px;overflow-x:auto}pre code{border:0;padding:0;background:none}
+blockquote{margin:20px 0;padding:4px 18px;border-left:2px solid var(--warn);background:var(--deep)}
+.tbl{overflow-x:auto;margin:18px 0}table{border-collapse:collapse;font-size:14px;min-width:60%}
+th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}th{color:var(--white);background:var(--deep);font-weight:500}
+.pill{display:inline-flex;align-items:center;gap:8px;font:500 11px/1 "Geist Mono",ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--line);padding:7px 10px;border-radius:999px}
+.pill i{width:7px;height:7px;border-radius:50%;background:var(--dim)}
+.done i{background:var(--green)}.partial i{background:var(--warn)}.blocked i{background:var(--red)}.open i{background:var(--dim)}.superseded i{background:#555}
+.meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:28px}
+.meta span.m{font:12px "Geist Mono",ui-monospace,monospace;color:var(--dim)}
+figure{margin:0 0 30px}figure img{display:block;max-width:100%;height:auto;border:1px solid var(--line);background:var(--deep)}
+figcaption{font:12px/1.6 "Geist Mono",ui-monospace,monospace;color:var(--dim);margin-top:8px;max-width:90ch}
+.commits{list-style:none;padding:0;margin:0}.commits li{display:grid;grid-template-columns:auto auto 1fr;gap:6px 14px;padding:10px 0;border-bottom:1px solid var(--line);max-width:none}
+.commits code{white-space:nowrap}.commits .d{font:12px "Geist Mono",monospace;color:var(--dim);white-space:nowrap}
+@media (max-width:640px){.commits li{grid-template-columns:1fr}}
+.foot{margin-top:64px;font:12px/1.6 "Geist Mono",ui-monospace,monospace;color:var(--dim)}
+.idx{list-style:none;padding:0}.idx li{display:grid;grid-template-columns:4.2em 1fr auto;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);max-width:none;align-items:baseline}
+.idx .n{font:13px "Geist Mono",monospace;color:var(--dim)}
+@media (max-width:640px){.idx li{grid-template-columns:3.4em 1fr}.idx .pill{grid-column:2}}
+"""
+
+HEAD = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<meta name="referrer" content="no-referrer">
+<title>%s</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<style>%s</style></head><body><main>"""
+
+FOOT = """<p class="foot">UseCert delivery record. Unlisted: this page is reachable only by its link.
+Generated from demo/ROADMAP.md at %s.</p></main></body></html>"""
+
+
+def build(a):
+    items = parse(a.roadmap)
+    mp = json.load(open(a.map, encoding="utf-8"))["items"]
+    toks = json.load(open(a.tokens)) if os.path.exists(a.tokens) else {"index": None, "items": {}}
+    toks["index"] = toks.get("index") or secrets.token_urlsafe(16)
+    for it in items:
+        toks["items"].setdefault(it["id"], secrets.token_urlsafe(16))
+    with open(a.tokens + ".tmp", "w") as f:
+        json.dump(toks, f, indent=1)
+    os.replace(a.tokens + ".tmp", a.tokens)
+
+    gen_at = subprocess.run(["git", "-C", a.git[0], "rev-parse", "--short=12", "HEAD"],
+                            capture_output=True, text=True).stdout.strip() or "unknown"
+    if os.path.isdir(a.out):
+        shutil.rmtree(a.out)
+    rows = []
+    for it in items:
+        tok = toks["items"][it["id"]]
+        d = os.path.join(a.out, "u", tok)
+        os.makedirs(d)
+        cls, label = status(it["head"])
+        title = title_of(it["head"])
+        extra = mp.get(it["id"], {})
+        body = [HEAD % (html.escape("%s %s | UseCert" % (it["id"], re.sub(r"[`*]", "", title))), CSS)]
+        body.append('<p class="eyebrow">%s &nbsp;·&nbsp; item %s</p>' % (html.escape(it["phase"]), it["id"]))
+        body.append("<h1>%s</h1>" % inline(title))
+        m = meta_of(it["head"])
+        body.append('<div class="meta"><span class="pill %s"><i></i>%s</span>%s</div>'
+                    % (cls, label, '<span class="m">%s</span>' % inline(m) if m else ""))
+        body.append(md(it["body"]))
+        shots = extra.get("shots", [])
+        if shots:
+            body.append("<h2>Evidence</h2>")
+            for name, cap in shots:
+                src = next((os.path.join(s, name + ".jpg") for s in a.shots if os.path.exists(os.path.join(s, name + ".jpg"))), None)
+                if not src:
+                    sys.exit("missing screenshot %s for %s" % (name, it["id"]))
+                shutil.copy(src, os.path.join(d, name + ".jpg"))
+                body.append('<figure><a href="%s.jpg"><img src="%s.jpg" alt="%s" loading="lazy"></a>'
+                            "<figcaption>%s</figcaption></figure>"
+                            % (name, name, html.escape(cap, quote=True), html.escape(cap)))
+        commits = extra.get("commits", [])
+        if commits:
+            body.append("<h2>On GitHub</h2><ul class=\"commits\">")
+            for c in commits:
+                full, date, subj = resolve(c, a.git)
+                body.append('<li><a href="%s/commit/%s" rel="noreferrer"><code>%s</code></a><span class="d">%s</span><span>%s</span></li>'
+                            % (REPO_URL, full, full[:7], date, html.escape(subj)))
+            body.append("</ul>")
+        body.append(FOOT % gen_at)
+        open(os.path.join(d, "index.html"), "w", encoding="utf-8").write("\n".join(body))
+        rows.append((it, tok, cls, label, title))
+
+    d = os.path.join(a.out, "u", toks["index"])
+    os.makedirs(d)
+    idx = [HEAD % ("UseCert delivery record", CSS),
+           '<p class="eyebrow">UseCert · unlisted</p><h1>Delivery record</h1>',
+           "<p>Every item on the internal roadmap, each with its own page, evidence and commits. "
+           "Each link below opens one item; an item page does not link back here.</p>"]
+    phase = None
+    for it, tok, cls, label, title in rows:
+        if it["phase"] != phase:
+            if phase is not None:
+                idx.append("</ul>")
+            phase = it["phase"]
+            idx.append("<h2>%s</h2><ul class=\"idx\">" % html.escape(phase))
+        idx.append('<li><span class="n">%s</span><a href="/u/%s/">%s</a><span class="pill %s"><i></i>%s</span></li>'
+                   % (it["id"], tok, inline(title), cls, label))
+    idx.append("</ul>")
+    idx.append(FOOT % gen_at)
+    open(os.path.join(d, "index.html"), "w", encoding="utf-8").write("\n".join(idx))
+    print("built %d item pages + index into %s" % (len(rows), a.out))
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--roadmap", required=True)
+    ap.add_argument("--map", required=True)
+    ap.add_argument("--tokens", required=True)
+    ap.add_argument("--shots", action="append", required=True)
+    ap.add_argument("--git", action="append", required=True)
+    ap.add_argument("--out", required=True)
+    build(ap.parse_args())
