@@ -265,8 +265,7 @@ class Keeper:
         self.state["last_recall"] = time.time()
         self._save()
         log("recall: owed %d, vault holds %d, venue available %d -> recallMarginUpTo sent (%s)"
-            % (owed, have, avail, "ok" if any(l.split()[:2] == ["status", "1"] for l in out.split("
-")) else "REVERTED"))
+            % (owed, have, avail, "ok" if any(l.split()[:2] == ["status", "1"] for l in out.splitlines()) else "REVERTED"))
 
     def run_once(self):
         reqs = self.new_requests()
