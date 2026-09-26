@@ -10,6 +10,7 @@ usage: usecert-restore list
        usecert-restore show  <YYYY-MM-DD>
        usecert-restore verify <YYYY-MM-DD>
        usecert-restore run   <YYYY-MM-DD> <host|supabase> <dbname> [--into <newdbname>]
+       usecert-restore project <YYYY-MM-DD> <orion|qwilon> [--into <newdbname>]
 
 Restores default to a NEW database named <dbname>_restore so a bad restore cannot
 overwrite live data. Pass --into to choose the target explicitly.
@@ -43,6 +44,40 @@ case "${1:-}" in
     echo "  checksums: $(cd "$D" && sed -n "s/^  //p" MANIFEST-*.txt 2>/dev/null | sha256sum -c 2>/dev/null | grep -c ": OK") file(s) match the manifest"
     echo "$ok readable, $bad unreadable"
     [ "$bad" -eq 0 ]
+    ;;
+  project)
+    # ORDER MATTERS and is not obvious, which is why it lives here rather than in a
+    # runbook nobody reads when it is 3am:
+    #   1. prepare      - schemas and extensions. A --schema dump cannot carry these
+    #                     (they are database-level), and without them orion restores
+    #                     5 of 17 tables, every failure tracing to
+    #                     `extensions.uuid_generate_v4() does not exist`.
+    #   2. shared-auth  - auth + storage. Both projects' RLS policies reference auth,
+    #                     so skipping this restores the DATA but silently drops the
+    #                     policies: measured, 109 errors and 0 of 155 policies on
+    #                     qwilon. The tables look right and the security does not.
+    #   3. the project itself.
+    D="$BASE/${2:?date required}"; PROJ="${3:?orion or qwilon}"
+    TARGET="${PROJ}_restore"
+    [ "${4:-}" = "--into" ] && TARGET="${5:?target name}"
+    PREP=$(ls -1t "$D"/project-prepare-*.sql 2>/dev/null | head -1)
+    SHARED=$(ls -1t "$D"/project-shared-auth-*.dump 2>/dev/null | head -1)
+    F=$(ls -1t "$D"/project-$PROJ-*.dump 2>/dev/null | head -1)
+    [ -n "$F" ] || { echo "no dump for project $PROJ in $D"; exit 1; }
+    [ -n "$PREP" ] || { echo "no prepare file in $D - restore would lose the extensions"; exit 1; }
+
+    echo "restoring $PROJ -> $TARGET"
+    docker exec -i supabase-db psql -U postgres -c "CREATE DATABASE \"$TARGET\"" 2>/dev/null
+    echo "  1/3 prepare (schemas + extensions)"
+    docker exec -i supabase-db psql -U postgres -d "$TARGET" < "$PREP" >/dev/null 2>&1
+    echo "  2/3 shared auth + storage"
+    docker exec -i supabase-db pg_restore -U postgres -d "$TARGET" --no-owner --no-acl < "$SHARED" 2>&1 | grep -c "pg_restore: error" | sed 's/^/      errors: /'
+    echo "  3/3 $PROJ"
+    docker exec -i supabase-db pg_restore -U postgres -d "$TARGET" --no-owner --no-acl < "$F" 2>&1 | grep -c "pg_restore: error" | sed 's/^/      errors: /'
+    SCHEMA=$([ "$PROJ" = orion ] && echo orion || echo public)
+    echo "  tables:   $(docker exec supabase-db psql -U postgres -d "$TARGET" -tAc "SELECT count(*) FROM pg_tables WHERE schemaname='$SCHEMA'")"
+    echo "  policies: $(docker exec supabase-db psql -U postgres -d "$TARGET" -tAc "SELECT count(*) FROM pg_policies WHERE schemaname='$SCHEMA'")"
+    echo "done. inspect $TARGET before swapping it in."
     ;;
   run)
     D="$BASE/${2:?date required}"; KIND="${3:?host or supabase}"; DB="${4:?dbname}"
