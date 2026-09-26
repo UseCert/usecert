@@ -140,17 +140,22 @@ project claims, which is why they have sat.
 
 ### 1.1 Finish the collateral rename — **S** — ✅ done 2026-09-23
 
-All four occurrences of `USDC` outside the dashboard now read `USDG`:
+All four occurrences of `USDC` outside the dashboard now read `tUSDG`:
 
-- `src/pages/home/HowItWorks.tsx` — "LP uTSLA against USDG"
-- `src/pages/home/Testimonials.tsx` — "LP'd it against USDG"
-- `src/pages/learn/data.ts` — "cannot be LP'd against USDG"
-- `src/pages/roles/RolesAccordion.tsx` — "build uTSLA/USDG pairs"
+- `src/pages/home/HowItWorks.tsx` — "LP uTSLA against tUSDG"
+- `src/pages/home/Testimonials.tsx` — "LP'd it against tUSDG"
+- `src/pages/learn/data.ts` — "cannot be LP'd against tUSDG"
+- `src/pages/roles/RolesAccordion.tsx` — "build uTSLA/tUSDG pairs"
 
-`USDG`, not `tUSDG`. The split is deliberate: the dashboard shows live balances of the actual
-test token and keeps saying `tUSDG`, while these four describe what a certificate composes
-with, which on mainnet is USDG. Naming the test token in forward-looking copy would be the
-same error in the other direction.
+`tUSDG`, not `USDG`. These were first written as `USDG` on the reasoning that they describe
+what a certificate composes with, which on mainnet is USDG — and reading the deployed pages
+showed that was wrong. Every neighbouring sentence on those same pages already says `tUSDG`
+("Deposit tUSDG", "plus tUSDG margin", "redeems to tUSDG"), so "deposit tUSDG" followed by
+"LP against USDG" invites a reader to think there are two stablecoins here. The site
+describes this deployment; on this deployment there is one, and it is `tUSDG`.
+
+The one deliberate `USDG` outside the dashboard is `src/pages/Roadmap.tsx` — "Mainnet uses
+USDG" — which is a statement about mainnet and is correct.
 
 ### 1.2 Drop "the first holdable stock certificates" — **S** — ✅ done 2026-09-23
 
