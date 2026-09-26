@@ -1,0 +1,934 @@
+{
+ "_note": "Equity, ETF, FX and commodity markets ACTIVE on Lighter, Robinhood Chain mainnet, measured 2026-09-25 from mainnet.zklighter.elliot.ai/api/v1/orderBookDetails. 210 of 235 markets were active; this file is the non-crypto subset, which is what a UseCert mirror can be built on.",
+ "_warning": "marketIndex is IMMUTABLE on CertVault. Adding a mirror means deploying with the right id, not setting one afterwards. priceDecimals and sizeDecimals differ per market and _quantiseToVenue rounds size by 10**sizeDecimals, so copying a neighbour mirror gets orders quantised to the wrong lot.",
+ "_deployedToday": "uTSLA, uSPY, uQQQ, uNVDA - all four deployed on testnet against indices that do NOT match this list.",
+ "measuredAt": "2026-09-25",
+ "source": "https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails",
+ "count": 132,
+ "markets": [
+  {
+   "symbol": "AAOI",
+   "marketIndex": 207,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0500"
+  },
+  {
+   "symbol": "AAPL",
+   "marketIndex": 113,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.015"
+  },
+  {
+   "symbol": "AERO",
+   "marketIndex": 65,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "9.5"
+  },
+  {
+   "symbol": "AI",
+   "marketIndex": 232,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "20.0"
+  },
+  {
+   "symbol": "AMD",
+   "marketIndex": 138,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0100"
+  },
+  {
+   "symbol": "AMZN",
+   "marketIndex": 114,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.020"
+  },
+  {
+   "symbol": "ANSEM",
+   "marketIndex": 219,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "40.0"
+  },
+  {
+   "symbol": "APEX",
+   "marketIndex": 86,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "25.0"
+  },
+  {
+   "symbol": "ARC",
+   "marketIndex": 132,
+   "priceDecimals": 6,
+   "sizeDecimals": 0,
+   "minBaseAmount": "75"
+  },
+  {
+   "symbol": "ARM",
+   "marketIndex": 206,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0200"
+  },
+  {
+   "symbol": "ASML",
+   "marketIndex": 151,
+   "priceDecimals": 1,
+   "sizeDecimals": 5,
+   "minBaseAmount": "0.00350"
+  },
+  {
+   "symbol": "ASTER",
+   "marketIndex": 83,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "7.5"
+  },
+  {
+   "symbol": "AUDUSD",
+   "marketIndex": 106,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "7.5"
+  },
+  {
+   "symbol": "AVGO",
+   "marketIndex": 210,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0150"
+  },
+  {
+   "symbol": "AVNT",
+   "marketIndex": 82,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "55.0"
+  },
+  {
+   "symbol": "AXTI",
+   "marketIndex": 224,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0800"
+  },
+  {
+   "symbol": "AZTEC",
+   "marketIndex": 144,
+   "priceDecimals": 6,
+   "sizeDecimals": 0,
+   "minBaseAmount": "400"
+  },
+  {
+   "symbol": "BABA",
+   "marketIndex": 177,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0500"
+  },
+  {
+   "symbol": "BB",
+   "marketIndex": 211,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "0.70"
+  },
+  {
+   "symbol": "BE",
+   "marketIndex": 196,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0200"
+  },
+  {
+   "symbol": "BIO",
+   "marketIndex": 171,
+   "priceDecimals": 6,
+   "sizeDecimals": 0,
+   "minBaseAmount": "200"
+  },
+  {
+   "symbol": "BMNR",
+   "marketIndex": 123,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.250"
+  },
+  {
+   "symbol": "BOT",
+   "marketIndex": 185,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.200"
+  },
+  {
+   "symbol": "BYD",
+   "marketIndex": 200,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "2.00"
+  },
+  {
+   "symbol": "CAP",
+   "marketIndex": 212,
+   "priceDecimals": 6,
+   "sizeDecimals": 0,
+   "minBaseAmount": "100"
+  },
+  {
+   "symbol": "CBRS",
+   "marketIndex": 175,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0300"
+  },
+  {
+   "symbol": "CC",
+   "marketIndex": 101,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "55.0"
+  },
+  {
+   "symbol": "CHIP",
+   "marketIndex": 163,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "150.0"
+  },
+  {
+   "symbol": "COIN",
+   "marketIndex": 109,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.030"
+  },
+  {
+   "symbol": "CRCL",
+   "marketIndex": 121,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.065"
+  },
+  {
+   "symbol": "CRO",
+   "marketIndex": 73,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "95.0"
+  },
+  {
+   "symbol": "CRWV",
+   "marketIndex": 167,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0650"
+  },
+  {
+   "symbol": "CTR",
+   "marketIndex": 183,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "450.0"
+  },
+  {
+   "symbol": "CXMT",
+   "marketIndex": 217,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "0.70"
+  },
+  {
+   "symbol": "DATA",
+   "marketIndex": 34,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "30.00"
+  },
+  {
+   "symbol": "DELL",
+   "marketIndex": 187,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0095"
+  },
+  {
+   "symbol": "DRAM",
+   "marketIndex": 195,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.100"
+  },
+  {
+   "symbol": "EDGE",
+   "marketIndex": 157,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "8.5"
+  },
+  {
+   "symbol": "ETHFI",
+   "marketIndex": 64,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "9.0"
+  },
+  {
+   "symbol": "EURUSD",
+   "marketIndex": 96,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "5.0"
+  },
+  {
+   "symbol": "EWY",
+   "marketIndex": 166,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0300"
+  },
+  {
+   "symbol": "FF",
+   "marketIndex": 87,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "40.0"
+  },
+  {
+   "symbol": "FOLKS",
+   "marketIndex": 215,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "2.50"
+  },
+  {
+   "symbol": "GBPUSD",
+   "marketIndex": 97,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "4.0"
+  },
+  {
+   "symbol": "GEV",
+   "marketIndex": 218,
+   "priceDecimals": 1,
+   "sizeDecimals": 5,
+   "minBaseAmount": "0.00550"
+  },
+  {
+   "symbol": "GME",
+   "marketIndex": 176,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.250"
+  },
+  {
+   "symbol": "GOOGL",
+   "marketIndex": 116,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0150"
+  },
+  {
+   "symbol": "GRAM",
+   "marketIndex": 12,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "4.0"
+  },
+  {
+   "symbol": "GRASS",
+   "marketIndex": 52,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "15.0"
+  },
+  {
+   "symbol": "HOOD",
+   "marketIndex": 108,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.050"
+  },
+  {
+   "symbol": "IBM",
+   "marketIndex": 188,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0250"
+  },
+  {
+   "symbol": "INTC",
+   "marketIndex": 137,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.055"
+  },
+  {
+   "symbol": "IWM",
+   "marketIndex": 153,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0200"
+  },
+  {
+   "symbol": "KIOXIA",
+   "marketIndex": 225,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0150"
+  },
+  {
+   "symbol": "KORU",
+   "marketIndex": 226,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.300"
+  },
+  {
+   "symbol": "LINEA",
+   "marketIndex": 76,
+   "priceDecimals": 6,
+   "sizeDecimals": 0,
+   "minBaseAmount": "2000"
+  },
+  {
+   "symbol": "LIT",
+   "marketIndex": 120,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "1.00"
+  },
+  {
+   "symbol": "LITE",
+   "marketIndex": 178,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0060"
+  },
+  {
+   "symbol": "MEGA",
+   "marketIndex": 94,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "150.0"
+  },
+  {
+   "symbol": "MET",
+   "marketIndex": 95,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "25.0"
+  },
+  {
+   "symbol": "META",
+   "marketIndex": 117,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0080"
+  },
+  {
+   "symbol": "MNT",
+   "marketIndex": 63,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "9.5"
+  },
+  {
+   "symbol": "MON",
+   "marketIndex": 91,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "250.0"
+  },
+  {
+   "symbol": "MORPHO",
+   "marketIndex": 68,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "2.5"
+  },
+  {
+   "symbol": "MRNA",
+   "marketIndex": 228,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0350"
+  },
+  {
+   "symbol": "MRVL",
+   "marketIndex": 174,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0250"
+  },
+  {
+   "symbol": "MSFT",
+   "marketIndex": 115,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0100"
+  },
+  {
+   "symbol": "MSTR",
+   "marketIndex": 122,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0400"
+  },
+  {
+   "symbol": "MU",
+   "marketIndex": 164,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0060"
+  },
+  {
+   "symbol": "NATGAS",
+   "marketIndex": 158,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "2.00"
+  },
+  {
+   "symbol": "NBIS",
+   "marketIndex": 189,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0250"
+  },
+  {
+   "symbol": "NMR",
+   "marketIndex": 74,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "0.60"
+  },
+  {
+   "symbol": "NOK",
+   "marketIndex": 208,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.500"
+  },
+  {
+   "symbol": "NOW",
+   "marketIndex": 191,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0400"
+  },
+  {
+   "symbol": "NVDA",
+   "marketIndex": 110,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.025"
+  },
+  {
+   "symbol": "NZDUSD",
+   "marketIndex": 107,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "10.0"
+  },
+  {
+   "symbol": "ONDO",
+   "marketIndex": 38,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "15.0"
+  },
+  {
+   "symbol": "OPENAI",
+   "marketIndex": 192,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0035"
+  },
+  {
+   "symbol": "ORCL",
+   "marketIndex": 165,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0350"
+  },
+  {
+   "symbol": "OURA",
+   "marketIndex": 4096,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.100"
+  },
+  {
+   "symbol": "PAXG",
+   "marketIndex": 48,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0015"
+  },
+  {
+   "symbol": "PENDLE",
+   "marketIndex": 37,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "2.50"
+  },
+  {
+   "symbol": "PLTR",
+   "marketIndex": 111,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.030"
+  },
+  {
+   "symbol": "POL",
+   "marketIndex": 14,
+   "priceDecimals": 6,
+   "sizeDecimals": 0,
+   "minBaseAmount": "55"
+  },
+  {
+   "symbol": "PONS",
+   "marketIndex": 231,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "8.5"
+  },
+  {
+   "symbol": "PROVE",
+   "marketIndex": 57,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "30.0"
+  },
+  {
+   "symbol": "PUMP",
+   "marketIndex": 45,
+   "priceDecimals": 6,
+   "sizeDecimals": 0,
+   "minBaseAmount": "1500"
+  },
+  {
+   "symbol": "QCOM",
+   "marketIndex": 209,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0300"
+  },
+  {
+   "symbol": "QNT",
+   "marketIndex": 190,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.100"
+  },
+  {
+   "symbol": "QQQ",
+   "marketIndex": 129,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0075"
+  },
+  {
+   "symbol": "RAIL",
+   "marketIndex": 184,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "2.50"
+  },
+  {
+   "symbol": "RAY",
+   "marketIndex": 233,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "4.00"
+  },
+  {
+   "symbol": "RIVER",
+   "marketIndex": 126,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "4.500"
+  },
+  {
+   "symbol": "RKLB",
+   "marketIndex": 186,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0850"
+  },
+  {
+   "symbol": "ROBO",
+   "marketIndex": 149,
+   "priceDecimals": 6,
+   "sizeDecimals": 0,
+   "minBaseAmount": "650"
+  },
+  {
+   "symbol": "SHEIN",
+   "marketIndex": 230,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "1.00"
+  },
+  {
+   "symbol": "SKHY",
+   "marketIndex": 216,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0300"
+  },
+  {
+   "symbol": "SKR",
+   "marketIndex": 130,
+   "priceDecimals": 6,
+   "sizeDecimals": 0,
+   "minBaseAmount": "300"
+  },
+  {
+   "symbol": "SKY",
+   "marketIndex": 79,
+   "priceDecimals": 6,
+   "sizeDecimals": 0,
+   "minBaseAmount": "100"
+  },
+  {
+   "symbol": "SMIC",
+   "marketIndex": 202,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "0.70"
+  },
+  {
+   "symbol": "SNDK",
+   "marketIndex": 139,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0035"
+  },
+  {
+   "symbol": "SOXL",
+   "marketIndex": 197,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0500"
+  },
+  {
+   "symbol": "SOXS",
+   "marketIndex": 222,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.100"
+  },
+  {
+   "symbol": "SPCX",
+   "marketIndex": 194,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0350"
+  },
+  {
+   "symbol": "SPX",
+   "marketIndex": 42,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "10.0"
+  },
+  {
+   "symbol": "SPY",
+   "marketIndex": 128,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0070"
+  },
+  {
+   "symbol": "STABLE",
+   "marketIndex": 118,
+   "priceDecimals": 6,
+   "sizeDecimals": 0,
+   "minBaseAmount": "250"
+  },
+  {
+   "symbol": "STBL",
+   "marketIndex": 85,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "200.0"
+  },
+  {
+   "symbol": "STONK",
+   "marketIndex": 4095,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "25.0"
+  },
+  {
+   "symbol": "STRC",
+   "marketIndex": 156,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.055"
+  },
+  {
+   "symbol": "SYRUP",
+   "marketIndex": 44,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "25.0"
+  },
+  {
+   "symbol": "TSLA",
+   "marketIndex": 112,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0150"
+  },
+  {
+   "symbol": "TSM",
+   "marketIndex": 168,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0150"
+  },
+  {
+   "symbol": "TTWO",
+   "marketIndex": 179,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0250"
+  },
+  {
+   "symbol": "USDCAD",
+   "marketIndex": 100,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "4.0"
+  },
+  {
+   "symbol": "USDCHF",
+   "marketIndex": 99,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "6.5"
+  },
+  {
+   "symbol": "USDHKD",
+   "marketIndex": 198,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "0.70"
+  },
+  {
+   "symbol": "USDJPY",
+   "marketIndex": 98,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.035"
+  },
+  {
+   "symbol": "USDKRW",
+   "marketIndex": 105,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0040"
+  },
+  {
+   "symbol": "VVV",
+   "marketIndex": 69,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "0.20"
+  },
+  {
+   "symbol": "WDC",
+   "marketIndex": 223,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0150"
+  },
+  {
+   "symbol": "WEN",
+   "marketIndex": 214,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "0.75"
+  },
+  {
+   "symbol": "WLFI",
+   "marketIndex": 72,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "95.0"
+  },
+  {
+   "symbol": "WTI",
+   "marketIndex": 145,
+   "priceDecimals": 3,
+   "sizeDecimals": 3,
+   "minBaseAmount": "0.060"
+  },
+  {
+   "symbol": "XAG",
+   "marketIndex": 93,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "0.08"
+  },
+  {
+   "symbol": "XAU",
+   "marketIndex": 92,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0015"
+  },
+  {
+   "symbol": "XCU",
+   "marketIndex": 136,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "0.85"
+  },
+  {
+   "symbol": "XIAOMI",
+   "marketIndex": 203,
+   "priceDecimals": 4,
+   "sizeDecimals": 2,
+   "minBaseAmount": "1.50"
+  },
+  {
+   "symbol": "XPD",
+   "marketIndex": 146,
+   "priceDecimals": 1,
+   "sizeDecimals": 5,
+   "minBaseAmount": "0.00400"
+  },
+  {
+   "symbol": "XPL",
+   "marketIndex": 71,
+   "priceDecimals": 5,
+   "sizeDecimals": 1,
+   "minBaseAmount": "65.0"
+  },
+  {
+   "symbol": "XPT",
+   "marketIndex": 147,
+   "priceDecimals": 1,
+   "sizeDecimals": 5,
+   "minBaseAmount": "0.00300"
+  },
+  {
+   "symbol": "ZHIPU",
+   "marketIndex": 205,
+   "priceDecimals": 2,
+   "sizeDecimals": 4,
+   "minBaseAmount": "0.0550"
+  }
+ ]
+}
