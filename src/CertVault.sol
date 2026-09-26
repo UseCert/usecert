@@ -571,6 +571,10 @@ contract CertVault {
         IERC20(cfg.collateral).forceApprove(address(lighter), dust);
         lighter.deposit(address(this), cfg.collateralAssetIndex, cfg.routeType, dust);
         postedMargin += dust;
+        // K2: the dust is the protocol's own capital leaving the vault's balance for the venue, so
+        // spareCollateral() stops expecting to find it here. Floored: the dust need not have come
+        // from seedBuffer at all.
+        bufferCapital = _floorSub(bufferCapital, dust);
     }
 
     function lighterAccountIndex() public view returns (uint48) {
@@ -607,8 +611,9 @@ contract CertVault {
     ///      it holds" is not negative capacity, it is no capacity.
     ///
     ///      RESIDUAL, stated rather than hidden: escrow held for mint receipts that have neither
-    ///      settled nor been refunded is NOT netted out (there is no counter for it and adding one
-    ///      is more surface than this finding warrants), so during a settle window this reads high
+    ///      settled nor been refunded is NOT netted out (K2 added that counter, escrowOutstanding,
+    ///      for spareCollateral(); it is deliberately not wired in here, because doing so would
+    ///      move mint admission control, which K2 is not about), so during a settle window this reads high
     ///      by up to that escrow. It is bounded by settleWindow, and it is the harmless direction:
     ///      the same escrow is at the venue backing that receipt's own hedge, so it is not capital
     ///      standing behind nothing.
@@ -752,6 +757,8 @@ contract CertVault {
     function seedBuffer(uint256 amount) external {
         IERC20(cfg.collateral).safeTransferFrom(msg.sender, address(this), amount);
         buffer.accrue(address(this), int256(_to18(amount)));
+        // K2: first-loss capital, never fee income. spareCollateral() holds it back from sweepFees.
+        bufferCapital += amount;
     }
 
     // ---------------------------------------------------------------- mint
@@ -797,7 +804,11 @@ contract CertVault {
         _requireCapacity(notional18, px18);
 
         certificate.mint(msg.sender, certOut);
-        _postMargin(received - fee);
+        // K2: what _postMargin does NOT send to the venue stays here as these certificates' own
+        // float, and the fee is recorded as sweepable income. Nothing is transferred out: a mint
+        // never pushes fees anywhere (see sweepFees for why the flow is pull-only).
+        retainedBacking += received - fee - _postMargin(received - fee);
+        _accrueFee(fee);
         // Unchanged in effect, kept explicit: a mint too small to express as one venue tick now
         // quantises certOut to 0 and must revert rather than mint an unhedgeable certificate
         // (test_ATK_dustMintCannotCreateUnhedgedSupply). _hedge's own guard would catch it too;
@@ -871,6 +882,12 @@ contract CertVault {
         // did. Released in settleMint or stageRefund; see pendingMintCerts.
         pendingMintCerts += indicative;
         ++openMintReceipts;
+        // K2: the whole escrow is owed to this receipt (settle or refund) until one of them runs,
+        // so spareCollateral() holds all of it back - including the share about to go to the
+        // venue, which is conservative. The fee is income from this moment: a refund returns the
+        // escrow, never the fee.
+        escrowOutstanding += received - fee;
+        _accrueFee(fee);
 
         _postMargin(received - fee);
         if (keeperHedging) {
@@ -992,6 +1009,10 @@ contract CertVault {
 
         r.settled = true;
         --openMintReceipts;
+        // K2: the escrow stops being owed back and becomes certificate backing. Its venue share
+        // was posted at requestMint (same formula as _postMargin); the rest is float.
+        _releaseEscrow(r.escrow);
+        retainedBacking += r.escrow - r.escrow * cfg.targetMarginBps / 10_000;
 
         uint256 certOut = r.indicativeCerts;
         // The position enters the vault's ledger when it exists, not when it was asked for.
@@ -1144,6 +1165,8 @@ contract CertVault {
 
         r.settled = true;
         --openMintReceipts;
+        // K2: floored, never checked (see _releaseEscrow); after the funding check, like r.settled.
+        _releaseEscrow(amountOut);
         IERC20(cfg.collateral).safeTransfer(r.user, amountOut);
         emit MintRefunded(receiptId, r.user, amountOut);
     }
@@ -1229,6 +1252,10 @@ contract CertVault {
             postedMargin -= freed;
             marginExcess += freed;
         }
+        // K2 (Law 2): bookkeeping only, and both steps are total - _accrueFee saturates and
+        // _releaseBacking cannot underflow - so neither can revert a redemption.
+        _accrueFee(_from18(fee18));
+        _releaseBacking(certIn, supplyBefore);
 
         emit Redeemed(msg.sender, certIn, amountOut, px18);
     }
@@ -1320,6 +1347,11 @@ contract CertVault {
         if (fromMargin > 0) {
             marginPendingRecall += fromMargin;
         }
+        // K2 (Law 2): same two total steps as redeemInstant. This is forceExit's body, so neither
+        // may be able to revert. The fee is the one assessed now, at the request price - see
+        // feesAccrued for how claimRedeem's H-2 cap relates to it.
+        _accrueFee(_from18(fee18));
+        _releaseBacking(certIn, supplyBefore);
 
         if (isForce) emit ForceExited(receiptId, msg.sender, certIn);
         else emit RedeemRequested(receiptId, msg.sender, certIn, expiresAt);
@@ -1889,7 +1921,159 @@ contract CertVault {
         buffer.accrue(address(this), delta18);
     }
 
+    // ---------------------------------------------------------------- fees (K2)
+
+    error CertVault_FeeSinkAlreadySet();
+    /// @dev sweepFees() before setFeeSink(). A revert, not a silent no-op, so a keeper or a
+    ///      script cannot mistake "nowhere to send it" for "sent".
+    error CertVault_NoFeeSink();
+
+    event FeeSinkSet(address indexed sink);
+    event FeesSwept(address indexed sink, uint256 amount, uint256 feesAccruedAfter);
+
+    /// @notice Where sweepFees() sends fee income (the FeeVault). Set once by governance.
+    address public feeSink;
+
+    /// @notice Fees assessed and not yet swept, in collateral units. A CEILING on what
+    ///         sweepFees() may move, never a claim on the balance: spareCollateral() is the bound
+    ///         that protects everyone the vault owes.
+    /// @dev Raised at the moment each fee is taken: both mint paths, redeemInstant and _queueExit.
+    ///      The queued redeem fee is assessed at the request price. claimRedeem's H-2 cap can later
+    ///      pay less than owed18 when the price has fallen, in which case part of that assessed fee
+    ///      was never realised as cash; this counter does not un-assess it, because the shortfall
+    ///      simply never reaches the balance and spareCollateral() cannot see cash that is not
+    ///      there. The consequence is bounded: an overstated ceiling can only let a sweep take some
+    ///      OTHER surplus (a realised gain, a donation) up to the assessed amount, never anything
+    ///      spareCollateral() reserves.
+    uint256 public feesAccrued;
+
+    /// @notice Escrow held for mint receipts that are neither settled nor refunded, in collateral
+    ///         units. The mint-side twin of totalOwedOutstanding.
+    /// @dev Added in requestMint; released in settleMint (it becomes certificate backing) or
+    ///      refundMint (it is paid back). Floored on release so a counter can never revert either.
+    uint256 public escrowOutstanding;
+
+    /// @notice The part of outstanding certificates' net collateral that stayed in this contract's
+    ///         balance instead of going to the venue as margin: their float.
+    /// @dev A certificate is backed by two things, its venue margin (plus the hedge's P&L) and this
+    ///      float. sweepFees() cannot reach the first at all, so reserving the second is what
+    ///      makes a sweep unable to touch a holder's backing. Released pro rata on every exit with
+    ///      the same floored mulDiv _queueExit uses for postedMargin, so it can never underflow and
+    ///      the last exit releases exactly what is left.
+    uint256 public retainedBacking;
+
+    /// @notice Collateral put in through seedBuffer() — the vault's own first-loss capital — less
+    ///         the bootstrap dust that went to the venue. Held back from sweeps.
+    uint256 public bufferCapital;
+
+    /// @notice Set where fee income goes. Governance, once, never zero.
+    /// @dev A set-once setter instead of a constructor argument, because CertVault's constructor
+    ///      arity is frozen (the auditor's own evidence files construct it). Set-once for the same
+    ///      reason enableKeeperHedging() is one-way: a sink governance could re-point later would
+    ///      make every fee flow a standing governance decision. It gates nothing but sweepFees():
+    ///      no mint or redemption path reads it (Law 2).
+    function setFeeSink(address sink) external {
+        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        if (feeSink != address(0)) revert CertVault_FeeSinkAlreadySet();
+        if (sink == address(0)) revert CertVault_ZeroAddress();
+        feeSink = sink;
+        emit FeeSinkSet(sink);
+    }
+
+    /// @notice Collateral this contract holds beyond everything it owes, has escrowed, or keeps as
+    ///         capital. What a sweep may touch.
+    /// @dev Every party with a claim on this vault is paid out of this contract's balance, out of
+    ///      collateral at the venue, or both. A sweep moves only the balance, so it is enough to
+    ///      hold back the balance-side part of every claim. From the balance, in collateral units:
+    ///        - totalOwedOutstanding: every unpaid queued redemption, IN FULL, although part of it
+    ///          is still being recalled from the venue. Conservative.
+    ///        - escrowOutstanding: every open mint receipt's escrow, IN FULL, although requestMint
+    ///          posted part of it to the venue. Conservative: refundMint pays the whole escrow out
+    ///          of the balance.
+    ///        - retainedBacking: the float of every outstanding certificate. Its venue share and
+    ///          the hedge P&L are at the venue, where no sweep can reach.
+    ///        - bufferCapital: the vault's own first-loss capital, so a sweep only ever moves fee
+    ///          income and never converts the buffer into it.
+    ///        - the declared deficit: how far the attester-relayed BufferBook ledger has fallen
+    ///          below bufferCapital, i.e. losses (funding, basis) beyond what the capital and mint
+    ///          dust absorb. The only on-chain signal that the venue side is short. The attester
+    ///          can use it to BLOCK sweeps; it can never use it to release holder backing, because
+    ///          none of the four terms above depends on it.
+    ///      Floored at every step: owing more than it holds is no spare, not negative spare.
+    ///
+    ///      NOT SEEN, stated rather than hidden: venue-side losses the attester has not declared.
+    ///      The chain cannot read the venue position (see venuePositionBase), so a loss nobody has
+    ///      relayed lets fees leave that would otherwise have absorbed it first. The same trust
+    ///      boundary as solvency(), and why feesAccrued, not the balance, caps a sweep.
+    function spareCollateral() public view returns (uint256 s) {
+        s = _floorSub(hotBuffer(), totalOwedOutstanding);
+        s = _floorSub(s, escrowOutstanding);
+        s = _floorSub(s, retainedBacking);
+        s = _floorSub(s, bufferCapital);
+        uint256 capital18 = _to18(bufferCapital);
+        int256 ledger18 = buffer.balance18(address(this));
+        // Written so that no int256 value of the ledger can overflow the negation.
+        uint256 deficit18 = ledger18 < 0
+            ? capital18 + (uint256(-(ledger18 + 1)) + 1)
+            : _floorSub(capital18, uint256(ledger18));
+        // Rounded UP into collateral units: a reserve must never come out a unit short.
+        s = _floorSub(s, Math.ceilDiv(deficit18, 10 ** (18 - _collateralDecimals)));
+    }
+
+    /// @notice What sweepFees() would move right now.
+    function sweepableFees() public view returns (uint256) {
+        uint256 s = spareCollateral();
+        return s < feesAccrued ? s : feesAccrued;
+    }
+
+    /// @notice Move fee income to the fee sink. Permissionless: it can only move collateral that
+    ///         nobody is owed, to the one address governance fixed.
+    /// @dev PULL, NEVER PUSH, and that is the Law 2 decision. Transferring fees out inside a mint
+    ///      or a redemption would put an external call, and a revert, on the paths Law 2 says must
+    ///      always work, and would move cash at the one moment the balance is being drawn on. Here
+    ///      the fee paths only count, and this separate call moves min(feesAccrued,
+    ///      spareCollateral()). After it the balance still covers every reserve spareCollateral()
+    ///      lists, so no redemption, claim, refund or forceExit can pay less, and none of them
+    ///      reads anything this function writes except the balance. What a sweep CAN do is make
+    ///      an instant redemption that fee cash would have served route to the queue instead: the
+    ///      fee was never a guarantee of instant liquidity, and the queue is always open (Law 2).
+    ///      Sending nothing is a success that returns 0, so a keeper can call it blindly.
+    function sweepFees() external returns (uint256 amount) {
+        address sink = feeSink;
+        if (sink == address(0)) revert CertVault_NoFeeSink();
+        amount = sweepableFees();
+        if (amount == 0) return 0;
+        feesAccrued -= amount;
+        IERC20(cfg.collateral).safeTransfer(sink, amount);
+        emit FeesSwept(sink, amount, feesAccrued);
+    }
+
     // ---------------------------------------------------------------- internals
+
+    /// @dev Saturating, because it runs on forceExit's path and a fee counter must never be what
+    ///      reverts a redemption. Saturating only ever overstates a ceiling that spareCollateral()
+    ///      bounds anyway.
+    function _accrueFee(uint256 amount) internal {
+        uint256 f = feesAccrued;
+        feesAccrued = amount > type(uint256).max - f ? type(uint256).max : f + amount;
+    }
+
+    /// @dev An exit's pro-rata share of the certificates' float, in the same shape as _queueExit's
+    ///      postedMargin decrement: certIn <= supplyBefore (the burn would have reverted
+    ///      otherwise), so the share cannot exceed retainedBacking and mulDiv cannot panic.
+    function _releaseBacking(uint256 certIn, uint256 supplyBefore) internal {
+        if (supplyBefore != 0) retainedBacking -= Math.mulDiv(retainedBacking, certIn, supplyBefore);
+    }
+
+    /// @dev Floored, never checked: each receipt adds its escrow once and releases it once, so an
+    ///      underflow would be a bug here, but refundMint must not be the place it surfaces.
+    function _releaseEscrow(uint256 escrow) internal {
+        escrowOutstanding = _floorSub(escrowOutstanding, escrow);
+    }
+
+    function _floorSub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a > b ? a - b : 0;
+    }
 
     /// @notice Collect any margin the venue has actually released, and only then reduce the
     ///         outstanding recall. getPendingBalance is the sole on-chain proof a withdrawal
