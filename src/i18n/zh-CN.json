@@ -910,7 +910,10 @@
   "Reading the venue's funding history…": "正在读取交易场所的资金费率历史…",
   "last read failed · showing the previous one": "最近一次读取失败 · 显示上一次结果",
   "THE LONG VAULT RECEIVES": "多头金库收取",
-  "THE LONG VAULT PAYS": "多头金库支付"
+  "THE LONG VAULT PAYS": "多头金库支付",
+  "Holders pay nothing while the buffer is positive, and a published fee only after it is exhausted. In the intended design stakers underwrite the tail beyond that, though no staking contract is deployed, and are compensated for it with a share of protocol fees. Funding itself is paid on the venue every hour, into and out of the vault's margin account there; the dashboard charts the venue's hourly rates.": "缓冲金为正时，持有人无需支付任何费用；只有在缓冲金耗尽后才会收取公布的费用。在预期的设计中，超出部分的尾部风险由质押者承保（但目前没有部署任何质押合约），并以协议费用分成作为补偿。资金费本身每小时在交易场所支付，进出金库在那里的保证金账户；仪表盘绘制交易场所的每小时费率。",
+  "Hourly funding, on the venue": "每小时资金费，在交易场所结算",
+  "Funding is paid on the venue every hour, into and out of the vault's own margin account there. The dashboard charts the venue's hourly rates; the buffer's on-chain balance changes only when collateral actually moves, and the attester's accrual figure is a claim, not a transfer.": "资金费每小时在交易场所支付，进出金库自己在那里的保证金账户。仪表盘绘制交易场所的每小时费率；缓冲金的链上余额只有在抵押品实际转移时才会变化，而证明方的应计数值只是一项申报，并非转账。"
  },
  "tpl": {
   "(EST. {#} · VERSION {#}.{#})": "（创立于 {0} · 版本 {1}.{2}）",

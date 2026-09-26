@@ -160,7 +160,7 @@ export const ARTICLES: Article[] = [
       {
         heading: "Who pays what, when",
         paragraphs: [
-          "Holders pay nothing while the buffer is positive, and a published fee only after it is exhausted. In the intended design stakers underwrite the tail beyond that, though no staking contract is deployed, and are compensated for it with a share of protocol fees. Keepers sweep accrued funding into the buffer every hour, so the balance the dashboard shows is always current.",
+          "Holders pay nothing while the buffer is positive, and a published fee only after it is exhausted. In the intended design stakers underwrite the tail beyond that, though no staking contract is deployed, and are compensated for it with a share of protocol fees. Funding itself is paid on the venue every hour, into and out of the vault's margin account there; the dashboard charts the venue's hourly rates.",
         ],
       },
       {
@@ -278,9 +278,9 @@ export const ARTICLES: Article[] = [
         ],
       },
       {
-        heading: "The hourly funding sweep",
+        heading: "Hourly funding, on the venue",
         paragraphs: [
-          "Every hour, a keeper settles accrued funding into the per-asset buffer. This is what keeps the BufferBook balance honest: the number on the dashboard is never more than an hour away from the number on the exchange.",
+          "Funding is paid on the venue every hour, into and out of the vault's own margin account there. The dashboard charts the venue's hourly rates; the buffer's on-chain balance changes only when collateral actually moves, and the attester's accrual figure is a claim, not a transfer.",
         ],
       },
       {
