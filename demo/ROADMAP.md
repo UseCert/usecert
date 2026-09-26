@@ -272,11 +272,39 @@ headroom or total capacity. The bar is currently labelled by its formula with bo
 beside it. If it is headroom, the bar looks fullest exactly when the vault can accept no
 more mints — the opposite of what a viewer will read.
 
-### 2.4 `RiskView` stress table — **M**
+### 2.4 `RiskView` stress table — **M** — ✅ done 2026-09-25
 
-Modelled analysis, not a chain read. The header hint says "Modelled, not measured", which is
-honest, but the table should either be driven by real parameters or moved out of the
-dashboard.
+Two halves, and only one had been done. The invented magnitudes were already gone — "−41% of
+buffer" against a "−30% annualised funding" shock, none of it from a model anyone ran. What
+remained was honest prose with **no numbers at all**, which is neither of the two outcomes this
+item asked for: driven by real parameters, or moved out of the dashboard.
+
+It is now driven by real parameters. Each row prints the threshold that decides it, read from
+the contract that enforces it:
+
+| row | threshold | source |
+|---|---|---|
+| Oracle stale or deviant | `900s` | `CertOracle.stalenessSeconds` |
+| Gap in the underlying | `500 bps` | `CertOracle.basisBandBps` |
+| Attestation goes stale | `300s` | registry / `maxAttestationAgeSec` |
+| Redemption run | `$1K` | vault `cfg().instantCap18` |
+| Accrual ledger / funding | `<= 0 (now $100K)` | `BufferBook.balance18` |
+
+`stalenessSeconds`, `deviationBps` and `basisBandBps` had existed in this codebase **only as
+prose in comments** while the table named them in sentences. They are now three more calls per
+mirror — `CALLS_PER_MIRROR` 13 → 16 — because a threshold a reader cannot check is
+indistinguishable from one that was made up.
+
+The accrual-ledger row is deliberately not a magnitude: the threshold there is a *sign*, so the
+cell reads `<= 0` with the live worst balance beside it as the distance to it.
+
+Every mirror on this deployment is configured identically, so one number per row is honest —
+but that is a fact about this deployment rather than a guarantee, so the helper checks and
+prints "varies by mirror" if they ever diverge.
+
+Verified two ways: the rendered table shows 900s / 500 bps / 300s / $1K / `<= 0 (now $100K)`,
+and `cast call` reads 900, 500 and 500 directly from all four `CertOracle`s. The footnote now
+points a reader at the contracts instead of asking to be trusted.
 
 ---
 
