@@ -1,4 +1,6 @@
 import { motion } from "framer-motion";
+import { ArrowUpRight } from "lucide-react";
+import { Link } from "@/lib/router-compat";
 import Scribble from "@/components/Scribble";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
@@ -60,6 +62,34 @@ export default function Boundaries() {
             >
               "Solvency is public. Risks are named. Infrastructure, not advice."
             </motion.p>
+
+            {/* The milestones page belongs HERE rather than in a feature strip: this is the
+                section that says what the project does not claim, and "what does not work
+                yet" is the same statement continued. A reader who has just read the
+                boundaries is exactly the one who wants the list. */}
+            <motion.div
+              initial={{ opacity: 0, y: 12 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ delay: 0.7, duration: 0.6, ease: EASE }}
+              className="mt-10 border-t hairline-dark pt-8"
+            >
+              <p className="max-w-[46ch] text-[15px] leading-[1.6] text-white-60">
+                The same applies to the build itself. What works today, what is being built,
+                and what has to be true before mainnet is published in full — with no dates,
+                and a way to check every claim.
+              </p>
+              <Link
+                to="/roadmap"
+                className="group mt-5 inline-flex items-center gap-2 border border-white/20 px-5 py-3 font-mono text-[11px] uppercase tracking-[0.08em] text-white transition-colors hover:border-green-bright/50 hover:text-green-bright"
+              >
+                See the milestones
+                <ArrowUpRight
+                  size={14}
+                  className="transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5"
+                />
+              </Link>
+            </motion.div>
           </div>
         </div>
       </div>
