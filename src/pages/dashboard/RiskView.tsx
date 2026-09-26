@@ -6,7 +6,7 @@ import { EM_DASH, NO_POSITION, fmtCompactUSD, fmtOrDash } from "./format";
 import { fromBps, fromPrice18 } from "@/chain/units";
 import { BASIS_ON_THIS_DEPLOYMENT } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
-import { CHAIN_ID, COLLATERAL_SYMBOL, VENUE_IS_SIMULATED } from "@/chain/deployment";
+import { CHAIN_ID, COLLATERAL_SYMBOL, HAS_CERT_TOKEN, VENUE_IS_SIMULATED } from "@/chain/deployment";
 
 /* --------------------------------------------------------------- content */
 
@@ -29,7 +29,10 @@ const DESIGN_LAWS: { n: string; title: string; body: string }[] = [
   {
     n: "04",
     title: "Holders are senior",
-    body: "By design the junior tranche absorbs buffer exhaustion before holder backing. That tranche does not exist here: InsuranceStaking and CERT are C3 and are not deployed, so there is nothing junior to holders on this deployment.",
+    // The CERT token exists on mainnet; staking it does not. Only the second makes a tranche.
+    body: HAS_CERT_TOKEN
+      ? "By design the junior tranche absorbs buffer exhaustion before holder backing. That tranche does not exist here: the CERT token is deployed, but InsuranceStaking is C3 and is not, so no CERT is staked and there is nothing junior to holders on this deployment."
+      : "By design the junior tranche absorbs buffer exhaustion before holder backing. That tranche does not exist here: InsuranceStaking and CERT are C3 and are not deployed, so there is nothing junior to holders on this deployment.",
   },
   {
     n: "05",
@@ -129,8 +132,8 @@ function LawCard({ law, index }: { law: (typeof DESIGN_LAWS)[number]; index: num
 /**
  * The loss waterfall, with the legs that exist and the leg that does not.
  *
- * `InsuranceStaking` and `CERT` are C3 and are not deployed, so the junior tranche has no
- * size on chain 46630. It is shown as a named-but-unsized leg rather than the previous
+ * `InsuranceStaking` is C3 and is not deployed, so the junior tranche has no size. The CERT
+ * token itself exists on mainnet, but an unstaked token underwrites nothing. It is shown as a named-but-unsized leg rather than the previous
  * `4_820_000 × 0.42`, which was a figure with no source at all.
  */
 function Waterfall({
@@ -144,7 +147,9 @@ function Waterfall({
     { label: "Funding buffer", sub: "First loss · ERC-20 balance held", value: bufferHeld, tone: "bg-green-bright" },
     {
       label: "Staked CERT",
-      sub: "Junior tranche · not deployed (C3)",
+      sub: HAS_CERT_TOKEN
+        ? "Junior tranche · token live, staking not deployed (C3)"
+        : "Junior tranche · not deployed (C3)",
       value: null,
       tone: "bg-green-bright/45",
     },
@@ -350,7 +355,9 @@ export default function RiskView() {
     {
       label: "Junior tranche",
       value: EM_DASH,
-      note: "InsuranceStaking / CERT are C3 and not deployed",
+      note: HAS_CERT_TOKEN
+        ? "CERT is deployed; InsuranceStaking is C3 and not deployed"
+        : "InsuranceStaking / CERT are C3 and not deployed",
       icon: Lock,
       muted: true,
     },

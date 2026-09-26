@@ -44,7 +44,7 @@ import {
   toCollateral,
 } from "@/chain/units";
 import { cn } from "@/lib/utils";
-import { CHAIN_ID } from "@/chain/deployment";
+import { CHAIN_ID, HAS_FAUCET } from "@/chain/deployment";
 
 type Tab = "mint" | "redeem";
 type Busy = "approve" | "submit" | "queue" | "force" | "claim" | "recall" | "faucet" | null;
@@ -261,8 +261,14 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
    */
   const route: SizeRoute | null = useMemo(() => {
     if (!cfg) return null;
+    // The same predicate the action router uses: a keeper-mode vault sends every size through
+    // the receipt (`mintInstant` reverts there), so the cap does not decide anything.
+    if (cfg.keeperHedging) return "request";
     return tab === "mint" ? routeMint(amountIn6, cfg.instantCap18) : routeRedeem(certIn18, cfg.instantCap18);
   }, [cfg, tab, amountIn6, certIn18]);
+
+  /** `vault.keeperHedging()`: every mint is requestMint and every redemption requestRedeem. */
+  const keeperMode = Boolean(cfg?.keeperHedging);
 
   const balance = tab === "mint" ? usdc : positions[asset];
   const amount = useMemo(() => {
@@ -666,13 +672,17 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
               <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.06em] text-white-60/70">
                 {!cfg
                   ? "Reading vault.cfg() for the instant cap — the submit button stays disabled until it lands."
-                  : route === "instant"
+                  : keeperMode
                     ? tab === "mint"
-                      ? `At or below the instant cap (${fmtUSD(fromPrice18(cfg.instantCap18), 0)}) → mintInstant, one transaction`
-                      : `At or below the instant cap → redeemInstant, paid from the hot buffer`
-                    : tab === "mint"
-                      ? `Above the instant cap (${fmtUSD(fromPrice18(cfg.instantCap18), 0)}) → requestMint, escrow plus a receipt`
-                      : `Above the instant cap → requestRedeem, burns now and pays by claim`}
+                      ? "Keeper-hedged vault → requestMint at every size, escrow until the hedge fills"
+                      : "Keeper-hedged vault → requestRedeem at every size, closes on chain and pays by claim"
+                    : route === "instant"
+                      ? tab === "mint"
+                        ? `At or below the instant cap (${fmtUSD(fromPrice18(cfg.instantCap18), 0)}) → mintInstant, one transaction`
+                        : `At or below the instant cap → redeemInstant, paid from the hot buffer`
+                      : tab === "mint"
+                        ? `Above the instant cap (${fmtUSD(fromPrice18(cfg.instantCap18), 0)}) → requestMint, escrow plus a receipt`
+                        : `Above the instant cap → requestRedeem, burns now and pays by claim`}
               </p>
             </div>
 
@@ -743,7 +753,9 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
                   </button>
                 </div>
                 <p className="mt-1 font-mono text-[10px] leading-[1.6] uppercase tracking-[0.06em] text-white-60/70">
-                  Both mint paths spend your collateral, so the vault needs an allowance first.
+                  {keeperMode
+                    ? "requestMint escrows your collateral, so the vault needs an allowance first."
+                    : "Both mint paths spend your collateral, so the vault needs an allowance first."}
                 </p>
               </div>
             )}
@@ -855,11 +867,17 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
                 <Row
                   label="Settlement"
                   value={
-                    route === "instant"
-                      ? "one transaction"
-                      : tab === "mint"
-                        ? "keeper fill, then settleMint"
-                        : "two batch round-trips, then claim"
+                    route === null
+                      ? EM_DASH
+                      : keeperMode
+                        ? tab === "mint"
+                          ? "escrow, then issued when the hedge fills (usually under a minute)"
+                          : "closed on chain, collateral recalled from the venue (minutes), then claim"
+                        : route === "instant"
+                          ? "one transaction"
+                          : tab === "mint"
+                            ? "keeper fill, then settleMint"
+                            : "two batch round-trips, then claim"
                   }
                 />
               </div>
@@ -872,7 +890,9 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
             </Panel>
           </Stagger>
 
-          {/* Faucet: the ONLY way a tester gets collateral on this deployment. */}
+          {/* Faucet: the ONLY way a tester gets collateral on a testnet deployment. Where no
+              faucet is deployed (mainnet) the panel does not exist: collateral is real USDG. */}
+          {HAS_FAUCET && (
           <Stagger index={2}>
             <Panel className="p-5">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -907,6 +927,7 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
               </p>
             </Panel>
           </Stagger>
+          )}
 
           {/* Receipt claiming. Awaiting settlement is retryable, never terminal. */}
           <Stagger index={3}>
@@ -941,9 +962,10 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
                 </button>
               </div>
               <p className="mt-2 font-mono text-[10px] leading-[1.6] uppercase tracking-[0.06em] text-white-60/70">
-                Receipt ids are not enumerable on-chain and there is no receiptsOf(user), so ids have to
-                come from your RedeemRequested / ForceExited event until an indexer exists. A receipt
-                that is awaiting settlement is never failed — it stays claimable, and recallMargin is
+                After a queued redemption the receipt id is filled in here from that transaction. Receipt
+                ids are not enumerable on-chain and there is no receiptsOf(user), so an older one comes
+                from your RedeemRequested / ForceExited event until an indexer exists. A receipt that is
+                awaiting settlement is never failed — it stays claimable, and recallMargin is
                 permissionless.
               </p>
             </Panel>

@@ -192,9 +192,18 @@ export function WalletModal() {
       </div>
       {failure && <p className="mt-4 font-mono text-[11px] leading-[1.6] text-warn">{failure}</p>}
       <p className="mt-5 font-mono text-[10px] uppercase leading-[1.6] tracking-[0.06em] text-white-60">
-        Chain {chainId} ({CHAIN.name}) only. Mainnet is not offered because nothing is deployed
-        there — the chain itself is real and verified (4663, and the venue and USDG are live on
-        it), but UseCert has no contracts on it. See deploy/mainnet/4663.plan.json.
+        {/* The mainnet disclaimer is testnet-only: on mainnet it would deny the contracts
+            this modal is about to connect to. Two whole branches rather than an appended
+            clause, so the testnet text nodes stay exactly what the dictionary is keyed by. */}
+        {IS_TESTNET ? (
+          <>
+            Chain {chainId} ({CHAIN.name}) only. Mainnet is not offered because nothing is deployed
+            there — the chain itself is real and verified (4663, and the venue and USDG are live on
+            it), but UseCert has no contracts on it. See deploy/mainnet/4663.plan.json.
+          </>
+        ) : (
+          <>Chain {chainId} ({CHAIN.name}) only.</>
+        )}
       </p>
     </ModalShell>
   );

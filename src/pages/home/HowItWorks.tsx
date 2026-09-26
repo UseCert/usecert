@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import Accordion from "@/components/Accordion";
 import type { AccordionRow } from "@/components/Accordion";
+import { IS_TESTNET } from "@/chain/deployment";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -9,7 +10,10 @@ export const HOW_IT_WORKS_ROWS: AccordionRow[] = [
     title: "Mint",
     meta: "Delta: 1.0",
     body: [
-      "Deposit USDG into a per-asset vault. The vault opens an equivalent long on the corresponding equity perp on Robinhood Chain, and your certificate mints to your wallet at oracle price. uTSLA in, uTSLA out, at the stock's price, any hour of any day.",
+      // Mainnet vaults are keeper-hedged: the mint is escrowed and issued at the fill price.
+      IS_TESTNET
+        ? "Deposit USDG into a per-asset vault. The vault opens an equivalent long on the corresponding equity perp on Robinhood Chain, and your certificate mints to your wallet at oracle price. uTSLA in, uTSLA out, at the stock's price, any hour of any day."
+        : "Deposit USDG into a per-asset vault. The collateral is held in escrow while an equivalent long is opened on the corresponding equity perp on Robinhood Chain Lighter, and your certificate is issued to your wallet at the fill price once the venue confirms it, usually within a minute. Any hour of any day.",
       "The delta target is 1.0 at all times. Every certificate in circulation is backed by exactly one token's worth of perp exposure plus USDG margin, and the backing math is proven on-chain at every attestation (~60s), with the age of the proof published.",
     ],
     image: "/hiw-mint.jpg",
@@ -29,7 +33,10 @@ export const HOW_IT_WORKS_ROWS: AccordionRow[] = [
     title: "Redeem, Always",
     meta: "Gating: never",
     body: [
-      "Burn your certificate and the vault closes the matching perp exposure. Below the vault's instant cap the collateral comes back in the same transaction; above it, redemption is queued and paid by claim — two batch round-trips expected, and the venue's 14-day priority expiration is the real worst case. Redemption is never refused and never paused for convenience: forceExit is gated on nothing.",
+      // Mainnet vaults are keeper-hedged: there is no instant path, every redemption pays by claim.
+      IS_TESTNET
+        ? "Burn your certificate and the vault closes the matching perp exposure. Below the vault's instant cap the collateral comes back in the same transaction; above it, redemption is queued and paid by claim — two batch round-trips expected, and the venue's 14-day priority expiration is the real worst case. Redemption is never refused and never paused for convenience: forceExit is gated on nothing."
+        : "Burn your certificate and the vault closes the matching perp exposure on chain in the same transaction. The collateral comes back from the venue within minutes and you claim it; the venue's 14-day priority expiration is the real worst case. Redemption is never refused and never paused for convenience: forceExit is gated on nothing.",
       "Even if minting halts on a stale or deviant oracle, redemption continues at the last good price. The vault's solvency math is proven on-chain at every attestation, and the age of that proof is published with it, so you never have to trust a dashboard screenshot.",
     ],
     image: "/hiw-redeem.jpg",

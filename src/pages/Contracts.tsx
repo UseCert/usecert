@@ -50,7 +50,9 @@ const SHARED_ROWS: Row[] = [
   {
     label: IS_TESTNET ? "TestUSDG (collateral)" : `${COLLATERAL_SYMBOL} (collateral)`,
     address: SHARED.collateral,
-    note: "The test collateral, 6 decimals. On mainnet this is replaced by real USDG and nothing here mints it.",
+    note: IS_TESTNET
+      ? "The test collateral, 6 decimals. On mainnet this is replaced by real USDG and nothing here mints it."
+      : "Real USDG, 6 decimals. Nothing in this deployment mints it; the vaults only hold what holders deposit.",
   },
 ];
 
@@ -190,9 +192,13 @@ export default function ContractsPage() {
                 />
                 <RowLine
                   row={{
-                    label: "ReplayAggregator",
+                    // The address book keeps the key `replayAggregator` on both chains; on
+                    // mainnet the address it holds is the Chainlink feed CertOracle reads.
+                    label: IS_TESTNET ? "ReplayAggregator" : "Chainlink feed",
                     address: m.replayAggregator,
-                    note: "The price feed stand-in. A real deployment reads a live aggregator instead.",
+                    note: IS_TESTNET
+                      ? "The price feed stand-in. A real deployment reads a live aggregator instead."
+                      : "Chainlink price feed, 8 decimals, total-return. Read only through CertOracle, which applies the guards.",
                   }}
                 />
               </div>

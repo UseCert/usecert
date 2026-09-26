@@ -110,3 +110,24 @@ export const SHORT_DISCLOSURE: string = !IS_TESTNET
 export const HOW_TO_GET_COLLATERAL: string = HAS_FAUCET
   ? `${COLLATERAL_SYMBOL} comes from the test faucet — there is nothing to buy.`
   : `${COLLATERAL_SYMBOL} is real collateral you already hold or acquire; this protocol does not issue it.`;
+
+/**
+ * The CERT project token ("UseCert", 18 decimals, 1,000,000,000 supply), where one exists.
+ *
+ * WHY IT IS TYPED HERE. The token is not part of the vault stack, so the generated address
+ * book does not carry it. It exists on Robinhood Chain mainnet (4663) only, so it is keyed on
+ * the chain id: any other bundle reads `undefined` and keeps saying there is no token.
+ *
+ * WHAT IT DOES NOT MEAN. The token existing is not staking, an insurance tranche, buybacks
+ * or a fee split. None of those is deployed, and copy that reads this flag must keep saying so.
+ */
+export const CERT_TOKEN_ADDRESS: `0x${string}` | undefined =
+  CHAIN_ID === 4663 ? "0xb01356A005403C38c0fb01bd0aAfe51e81Ab9B07" : undefined;
+
+/** Is the CERT token deployed on this chain? (Staking and the fee split are not, either way.) */
+export const HAS_CERT_TOKEN: boolean = CERT_TOKEN_ADDRESS !== undefined;
+
+/** `0xb013…9B07`, for copy too narrow for the full address. Empty where there is no token. */
+export const CERT_TOKEN_SHORT: string = CERT_TOKEN_ADDRESS
+  ? `${CERT_TOKEN_ADDRESS.slice(0, 6)}…${CERT_TOKEN_ADDRESS.slice(-4)}`
+  : "";

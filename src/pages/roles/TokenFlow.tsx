@@ -1,15 +1,20 @@
 import { motion } from "framer-motion";
+import { ArrowUpRight } from "lucide-react";
 import Counter from "@/components/Counter";
 import { useReveal } from "@/i18n";
+import { explorerAddressUrl } from "@/chain/config";
+import { CERT_TOKEN_ADDRESS, HAS_CERT_TOKEN } from "@/chain/deployment";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
 /**
- * THE INTENDED SPLIT FOR A TOKEN THAT IS NOT DEPLOYED.
+ * THE INTENDED SPLIT, FOR A TOKEN THAT NOW EXISTS AND A FEE FLOW THAT DOES NOT.
  *
- * These read as present-tense facts about money moving. No token exists, no fee split is
- * implemented, and nothing on chain routes a buyback. Token genesis is C3 on the roadmap
- * below, and `live: false` there — this section was the one place that forgot.
+ * These read as present-tense facts about money moving. On mainnet the CERT token is
+ * deployed (`CERT_TOKEN_ADDRESS`), but no fee split is implemented, no staking contract
+ * exists and nothing on chain routes a buyback. The token existing is not the design
+ * existing, so the badge and the paragraph say both halves. On a bundle without the token
+ * they still say there is none.
  *
  * The numbers stay because the design is real and worth publishing. The framing changes,
  * because "of protocol fees go to buyback" and "is what we intend to do with protocol fees"
@@ -31,8 +36,25 @@ export default function TokenFlow() {
         {/* Stated before the numbers, not after them. A reader who takes in the counters and
             leaves should not have been misled by the time they go. */}
         <p className="mt-3 inline-block border border-warn/40 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.08em] text-warn">
-          Not deployed — design only
+          {HAS_CERT_TOKEN ? "Token deployed · fee split, buyback and staking design only" : "Not deployed — design only"}
         </p>
+        {CERT_TOKEN_ADDRESS && (
+          <p className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] uppercase tracking-[0.06em] text-white-60">
+            <span>CERT · 18 decimals · 1,000,000,000 supply</span>
+            <a
+              href={explorerAddressUrl(CERT_TOKEN_ADDRESS)}
+              target="_blank"
+              rel="noreferrer"
+              className="group inline-flex items-center gap-1.5 normal-case transition-colors hover:text-green-bright"
+            >
+              <span className="break-all">{CERT_TOKEN_ADDRESS}</span>
+              <ArrowUpRight
+                size={12}
+                className="shrink-0 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5"
+              />
+            </a>
+          </p>
+        )}
 
         <div className="mt-10 grid gap-14 lg:grid-cols-2 lg:gap-20">
           {/* Left: counters with dot markers */}
@@ -92,11 +114,23 @@ export default function TokenFlow() {
               viewport={{ once: true, amount: 0.4 }}
               transition={{ delay: 0.2, duration: 0.7, ease: EASE }}
             >
-              The design: mint and redeem fees, plus the funding-surplus share, would fund buybacks and staker
-              pay — stakers paid because they are first in line when the buffer breaks. No emissions games, no
-              hidden dilution. None of it is deployed. There is no token, no staking contract and no fee split
-              on chain today; this is the intent the contracts are being built toward, published so it can be
-              argued with early.
+              {HAS_CERT_TOKEN ? (
+                <>
+                  The design: mint and redeem fees, plus the funding-surplus share, would fund buybacks and staker
+                  pay — stakers paid because they are first in line when the buffer breaks. No emissions games, no
+                  hidden dilution. The CERT token is deployed; nothing else here is. There is no staking contract,
+                  no insurance tranche, no buyback and no fee split on chain today; this is the intent the contracts
+                  are being built toward, published so it can be argued with early.
+                </>
+              ) : (
+                <>
+                  The design: mint and redeem fees, plus the funding-surplus share, would fund buybacks and staker
+                  pay — stakers paid because they are first in line when the buffer breaks. No emissions games, no
+                  hidden dilution. None of it is deployed. There is no token, no staking contract and no fee split
+                  on chain today; this is the intent the contracts are being built toward, published so it can be
+                  argued with early.
+                </>
+              )}
             </motion.p>
           </div>
         </div>

@@ -1,6 +1,6 @@
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
-import { IS_TESTNET } from "@/chain/deployment";
+import { CERT_TOKEN_SHORT, HAS_CERT_TOKEN, IS_TESTNET } from "@/chain/deployment";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -9,7 +9,7 @@ const PHASES = [
     tag: "C1",
     status: "Live",
     live: true,
-    title: "uTSLA, uSPY, uQQQ + uNVDA vaults",
+    title: IS_TESTNET ? "uTSLA, uSPY, uQQQ + uNVDA vaults" : "Six certificate vaults",
     copy: IS_TESTNET
       ? "Four mirrors live on testnet. Mint, redeem, and the public solvency dashboard."
       : "Six mirrors live on Robinhood Chain mainnet, hedged on Robinhood Chain Lighter. Mint, redeem, and the public solvency dashboard.",
@@ -23,10 +23,13 @@ const PHASES = [
   },
   {
     tag: "C3",
-    status: null,
+    // The token is out; the phase is not done until staking and the fee flow are.
+    status: HAS_CERT_TOKEN ? "Token live" : null,
     live: false,
     title: "Token genesis",
-    copy: "Staked insurance buffer and the funding-surplus flywheel.",
+    copy: HAS_CERT_TOKEN
+      ? `CERT is deployed at ${CERT_TOKEN_SHORT}. Still to come: the staked insurance buffer and the funding-surplus flywheel.`
+      : "Staked insurance buffer and the funding-surplus flywheel.",
   },
   {
     tag: "C4",

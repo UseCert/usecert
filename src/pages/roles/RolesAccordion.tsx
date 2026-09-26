@@ -2,6 +2,8 @@ import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Plus } from "lucide-react";
 import SwapButton from "@/components/SwapButton";
+import { HAS_CERT_TOKEN } from "@/chain/deployment";
+import { IS_TESTNET } from "@/chain/deployment";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -19,7 +21,9 @@ const ROWS: RoleRow[] = [
     title: "Holder",
     meta: "The missing primitive",
     body: [
-      "Mint certificates and hold them. That is the whole job. Your uTSLA sits in your wallet, tracks the stock 24/7, and redeems to USDG at oracle price whenever you want out — same transaction below the vault’s instant cap, queued and paid by claim above it. No funding tabs, no liquidation price, nothing to manage.",
+      IS_TESTNET
+        ? "Mint certificates and hold them. That is the whole job. Your uTSLA sits in your wallet, tracks the stock 24/7, and redeems to USDG at oracle price whenever you want out — same transaction below the vault’s instant cap, queued and paid by claim above it. No funding tabs, no liquidation price, nothing to manage."
+        : "Mint certificates and hold them. That is the whole job. Your uTSLA sits in your wallet, tracks the stock 24/7, and redeems to USDG whenever you want out: the hedge closes on chain at once and the collateral comes back from the venue within minutes, paid by claim. No funding tabs, no liquidation price, nothing to manage.",
       "Reward: stock exposure that just sits there. The asset Robinhood Chain was missing, finally holdable.",
     ],
     image: "/roles-holder.jpg",
@@ -41,7 +45,9 @@ const ROWS: RoleRow[] = [
     title: "Staker",
     meta: "Backstop the buffer",
     body: [
-      "Planned, not deployed. There is no token and no staking contract on chain today — this describes the role the design creates, not one anybody can take.",
+      HAS_CERT_TOKEN
+        ? "Planned, not deployed. The CERT token exists on chain, but there is no staking contract today — this describes the role the design creates, not one anybody can take."
+        : "Planned, not deployed. There is no token and no staking contract on chain today — this describes the role the design creates, not one anybody can take.",
       "The intent: stake the token to underwrite the insurance buffer, so that if sustained negative funding draws the buffer past its threshold, staked tokens absorb the loss before holder backing is ever touched. Holders would be senior, always. That is the deal, and it would be priced in.",
       "Intended reward: a share of mint and redeem fees plus funding-surplus fees. Paid for real risk, named plainly.",
     ],

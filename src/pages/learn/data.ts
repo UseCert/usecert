@@ -1,3 +1,6 @@
+import { HAS_CERT_TOKEN } from "@/chain/deployment";
+import { IS_TESTNET } from "@/chain/deployment";
+
 export type ArticleCategory = "MECHANICS" | "MARKETS" | "RISK" | "DESIGN";
 
 export interface ArticleSection {
@@ -70,7 +73,9 @@ export const ARTICLES: Article[] = [
       {
         heading: "What a certificate changes",
         paragraphs: [
-          "Deposit USDG, the vault opens a fully backed long on the equity perp underneath, and uTSLA mints to your wallet at oracle price. Delta target 1.0, proven on-chain at every attestation with the age of the proof published. Burn it and USDG comes back at oracle price, never gated. Funding is buffered, then fee'd, never hidden. Holders are senior to stakers, always.",
+          IS_TESTNET
+            ? "Deposit USDG, the vault opens a fully backed long on the equity perp underneath, and uTSLA mints to your wallet at oracle price. Delta target 1.0, proven on-chain at every attestation with the age of the proof published. Burn it and USDG comes back at oracle price, never gated. Funding is buffered, then fee'd, never hidden. Holders are senior to stakers, always."
+            : "Deposit USDG, the vault opens a fully backed long on the equity perp underneath, and uTSLA is issued to your wallet at the price the hedge filled at. Delta target 1.0, proven on-chain at every attestation with the age of the proof published. Burn it and the hedge closes on chain; the USDG comes back from the venue within minutes, never gated. Funding is buffered, then fee'd, never hidden. Holders are senior to stakers, always.",
         ],
       },
       {
@@ -202,7 +207,9 @@ export const ARTICLES: Article[] = [
       {
         heading: "The 80/10/5/5 fee flow",
         paragraphs: [
-          "The intended split is 80/10/5/5: 80% to stakers as underwriting compensation, 10% to top up the insurance buffer, 5% to keepers who run the peg infrastructure, and 5% to the treasury. None of it is deployed — there is no token, no staking contract and no fee split on chain, so nothing routes a single unit of fee anywhere described here. Every flow is an on chain transfer you can audit, not an accounting line you have to trust.",
+          HAS_CERT_TOKEN
+            ? "The intended split is 80/10/5/5: 80% to stakers as underwriting compensation, 10% to top up the insurance buffer, 5% to keepers who run the peg infrastructure, and 5% to the treasury. None of the split is deployed. The CERT token exists on chain, but there is no staking contract and no fee split, so nothing routes a single unit of fee anywhere described here. Every flow is an on chain transfer you can audit, not an accounting line you have to trust."
+            : "The intended split is 80/10/5/5: 80% to stakers as underwriting compensation, 10% to top up the insurance buffer, 5% to keepers who run the peg infrastructure, and 5% to the treasury. None of it is deployed — there is no token, no staking contract and no fee split on chain, so nothing routes a single unit of fee anywhere described here. Every flow is an on chain transfer you can audit, not an accounting line you have to trust.",
         ],
       },
     ],

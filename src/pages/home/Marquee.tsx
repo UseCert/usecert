@@ -12,8 +12,6 @@ const ITEMS = [
   { name: "CertVault", glyph: BAR_GLYPH },
   { name: "CertOracle", glyph: BAR_GLYPH },
   { name: "BufferBook", glyph: BAR_GLYPH },
-  { name: "InsuranceStaking", glyph: BAR_GLYPH },
-  { name: "FeeVault", glyph: BAR_GLYPH },
   { name: "Certificate", glyph: BAR_GLYPH },
 ];
 
