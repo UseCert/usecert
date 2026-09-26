@@ -65,7 +65,7 @@ const REDEEM_CAPTION = IS_TESTNET
 const UAAPL_LIVE: boolean = MIRRORS.some((m) => (m.symbol as string) === "uAAPL");
 
 const FUNDING_PARA =
-  "Funding accrues to a per-asset buffer: positive funding grows it, sustained negative funding draws it down, and past a published threshold the remainder becomes a transparent holding fee. Buffered, then fee'd, never hidden.";
+  "Funding is paid on the venue every hour, into and out of the vault's margin account there. Positive funding adds to what backs the vault; sustained negative funding draws it down. A holding-fee pass-through is designed but not deployed, so nothing charges holders for funding today: it shows up in the vault's backing, which the dashboard publishes live.";
 
 export const VAULTS: VaultData[] = [
   {
@@ -97,12 +97,6 @@ export const VAULTS: VaultData[] = [
       { value: 0, caption: REDEEM_CAPTION },
     ],
     resultsCopy: resultsCopy("uTSLA"),
-    quote: {
-      text: "I stopped checking funding rates the day I minted. It tracks Tesla, it sits in my wallet, and I can leave whenever I want. That did not exist before.",
-      name: "",
-      role: "Holder",
-      image: "/testimonial-1.jpg",
-    },
   },
   {
     slug: "unvda",
@@ -133,12 +127,6 @@ export const VAULTS: VaultData[] = [
       { value: 0, caption: REDEEM_CAPTION },
     ],
     resultsCopy: resultsCopy("uNVDA"),
-    quote: {
-      text: "It is the first AI-shaped asset on chain that behaves like an asset. We listed uNVDA as collateral the same week the vault opened.",
-      name: "",
-      role: "DeFi Builder",
-      image: "/testimonial-2.jpg",
-    },
   },
   /* uSPX IS GONE, and it is not coming back.
    *
@@ -179,12 +167,6 @@ export const VAULTS: VaultData[] = [
       { value: 0, caption: REDEEM_CAPTION },
     ],
     resultsCopy: resultsCopy("uQQQ"),
-    quote: {
-      text: "The whole desk runs tech beta through perps today. A certificate turns that trade into inventory we can actually hold.",
-      name: "",
-      role: "DeFi Builder",
-      image: "/testimonial-2.jpg",
-    },
   },
   {
     slug: "uaapl",
@@ -223,12 +205,6 @@ export const VAULTS: VaultData[] = [
     resultsCopy: UAAPL_LIVE
       ? resultsCopy("uAAPL")
       : "Deposit USDG, receive uAAPL at oracle price in the same transaction. Burn uAAPL, receive USDG back the same way. Solvency math will be proven on-chain at every attestation from deployment, published with the age of each proof, so none of this requires trusting us.",
-    quote: {
-      text: "AAPL is the asset every newcomer asks for first. Giving them a certificate instead of a perp is the right front door.",
-      name: "",
-      role: "Holder",
-      image: "/testimonial-1.jpg",
-    },
     roadmapCopy: UAAPL_LIVE ? undefined : "This vault deploys in phase C2.",
   },
   // uSPY and uMSFT are deployed on mainnet (markets 26 and 14) and had no page: their slugs

@@ -927,7 +927,29 @@
   "Mint and redeem certificates, track your receipts, and read solvency live from the contracts.": "铸造和赎回凭证、追踪你的回执，并直接从合约实时读取偿付能力。",
   "UseCert indexer": "UseCert 索引器",
   "Flow history is read from UseCert's own indexer, which scans the vaults' logs straight from the Robinhood Chain RPC (eth_getLogs) and decodes them from the contracts' event signatures. Its first run matched the public explorer event for event. It is still a server's HTTP answer, not a chain read by this browser; balances, prices, capacity and solvency elsewhere on this dashboard are read directly from the contracts. If it is unreachable or behind, the public Blockscout index is used instead and this note says so.": "流水历史读取自 UseCert 自己的索引器：它直接通过 Robinhood Chain RPC（eth_getLogs）扫描金库日志，并按合约的事件签名解码。它的首次运行与公共浏览器逐条一致。它仍是服务器的 HTTP 响应，而不是本浏览器执行的链上读取；本仪表盘其他地方的余额、价格、容量和偿付能力都直接从合约读取。如果索引器无法访问或落后，将改用公共 Blockscout 索引，并在此说明。",
-  "Neither the UseCert indexer nor the explorer index could be read, so your receipts cannot be listed right now. This is not \"no receipts\": enter an id above, or try again shortly.": "UseCert 索引器和浏览器索引都无法读取，因此暂时无法列出你的回执。这并不代表“没有回执”：请在上方输入编号，或稍后重试。"
+  "Neither the UseCert indexer nor the explorer index could be read, so your receipts cannot be listed right now. This is not \"no receipts\": enter an id above, or try again shortly.": "UseCert 索引器和浏览器索引都无法读取，因此暂时无法列出你的回执。这并不代表“没有回执”：请在上方输入编号，或稍后重试。",
+  "Redemption is never gated. On this deployment every redemption is queued: the vault closes the matching hedge on chain in the same transaction, and the collateral is paid by claim once it is back from the venue, usually within minutes and, in the worst case the venue allows, up to its 14-day priority expiration. Queued is not refused. That guarantee is a property of these contracts and stops where they do: submitting the transaction at all requires Robinhood Chain to include it, which is the chain’s concern and not something UseCert can promise on its behalf. Minting pauses automatically when oracle prices are stale or deviate beyond published guard bands; redemption continues at the last good price. Funding is paid on the venue, into and out of each vault’s margin account; sustained negative funding reduces what backs the vault, and no holding-fee pass-through is deployed. All parameters, thresholds and each vault’s collateral balance are public on chain.": "赎回从不设限。在本部署中，每一笔赎回都进入队列：金库会在同一笔交易中于链上平掉相应的对冲，抵押品从交易场所返还后通过领取支付，通常在数分钟内完成；在交易场所允许的最坏情况下，最长可达其 14 天的优先请求到期时间。排队不等于拒绝。这一保证是这些合约的属性，也止于合约本身：交易能否被提交，取决于 Robinhood Chain 是否将其打包，这是该链的事，而非 UseCert 能够代为承诺的。当预言机价格过期或偏离超出公布的保护区间时，铸造会自动暂停；赎回将按最近的有效价格继续进行。资金费在交易场所支付，进出每个金库的保证金账户；持续的负资金费率会减少金库的支撑资产，且未部署任何持有费转嫁机制。所有参数、阈值以及每个金库的抵押品余额都在链上公开。",
+  "Using the protocol involves risk, including smart contract risk, oracle risk, market and funding risk, dependence on a single trading venue and a single attester, and the risk that backing mechanisms behave differently under extreme conditions. No staking or insurance layer is deployed: today nothing sits between a vault’s own buffer and holders’ backing. You are responsible for understanding these risks before minting, holding or redeeming. Nothing in the interface constitutes a guarantee of value.": "使用本协议存在风险，包括智能合约风险、预言机风险、市场与资金费率风险、对单一交易场所和单一证明方的依赖，以及支撑机制在极端情况下表现不同的风险。目前未部署任何质押或保险层：金库自身的缓冲金与持有人的支撑资产之间，今天没有任何东西。在铸造、持有或赎回之前，你有责任了解这些风险。界面中的任何内容都不构成价值保证。",
+  "Funding is paid on the venue every hour, into and out of the vault's margin account there. Positive funding adds to what backs the vault; sustained negative funding draws it down. A holding-fee pass-through is designed but not deployed, so nothing charges holders for funding today: it shows up in the vault's backing, which the dashboard publishes live.": "资金费每小时在交易场所支付，进出金库在那里的保证金账户。正资金费率会增加金库的支撑资产；持续的负资金费率会使其减少。持有费转嫁机制已设计但尚未部署，因此今天不会就资金费向持有人收取任何费用：它体现在金库的支撑资产中，仪表盘实时公布。",
+  "On-chain record.": "链上记录。",
+  "No quotes. Every certificate issued and redeemed on mainnet so far, joined from request to settlement, each step a link to its transaction.": "没有引言。迄今为止主网上发行和赎回的每一份凭证，从请求到结算一一对应，每一步都链接到其交易。",
+  "The index could not be read right now; every transaction is on the explorer.": "暂时无法读取索引；每一笔交易都可在浏览器上查看。",
+  "Reading the chain…": "正在读取链上数据…",
+  "These are the transactions, not an assessment of them. The hedge a keeper opens on the venue is off chain and is not proven by this table.": "这些是交易本身，而不是对它们的评估。执行程序在交易场所开立的对冲在链下，本表无法证明。",
+  "Flow": "流水",
+  "In": "投入",
+  "Out": "产出",
+  "Transactions": "交易",
+  "issued": "已发行",
+  "refunded": "已退款",
+  "awaiting hedge": "等待对冲",
+  "awaiting claim": "等待领取",
+  "paid": "已支付",
+  "request": "请求",
+  "settle": "结算",
+  "refund": "退款",
+  "claim": "领取",
+  "tx": "交易"
  },
  "tpl": {
   "(EST. {#} · VERSION {#}.{#})": "（创立于 {0} · 版本 {1}.{2}）",
@@ -1143,6 +1165,11 @@
   "{#}d {#}h ago": "{0} 天 {1} 小时前",
   "{#} points · every {#} min · file written {#}s ago": "{0} 个点 · 每 {1} 分钟 · 文件写入于 {2} 秒前",
   "{#} points · every {#} min · file written {#}m {#}s ago": "{0} 个点 · 每 {1} 分钟 · 文件写入于 {2} 分 {3} 秒前",
-  "Robinhood Chain Lighter, market {#}, the last {#} hourly rates as the venue publishes them, in percent per hour. The vaults hold longs, so a bar below zero is funding the vault pays (longs pay while the rate is positive) and above zero is funding it receives.": "Robinhood Chain Lighter，市场 {0}，交易场所公布的最近 {1} 个每小时费率，单位为每小时百分比。金库持有多头，因此零线以下的柱表示金库支付的资金费（费率为正时多头支付），零线以上表示金库收取的资金费。"
+  "Robinhood Chain Lighter, market {#}, the last {#} hourly rates as the venue publishes them, in percent per hour. The vaults hold longs, so a bar below zero is funding the vault pays (longs pay while the rate is positive) and above zero is funding it receives.": "Robinhood Chain Lighter，市场 {0}，交易场所公布的最近 {1} 个每小时费率，单位为每小时百分比。金库持有多头，因此零线以下的柱表示金库支付的资金费（费率为正时多头支付），零线以上表示金库收取的资金费。",
+  "{#} mints · {#} redemptions · none awaiting · source: UseCert indexer": "{0} 次铸造 · {1} 次赎回 · 无待处理 · 来源：UseCert 索引器",
+  "{#} mints · {#} redemptions · none awaiting · source: third-party index": "{0} 次铸造 · {1} 次赎回 · 无待处理 · 来源：第三方索引",
+  "{#} mints · {#} redemptions · {#} awaiting · source: UseCert indexer": "{0} 次铸造 · {1} 次赎回 · {2} 笔待处理 · 来源：UseCert 索引器",
+  "{#} mints · {#} redemptions · {#} awaiting · source: third-party index": "{0} 次铸造 · {1} 次赎回 · {2} 笔待处理 · 来源：第三方索引",
+  "{#} USDG refunded": "已退还 {0} USDG"
  }
 }

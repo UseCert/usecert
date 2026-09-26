@@ -8,7 +8,7 @@ import TheGap from "./home/TheGap";
 import Faq from "./home/Faq";
 import Boundaries from "./home/Boundaries";
 import Compare from "./home/Compare";
-import Testimonials from "./home/Testimonials";
+import OnChainRecord from "./home/OnChainRecord";
 import Marquee from "./home/Marquee";
 import Research from "./home/Research";
 
@@ -26,7 +26,7 @@ export default function Home() {
       <Faq />
       <Boundaries />
       <Compare />
-      <Testimonials />
+      <OnChainRecord />
       <Marquee />
       <Research />
     </>

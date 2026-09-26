@@ -83,13 +83,13 @@ const DOCS: Record<LegalDoc, { title: string; updated: string; sections: LegalSe
       {
         heading: "3. Minting, redemption, and fees",
         paragraphs: [
-          "Redemption is never gated and settles at oracle price. Below a vault’s instant cap the collateral returns in the same transaction; above it redemption is queued and paid by claim, which takes two batch round-trips in the expected case and, in the worst case the venue allows, up to its 14-day priority expiration. Queued is not refused. That guarantee is a property of these contracts and stops where they do: submitting the transaction at all requires Robinhood Chain to include it, which is the chain’s concern and not something UseCert can promise on its behalf. Minting may pause automatically when oracle prices are stale or deviate beyond published guard bands; in that case redemption continues at the last good price. Sustained negative funding is absorbed by a per-asset buffer first and, past a published threshold, passes through as a transparent holding fee. All parameters, thresholds, and the live buffer balance are public on chain.",
+          "Redemption is never gated. On this deployment every redemption is queued: the vault closes the matching hedge on chain in the same transaction, and the collateral is paid by claim once it is back from the venue, usually within minutes and, in the worst case the venue allows, up to its 14-day priority expiration. Queued is not refused. That guarantee is a property of these contracts and stops where they do: submitting the transaction at all requires Robinhood Chain to include it, which is the chain’s concern and not something UseCert can promise on its behalf. Minting pauses automatically when oracle prices are stale or deviate beyond published guard bands; redemption continues at the last good price. Funding is paid on the venue, into and out of each vault’s margin account; sustained negative funding reduces what backs the vault, and no holding-fee pass-through is deployed. All parameters, thresholds and each vault’s collateral balance are public on chain.",
         ],
       },
       {
         heading: "4. Risks",
         paragraphs: [
-          "Using the protocol involves risk, including smart contract risk, oracle risk, market risk, and the risk that backing mechanisms behave differently under extreme conditions. Staked tokens can be slashed to make holders whole. You are responsible for understanding these risks before minting, holding, staking, or redeeming. Nothing in the interface constitutes a guarantee of value.",
+          "Using the protocol involves risk, including smart contract risk, oracle risk, market and funding risk, dependence on a single trading venue and a single attester, and the risk that backing mechanisms behave differently under extreme conditions. No staking or insurance layer is deployed: today nothing sits between a vault’s own buffer and holders’ backing. You are responsible for understanding these risks before minting, holding or redeeming. Nothing in the interface constitutes a guarantee of value.",
         ],
       },
       {
