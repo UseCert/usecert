@@ -130,6 +130,8 @@ KEEP = {
         "bootstrapped", "lighterAccountIndex", "totalOwedOutstanding", "postedMargin",
         "marginPendingRecall", "marginExcess", "pendingMintCerts", "venuePositionBase",
         "governance",
+        # keeper mode (mainnet): every mint is requestMint, settled by the keeper after the hedge
+        "keeperHedging", "openMintReceipts", "recallMarginUpTo", "retired",
     },
     "Certificate": {
         "name", "symbol", "decimals", "totalSupply", "balanceOf", "allowance",
