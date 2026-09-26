@@ -960,6 +960,10 @@
     [
      "r628-timeline",
      "A receipt's on-chain evidence timeline"
+    ],
+    [
+     "r628-k2",
+     "K2 fee routing: what a sweep may take, and the independent test re-run"
     ]
    ]
   }
