@@ -61,6 +61,8 @@ class Keeper:
         self.size_dec = int(c["size_decimals"])
         self.state_path = c["state_file"]
         self.fill_timeout = int(c.get("fill_timeout_sec", 180))
+        # Only for vaults deployed with recallMarginUpTo (2026-09-26 and later).
+        self.auto_recall = bool(c.get("auto_recall", False))
         with open(c["api_key_file"]) as f:
             self.key = json.load(f)
         self.attester_pk = c["attester_pk"] if "attester_pk" in c else os.environ["KEEPER_ATTESTER_PK"]
@@ -237,11 +239,41 @@ class Keeper:
         self._save()
         log("receipt %d: settled %s" % (rid, h))
 
+    def maybe_recall(self):
+        """Bring margin home for redemptions waiting on it, sized to what the venue really holds.
+
+        The vault's books do not see trading P&L, and Lighter refuses a withdrawal larger than the
+        account's balance ENTIRELY (21304). So the request is capped at the available balance read
+        off the venue, via recallMarginUpTo. One request in flight at a time: a withdrawal takes
+        minutes to land, and repeating it would only queue duplicates against the same balance.
+        """
+        if not self.auto_recall:
+            return
+        def u(sig):
+            return int(self._cast("call", self.vault, sig, "--rpc-url", self.rpc).split()[0])
+        owed, have = u("totalOwedOutstanding()(uint256)"), u("hotBuffer()(uint256)")
+        if owed <= have:
+            return
+        if time.time() - self.state.get("last_recall", 0) < 600:
+            return
+        a = self._get("/api/v1/account?by=l1_address&value=" + self.vault)["accounts"][0]
+        avail = int(float(a.get("available_balance") or 0) * 10 ** 6)
+        if avail == 0:
+            return
+        out = self._cast("send", self.vault, "recallMarginUpTo(uint256)", str(avail),
+                         "--gas-limit", "1500000", "--private-key", self.attester_pk, "--rpc-url", self.rpc)
+        self.state["last_recall"] = time.time()
+        self._save()
+        log("recall: owed %d, vault holds %d, venue available %d -> recallMarginUpTo sent (%s)"
+            % (owed, have, avail, "ok" if any(l.split()[:2] == ["status", "1"] for l in out.split("
+")) else "REVERTED"))
+
     def run_once(self):
         reqs = self.new_requests()
         self._save()
         for rid, base, side, limit_px18, _tx in reqs:
             self.handle(rid, base, side, limit_px18)
+        self.maybe_recall()
 
 
 def main():
