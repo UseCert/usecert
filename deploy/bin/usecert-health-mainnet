@@ -17,6 +17,7 @@ WHAT IS CHECKED, and why each one matters to a holder:
   backup     the nightly encrypted copy to Montreal succeeded within 36 h.
   indexer    all six vault event files were rewritten within 5 min.
   book       every address this host runs on matches the book tracked on GitHub.
+  manifest   every deployed file equals its blob on GitHub (usecert-release-manifest).
 
 What is NOT checked: attestation age. Between mints it is stale and capacity reads zero BY DESIGN
 (the signer signs, the minter relays); alerting on it describes correct behaviour.
@@ -46,6 +47,7 @@ MEMO = "/var/lib/usecert-health/mainnet.json"
 BACKUP_STAMP = "/var/lib/usecert-backup/last-ok"
 INDEX_GLOB = "/var/www/usecert-data/logs/*.json"
 TRACKED_BOOK_URL = "https://raw.githubusercontent.com/UseCert/usecert/backend/contracts-c1/deployments/4663.json"
+MANIFEST = "/var/www/usecert-data/manifest.json"
 HOST_BOOKS = ["/opt/keeper/book-stack4.json", "/opt/usecert-history/4663.json"]
 UA = {"User-Agent": "usecert-health/1.0", "Content-Type": "application/json"}
 
@@ -164,6 +166,17 @@ def checks():
                          % (local, len(diff), "/".join(map(str, diff[0]))))
     except (urllib.error.URLError, TimeoutError, ValueError) as e:
         print("book drift check skipped: %s" % type(e).__name__)
+
+    # usecert-release-manifest (hourly): does what runs here equal what is public on GitHub?
+    try:
+        man = json.load(open(MANIFEST))
+        if now - man["generatedAt"] > 3 * 3600:
+            P.append("manifest: not regenerated for %d h (usecert-release-manifest)" % ((now - man["generatedAt"]) // 3600))
+        elif not man["allMatch"]:
+            bad = [f["host"] for f in man["files"] if not f["matches"]] + man["web"].get("differ", []) + man["web"].get("onlyInRepo", [])
+            P.append("manifest: running code differs from GitHub: %s" % ", ".join(bad[:5]))
+    except (OSError, ValueError, KeyError) as e:
+        P.append("manifest: unreadable (%s)" % type(e).__name__)
 
     # usecert-backup-france writes this after Montreal confirms the byte count.
     try:
