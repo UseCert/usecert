@@ -1,0 +1,28 @@
+[Unit]
+Description=UseCert attestation signer, mainnet (signs, never broadcasts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=keeper
+Group=keeper
+# The attester key, read by systemd as root; the file stays root-only.
+EnvironmentFile=/etc/usecert-keeper/attester.env
+ExecStart=/bin/sh -c 'ATTESTER_PK="$KEEPER_ATTESTER_PK" exec /opt/keeper/venv/bin/python /opt/keeper/usecert-signer-mainnet.py /opt/keeper/book-stack3.json'
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/keeper
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LockPersonality=true
+StandardOutput=append:/var/log/usecert-signer.log
+StandardError=append:/var/log/usecert-signer.log
+
+[Install]
+WantedBy=multi-user.target

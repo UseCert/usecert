@@ -5,7 +5,7 @@
   "chainId": 4663,
   "chainName": "Robinhood Chain",
   "rpcUrl": "https://rpc.mainnet.chain.robinhood.com",
-  "explorerUrl": "https://explorer.chain.robinhood.com",
+  "explorerUrl": "https://robinhoodchain.blockscout.com",
   "blockNumber": null,
   "timestamp": null,
   "commit": null,

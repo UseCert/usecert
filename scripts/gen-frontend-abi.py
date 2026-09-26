@@ -55,7 +55,7 @@ CHAINS = {
         "out": "usecert-contracts.mainnet.ts",
         "label": "Robinhood Chain",
         "rpc": "https://rpc.mainnet.chain.robinhood.com",
-        "explorer": "https://explorer.chain.robinhood.com",
+        "explorer": "https://robinhoodchain.blockscout.com",
         "testnet": False,
     },
 }
