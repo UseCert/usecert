@@ -29,12 +29,22 @@ export const CHAIN_ID = CHAIN.id;
  * viem chain definition, derived from the generated `CHAIN` constant rather than
  * redeclared. Spread into mutable arrays because `CHAIN` is `as const`.
  */
+/**
+ * Multicall3, where the generated bundle names one (mainnet does, after checking it on chain).
+ * With it, wagmi batches every `useReadContracts` into one call; without it the dashboard sent
+ * ~220 separate requests every 30 seconds, enough to trip the RPC's rate limit - which a
+ * browser reports as a CORS failure, because the limiter's reply carries no CORS header.
+ */
+const MULTICALL3 = (CHAIN as { contracts?: { multicall3?: { address: `0x${string}` } } }).contracts
+  ?.multicall3;
+
 export const usecertChain = defineChain({
   id: CHAIN.id,
   name: CHAIN.name,
   nativeCurrency: { ...CHAIN.nativeCurrency },
   rpcUrls: { default: { http: [...CHAIN.rpcUrls.default.http] } },
   blockExplorers: { default: { ...CHAIN.blockExplorers.default } },
+  ...(MULTICALL3 ? { contracts: { multicall3: { address: MULTICALL3.address } } } : {}),
   testnet: CHAIN.testnet,
 });
 
