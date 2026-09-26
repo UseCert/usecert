@@ -16,9 +16,11 @@ inferred from documentation prose. Line references are to the versions pinned in
 
 1. Import `Chrissou78/usecertlah` as a new Vercel project.
 2. **Root Directory:** `.` (the app is at the repo root).
-3. **Production Branch:** the branch carrying the testnet wiring. `main` is the *unwired*
-   Lovable export and `backend/contracts-c1` is the Solidity backend — neither is deployable
-   as the live front-end.
+3. **Production Branch:** `main`. It carries the testnet wiring as of 2026-09-23 — it was
+   the unwired Lovable export until then, and this line said so. `frontend/testnet-wiring`
+   is where that work lands first and is the same commit; `backend/contracts-c1` is the
+   Solidity backend, an unrelated history in the same repo, and is not deployable as a
+   front-end.
 4. Leave Framework Preset, Build Command, Output Directory and Install Command **on their
    auto-detected defaults**. Override nothing.
 5. **Environment variables: none.** There are no `VITE_*` references anywhere in `src/`; all
