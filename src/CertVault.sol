@@ -62,6 +62,11 @@ contract CertVault {
     ///      orders are reduce-only. Mint through requestMint; the keeper opens the hedge.
     error CertVault_OpenRequiresKeeper();
     error CertVault_KeeperHedgingAlreadyEnabled();
+    /// @dev The vault has been retired: it accepts no new mints, ever.
+    error CertVault_Retired();
+    /// @dev retire() refused: someone still holds certificates, an escrow, or a claim.
+    error CertVault_NotEmpty();
+    error CertVault_NotRetired();
     /// @dev C3: an unsettled mint receipt past its settleWindow. Not a dead end — refundMint()
     ///      is permissionless and returns the escrow, so the expiry is a fork, not a trap.
     error CertVault_SettleWindowExpired();
@@ -94,6 +99,8 @@ contract CertVault {
     event Minted(address indexed user, uint256 amountIn, uint256 certOut, uint256 px18, uint256 fee);
     event VenueMinimumsSet(uint256 minBase, uint256 minNotional18);
     event KeeperHedgingEnabled();
+    event Retired();
+    event RetiredCapitalSwept(address indexed to, uint256 amount, uint256 venueRequested);
     event VenueApiKeySet(uint8 indexed apiKeyIndex);
     /// @dev The keeper's work order: open `base` venue units on `side`, no worse than
     ///      `limitPx18`, then call settleMint(receiptId, fillPx18).
@@ -467,6 +474,17 @@ contract CertVault {
     ///      it replaces does not work on this venue, so there is nothing to return to.
     bool public keeperHedging;
 
+    /// @notice Mint receipts that are neither settled nor refunded.
+    /// @dev Exists for retire(). A mint receipt holds a user's escrow from request until it is
+    ///      settled (certificates issued) or refunded (escrow returned), and NO other counter
+    ///      covers the whole of that window: pendingMintCerts is released at stageRefund while the
+    ///      escrow is still owed until refundMint, and totalOwedOutstanding tracks redemptions
+    ///      only. Without this, "the vault is empty" could not be established on chain.
+    uint256 public openMintReceipts;
+
+    /// @notice Set by retire(); a retired vault never mints again.
+    bool public retired;
+
     /// @notice How long a mint receipt stays settleable before it can only be refunded.
     /// @dev C3: settleMint bands against the price recorded at requestMint, so a receipt must not
     ///      be allowed to sit indefinitely and be settled against a price that has moved
@@ -675,6 +693,42 @@ contract CertVault {
         emit VenueMinimumsSet(minBase, minNotional18);
     }
 
+    /// @notice Close an EMPTY vault for good, so its capital can be recovered.
+    /// @dev MAINNET, 2026-09-26. Two deployments left about 33 USDG in vaults nobody holds, with no
+    ///      way out: the vault releases collateral only by redeeming certificates, and there were
+    ///      none. That property - no owner can take collateral from under holders - is right and is
+    ///      kept. retire() is the narrow exception that cannot touch a holder, because it refuses
+    ///      unless NOBODY has anything in the vault:
+    ///        - no certificates exist                      (no holder to redeem),
+    ///        - no mint receipt is open                     (no escrow awaiting settle or refund),
+    ///        - nothing is owed on redemption receipts      (no claimant),
+    ///        - the vault's hedge ledger is flat            (no position to unwind).
+    ///      What remains is the protocol's own capital - seed, buffer, bootstrap dust - and after
+    ///      this the vault never mints again, so nobody can become a holder of it later.
+    function retire() external {
+        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        if (
+            certificate.totalSupply() != 0 || openMintReceipts != 0 || totalOwedOutstanding != 0
+                || venuePositionBase != 0
+        ) revert CertVault_NotEmpty();
+        retired = true;
+        emit Retired();
+    }
+
+    /// @notice Return a retired vault's capital to governance, including from the venue.
+    /// @dev `venueAmount` is the venue account's real balance as read off the venue: the vault's
+    ///      books do not see trading P&L and the venue refuses a withdrawal larger than the balance
+    ///      outright (see recallMarginUpTo). A withdrawal lands in this vault, so call again once
+    ///      it has arrived to forward it.
+    function sweepRetired(uint256 venueAmount) external {
+        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        if (!retired) revert CertVault_NotRetired();
+        if (venueAmount > 0) _requestWithdraw(venueAmount);
+        uint256 bal = IERC20(cfg.collateral).balanceOf(address(this));
+        if (bal > 0) IERC20(cfg.collateral).safeTransfer(governance, bal);
+        emit RetiredCapitalSwept(governance, bal, venueAmount);
+    }
+
     /// @notice Switch to keeper-opened hedges. One-way; see keeperHedging.
     function enableKeeperHedging() external {
         if (msg.sender != governance) revert CertVault_OnlyGovernance();
@@ -710,6 +764,7 @@ contract CertVault {
     ///      re-enter, so the outer mint's admission check sees the inner mint's supply instead of
     ///      measuring headroom that a nested call was about to consume.
     function mintInstant(uint256 amountIn) external returns (uint256 certOut) {
+        if (retired) revert CertVault_Retired();
         if (amountIn == 0) revert CertVault_ZeroAmount();
         if (!bootstrapped) revert CertVault_NotBootstrapped();
         if (!oracle.mintAllowed()) revert CertVault_MintPaused();
@@ -765,6 +820,7 @@ contract CertVault {
     }
 
     function requestMint(uint256 amountIn) external returns (uint256 receiptId) {
+        if (retired) revert CertVault_Retired();
         if (amountIn == 0) revert CertVault_ZeroAmount();
         if (!bootstrapped) revert CertVault_NotBootstrapped();
         if (!oracle.mintAllowed()) revert CertVault_MintPaused();
@@ -814,6 +870,7 @@ contract CertVault {
         // one attestation window would re-observe the same headroom exactly as the instant path
         // did. Released in settleMint or stageRefund; see pendingMintCerts.
         pendingMintCerts += indicative;
+        ++openMintReceipts;
 
         _postMargin(received - fee);
         if (keeperHedging) {
@@ -934,6 +991,7 @@ contract CertVault {
         }
 
         r.settled = true;
+        --openMintReceipts;
 
         uint256 certOut = r.indicativeCerts;
         // The position enters the vault's ledger when it exists, not when it was asked for.
@@ -1085,6 +1143,7 @@ contract CertVault {
         }
 
         r.settled = true;
+        --openMintReceipts;
         IERC20(cfg.collateral).safeTransfer(r.user, amountOut);
         emit MintRefunded(receiptId, r.user, amountOut);
     }
