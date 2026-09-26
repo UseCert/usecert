@@ -146,20 +146,18 @@ def _tree_is_dirty():
     previous run. Counting it means `-dirty` is on every single time, and a flag that
     cannot be off carries no information. What the flag is for is the case that matters:
     a bundle generated from sources that differ from the commit it names.
+
+    `diff --name-only HEAD` rather than `status --porcelain`: it emits bare paths, with
+    no status column to slice past and no untracked files to filter. The first attempt
+    here parsed porcelain with `line[3:]`, which was off by one because `_git` strips the
+    leading space out of the status column - so every path failed to match the exclusion
+    and the flag was stuck on, which is the exact failure this function exists to avoid.
     """
-    status = _git("status", "--porcelain", "--untracked-files=no")
-    if not status:
+    changed = _git("diff", "--name-only", "HEAD")
+    if not changed:
         return False
     out_rel = os.path.relpath(OUT_PATH, ROOT).replace(os.sep, "/")
-    for line in status.splitlines():
-        # Porcelain v1: two status characters, a space, then the path. A rename carries
-        # "old -> new"; the destination is what was written, so take that side.
-        path = line[3:].strip().strip('"')
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1].strip().strip('"')
-        if path != out_rel:
-            return True
-    return False
+    return any(path.strip() != out_rel for path in changed.splitlines() if path.strip())
 
 
 def deployed_at_commit(book):
