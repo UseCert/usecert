@@ -966,6 +966,46 @@
      "K2 fee routing: what a sweep may take, and the independent test re-run"
     ]
    ]
+  },
+  "6.29": {
+   "commits": [
+    "095093b",
+    "8fb8b54",
+    "66607ee",
+    "c0187e1",
+    "65af023",
+    "1fab104"
+   ],
+   "shots": [
+    [
+     "r629-proof",
+     "Deployed, read back, verified, proven with 1 USDG"
+    ],
+    [
+     "r629-stake",
+     "The Insurance view, live on mainnet"
+    ],
+    [
+     "r629-rules",
+     "The rules fixed in the contract, and income stated plainly"
+    ],
+    [
+     "r629-stake-zh",
+     "The same in Chinese"
+    ],
+    [
+     "r629-waterfall",
+     "The Risk view's waterfall now reads the pool's live size"
+    ],
+    [
+     "r629-contracts",
+     "The pool on /contracts, Sourcify exact match"
+    ],
+    [
+     "r629-record",
+     "The deployment record in the repository"
+    ]
+   ]
   }
  }
 }

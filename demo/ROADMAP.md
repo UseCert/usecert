@@ -1826,6 +1826,60 @@ the tree is clean.
   leaderboard with no deposit and no bet, rewarded from a marketing budget, once staking is
   live. Not the deposit-and-forfeit-yield version, which is a binary option on equities.
 
+### 6.29 The insurance pool is live on mainnet, with its interface — ✅ 2026-09-26 (`095093b`, `8fb8b54`, `66607ee`; front end `c0187e1`, `65af023`)
+
+**The fee split, set by the owner: 70/20/5/5.**
+* 70% to stakers in the insurance pool, 20% to a buyback fund (USDG until a CERT market
+  exists), 5% to keeper and ops gas, 5% to the treasury (the Safe).
+* The site and docs had published three different splits; all now say this one.
+* The K2 branch pins it in a test: 12.345678 USDG splits to exactly 8.641974 / 2.469135 /
+  0.617283 / 0.617283.
+
+**A deposit cap before deploying.** `InsuranceStaking` gained an immutable `depositCap`, because
+the contract is unaudited and the cap is what bounds the exposure. Income can take the pool past
+the cap; only deposits stop. 23 tests.
+
+**Deployed:** `0xDbdA46671E0e97860493Ce149ad7B726407dAFb1`, tx `0x97a2b1e4…7c27`, block
+73,180,902, from `095093b`.
+* Governance is the 2-of-3 Safe, the registry is CertFactory, and the asset is USDG.
+* Parameters: cooldown 10 d, window 3 d, draw delay 2 d, draw cap 30%, deposit cap 10,000 USDG.
+* The init code was built locally and signed on the host that holds the deployer key; the key
+  never moved. It cost 0.00006 ETH.
+* Every constructor parameter was read back from the chain. Sourcify: exact match on creation
+  and runtime.
+* Recorded in `deployments/4663.insurance.json`.
+
+**Proven with 1 USDG** before anyone else could deposit:
+* approve and deposit: 10¹² shares, worth exactly 1.000000 USDG, with 9,999 of room left;
+* a withdrawal without a request is refused (`ERC4626ExceededMaxRedeem`);
+* a withdrawal request opens the window on 2026-10-06.
+
+**Still to prove:** completing that withdrawal inside its window (2026-10-06 to 2026-10-09).
+
+**Interface.** A sixth dashboard view, "Insurance", reads the pool live:
+* assets and room under the cap, value per share, your stake, draws and their history;
+* deposit, request, cancel and withdraw, each confirmed on chain before it says so;
+* stated on screen: unaudited, capped, no automatic income, and the rules fixed in the contract.
+Verified in English and Chinese with no page errors. The ABI module is generated from the
+verified artifact.
+
+**Copy that deploying made false, corrected.** Terms, FAQ, Learn, Roles, TokenFlow and the Risk
+view all said there was no staking or insurance.
+* The Risk waterfall and posture now read the pool's live size.
+* The Learn draw paragraph also claimed stress-set sizing and a published expected-loss
+  distribution. Neither exists; it now says the Safe decides within the cap.
+* A live scan finds no remaining "not deployed" claims.
+
+**Watched.**
+* Health alerts on a pending draw. Falsified with a faked pending draw.
+* Sourcify evidence covers the pool: 28 UseCert contracts, 19 exact and 9 runtime-exact.
+* The release manifest matches after the push: 12 of 12 files, 234 of 234 site files.
+
+**Not done.**
+* An external audit.
+* Fee income: K2 is a new vault stack.
+* Choosing the buyback fund and ops wallet addresses.
+
 ---
 
 ## Keeping the public page in sync
