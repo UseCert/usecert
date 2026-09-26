@@ -485,7 +485,43 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
    * unknown cap must never present as a halt.
    */
   const capacity = lv?.capacity ?? null;
-  const capacityHalted = Boolean(capacity?.capIsZero);
+  const capIsZero = Boolean(capacity?.capIsZero);
+
+  /**
+   * ZERO CAPACITY IS TWO DIFFERENT STATES, and this form used to treat them as one.
+   *
+   * `capacityHalted` was `capIsZero`, full stop, and it disables the submit button. But
+   * zero capacity is ALSO the ordinary idle condition of the on-demand design: nobody has
+   * minted for five minutes, the registry attestation aged out, and `maxNotional18` reads
+   * zero until someone relays a fresh signature. `mint()` relays that signature itself —
+   * which means the button that triggers the refresh was disabled by the very state the
+   * refresh exists to clear. The panel said "Attestation idle · your mint refreshes it"
+   * above a control that could not be pressed, and no user could ever have minted from the
+   * idle state. The corrective re-audit of 2026-09-25 found this; it is a real defect and
+   * the reason the mint path had only ever been proven with a command-line relay.
+   *
+   * So the block is lifted for exactly one case, and only when BOTH are true:
+   *   - a stale attestation is the ONLY thing holding the ceiling at zero, and
+   *   - the signer currently has a bundle covering THIS vault, so the refresh can work.
+   *
+   * THE SAME PREDICATE THE PANEL USES. `CapacityNotice` decides between "Attestation idle ·
+   * your mint refreshes it" and "Minting halted" with `onlyStale && refreshable` — and the
+   * whole defect here was a control that disagreed with the sentence printed above it. So
+   * this reads `bindingLegs` rather than `attestationStale`: a vault whose ceiling is zero
+   * for a stale attestation AND an empty buffer is not refreshable, and asking the two
+   * questions differently is how they drift apart again.
+   *
+   * `attestationRefreshable` returns null while the signer's state is still unknown, and
+   * null is not a yes: an unknown signer leaves the block in place rather than inviting a
+   * relay that may have nothing to relay. Every other cause of zero capacity — a real cap,
+   * an unhealthy oracle, a signer that is down, a vault the batch does not cover — still
+   * blocks, because for those a mint genuinely cannot succeed.
+   */
+  const onlyStale =
+    capacity?.bindingLegs.length === 1 && capacity.bindingLegs[0] === "stale-attestation";
+  const staleButRefreshable = capIsZero && onlyStale && attestationRefreshable(asset) === true;
+
+  const capacityHalted = capIsZero && !staleButRefreshable;
   const mintBlocked = tab === "mint" && (!mintAllowed || priceUnavailable || capacityHalted);
   const submitDisabled =
     !connected ||

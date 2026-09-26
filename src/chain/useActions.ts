@@ -40,6 +40,7 @@ import {
   REFRESH_AT_AGE_SEC,
 } from "./attestation";
 import {
+  CertOracleABI,
   CertVaultABI,
   CertificateABI,
   SHARED,
@@ -461,15 +462,24 @@ export function useCertActions(id: ChainVaultId): CertActions {
   );
 
   /**
-   * Relay the attester's signature so this vault's attestation is fresh enough to
-   * mint against. Returns the tx hash if a relay was needed, or null if it was not.
+   * Relay the attester's signed bundle so this vault can be minted against, and WAIT
+   * for it. Returns the hashes it sent; a null half means that half needed no relay.
    *
-   * Called by `mint` rather than exposed as a button: refreshing an attestation is
-   * plumbing, not a user intention, and the only reason a user would ever click it
-   * is to make the next action work.
+   * BOTH HALVES OF THE BUNDLE, NOT ONE. The signer produces two signatures per vault
+   * from a single observation - `attestSig` for `SolvencyRegistry.attestSigned` and
+   * `markSig` for `CertOracle.setMarkPriceSigned` - and this function used to relay only
+   * the first. The corrective re-audit of 2026-09-25 named that omission, and it is real:
+   * the registry relay reopens capacity, but the oracle keeps the mark price it was last
+   * given. With a feed that moves, the basis cross-check is then run against a stale
+   * mark, and `mintAllowed()` can close on a divergence that does not exist. Refreshing
+   * half a bundle buys freshness for the number the audit reads and not for the number
+   * the mint gate uses.
+   *
+   * Called by `mint` rather than exposed as a button: refreshing is plumbing, not a user
+   * intention, and the only reason anyone would click it is to make the next action work.
    */
-  const refreshAttestationIfStale = useCallback(async (): Promise<TxHash | null> => {
-    if (!publicClient) return null;
+  const refreshAttestationIfStale = useCallback(async (): Promise<RelayHashes> => {
+    if (!publicClient) return NO_RELAY;
 
     // Read the age first. Most mints need no relay at all - any other user's mint
     // in the last four minutes already paid for this one's freshness - and a
@@ -480,16 +490,46 @@ export function useCertActions(id: ChainVaultId): CertActions {
       functionName: "ageSec",
       args: [mirror.vault],
     })) as bigint;
-    if (age < BigInt(REFRESH_AT_AGE_SEC)) return null;
+    if (age < BigInt(REFRESH_AT_AGE_SEC)) return NO_RELAY;
 
     const batch = await fetchSignedAttestations();
     const a = attestationFor(batch, mirror.vault);
     // No signature available: say nothing here and let the mint revert with the
     // contract's own `CertVault_AtCapacity`, which is the accurate reason. Inventing
     // a different error would describe a cause we have not established.
-    if (!a || !isRelayable(a)) return null;
+    if (!a || !isRelayable(a)) return NO_RELAY;
 
-    return mutateAsync({
+    /* ----------------------------------------------------------- the mark half */
+
+    // `setMarkPriceSigned` reverts `CertOracle_StaleNonce` on a nonce that is not ahead
+    // of the stored one, so a bundle this oracle has already been given is skipped rather
+    // than turned into a wallet prompt for a transaction that cannot succeed. Two users
+    // minting off one bundle is the ordinary case, not an edge case.
+    let mark: TxHash | null = null;
+    const markNonce = (await publicClient.readContract({
+      address: mirror.certOracle,
+      abi: CertOracleABI,
+      functionName: "markNonce",
+    })) as bigint;
+
+    if (BigInt(a.markNonce) > markNonce) {
+      mark = await mutateAsync({
+        chainId: CHAIN_ID,
+        // PINNED to the bundled mirror, exactly as the registry is below.
+        address: mirror.certOracle,
+        abi: CertOracleABI,
+        functionName: "setMarkPriceSigned",
+        args: [BigInt(a.markPx18), BigInt(a.markNonce), BigInt(a.deadline), a.markSig],
+      });
+      // Confirm before the registry relay. Both must be on chain before the mint reads
+      // either, and a mint sent while these are pending reads the OLD state and reverts
+      // having charged for all three.
+      await publicClient.waitForTransactionReceipt({ hash: mark });
+    }
+
+    /* ------------------------------------------------------- the registry half */
+
+    const attestation = await mutateAsync({
       chainId: CHAIN_ID,
       // PINNED, not taken from the payload. The signer tells us which registry it
       // signed for, and attestationFor() now refuses a payload that disagrees with
@@ -512,7 +552,10 @@ export function useCertActions(id: ChainVaultId): CertActions {
         a.attestSig,
       ],
     });
-  }, [mutateAsync, mirror.vault, publicClient]);
+    await publicClient.waitForTransactionReceipt({ hash: attestation });
+
+    return { mark, attestation };
+  }, [mutateAsync, mirror.vault, mirror.certOracle, publicClient]);
 
   const mint = useCallback(
     async (amountInput: string): Promise<MintResult> => {
@@ -523,13 +566,10 @@ export function useCertActions(id: ChainVaultId): CertActions {
           "Cannot route this mint: vault.cfg() has not loaded, so instantCap18 is unknown.",
         );
       }
-      // Refresh BEFORE routing, and WAIT for it: sending the mint while the relay
-      // is still pending means the mint reads the old attestation and reverts
-      // CertVault_AtCapacity, having charged the user for both.
-      const relayHash = await refreshAttestationIfStale();
-      if (relayHash && publicClient) {
-        await publicClient.waitForTransactionReceipt({ hash: relayHash });
-      }
+      // Refresh BEFORE routing. Both relays are confirmed inside this call: sending the
+      // mint while either is pending means the mint reads the old state and reverts
+      // CertVault_AtCapacity, having charged the user for every transaction in the chain.
+      await refreshAttestationIfStale();
 
       const amountIn6 = toCollateral(amountInput);
       if (routeMint(amountIn6, cap) === "instant") {
@@ -705,6 +745,20 @@ export function useCertActions(id: ChainVaultId): CertActions {
     isRoutable: cfg?.instantCap18 !== undefined,
   };
 }
+
+/**
+ * What a refresh relayed.
+ *
+ * A null half needed no transaction: the mark because this oracle already holds that
+ * nonce or a newer one, the attestation because it was still inside its age budget.
+ * Both halves come from ONE signed bundle, so they describe the same observation.
+ */
+export interface RelayHashes {
+  mark: TxHash | null;
+  attestation: TxHash | null;
+}
+
+const NO_RELAY: RelayHashes = { mark: null, attestation: null };
 
 /* ───────────────────────────────────────────────────────────────────── faucet */
 
