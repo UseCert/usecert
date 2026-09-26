@@ -437,3 +437,45 @@ being claimed in the first place.
 differs even though the runtime bytecode agrees. A full match needs the exact compiler metadata
 settings used at deploy. Keeping a real broadcast record for the live deployment would make the
 next verification a one-liner, and is the same provenance gap as 0.3 and 3.4.
+
+---
+
+## Keeping the public page in sync
+
+**This file is not the only roadmap.** `/roadmap` on use-cert.com publishes a reader-facing
+version, and on 2026-09-25 it was found three items stale: this file had been updated on every
+pass and the page it summarises had not been touched since it was written.
+
+Anything marked done here that a reader would notice — a new capability, a claim that changed,
+a Before-mainnet item whose premise moved — belongs in `src/pages/Roadmap.tsx` in the same
+pass. Not everything qualifies: correcting copy is maintenance, not a milestone.
+
+Two kinds of drift are worth watching for specifically, because both happened:
+
+* A **Before-mainnet item whose premise changed.** "A real venue" said the venue is a
+  simulator, full stop. Lighter is live on mainnet and the interface matches it, so the item
+  was overstating the gap while understating what is actually untested.
+* A **claim that got worse rather than better.** The market-index item said two of four were
+  chosen. The live venue says none of the four match, including the two recorded as verified.
+
+---
+
+## Suggested order
+
+Phase 0 and Phase 1's small items are done. What remains divides cleanly.
+
+**Blocked on a decision, not on work.** 1.3 / 1.4 / 1.5 are one editorial session rather than
+three, since all three are the same question — what does the project claim, and in what tense.
+2.3 needs a contracts answer on `bufferPct`. 0.4 needs artwork that does not exist.
+
+**Blocked on nothing, and next.** `DeployMainnet.s.sol`: the mainnet inputs are measured and
+recorded in `deploy/mainnet/4663.plan.json`, the generator refuses to emit a bundle without a
+deployment, and there is no script to produce one. It is the only thing standing between the
+preparation and a switch.
+
+**Large, and honest about it.** 2.2 (an indexer) and 3.3 (key custody) are multi-day and not
+shortenable. 3.4 needs a signing decision before any of it can be automated.
+
+**Before any mainnet deploy, whatever the order:** validate `LighterCore` against the real
+engine with one small deposit. Everything else in Phase 3 assumes the venue behaves the way
+this project modelled it, and nothing has tested that assumption.
