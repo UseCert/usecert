@@ -49,7 +49,7 @@ verify(){
 }
 
 # --- host postgres (18.6) -----------------------------------------------------
-for db in usecert orionsafe rwaexperts; do
+for db in usecert orionsafe rwaexperts yamale; do
   f="$DEST/host-$db-$STAMP.dump"
   # Redirect as root: the postgres user cannot write into this 700 root-owned
   # directory, and -f made pg_dump try to open the file as postgres itself.
@@ -140,12 +140,18 @@ else
   fail "project/prepare: could not generate the scaffolding"
 fi
 
-f="$DEST/project-cert-addressbook-$STAMP.json"
-if [ -r /opt/usecert/deployments/46630.json ]; then
-  cp /opt/usecert/deployments/46630.json "$f"; chmod 600 "$f"
-  note "project/cert: address book $(du -h "$f" | cut -f1) (no database - state is on chain)"
+# UseCert runs on the France host since 2026-09-26; its state arrives here nightly as an
+# encrypted archive (usecert-backup-france -> usecert-france-receive, openssl CMS to a key
+# held offline). The newest one joins tonight's set so it goes offsite with everything else:
+# a third copy, off both servers. It was the testnet address book from /opt/usecert, which is
+# retired. Already encrypted, and the offsite remote is a crypt remote on top.
+f="$DEST/project-cert-france-$STAMP.cms"
+latest=$(ls -1t /var/backups/usecert-france/usecert-france-*.cms 2>/dev/null | head -1)
+if [ -n "$latest" ] && [ $(( $(date +%s) - $(stat -c %Y "$latest") )) -lt 129600 ]; then
+  cp "$latest" "$f"; chmod 600 "$f"
+  note "project/cert: France state $(du -h "$f" | cut -f1), encrypted, from $(basename "$latest")"
 else
-  fail "project/cert: address book missing at /opt/usecert/deployments/46630.json"
+  fail "project/cert: no France archive newer than 36 h in /var/backups/usecert-france"
 fi
 
 # --- roles and grants are not in a per-database dump --------------------------
