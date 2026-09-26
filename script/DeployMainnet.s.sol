@@ -90,7 +90,46 @@ contract DeployMainnet is DeployTestnet {
     ///      `TestUSDG`; here the float is real USDG that somebody has to send. Seeding is done
     ///      separately and deliberately, so this returns zero and `_phase5` skips it.
     function _seedCollateral() internal view override returns (uint256) {
-        return 0;
+        return vm.envUint("MAINNET_SEED_COLLATERAL");
+    }
+
+    /// @dev The real venue advances its own batches; there is no keeper role to register.
+    function _requiresBatchKeeper() internal view override returns (bool) {
+        return false;
+    }
+
+    // ---------------------------------------------------------------------------------- senders
+
+    /// @dev DISTINCT ENV NAMES, and that is the point.
+    ///
+    ///      The parent reads `DEPLOYER_PK` / `GOV_PK` / `ATTESTER_PK`, and those are exactly the
+    ///      names already exported on the operations host for the TESTNET keeper. Inheriting them
+    ///      would mean a mainnet deploy run in the wrong shell picks up testnet keys and broadcasts
+    ///      real transactions from them - and the first sign would be a deployment owned by an
+    ///      address whose key is in a keeper env file.
+    ///
+    ///      `MAINNET_*` cannot collide. If they are unset, `vm.envUint` reverts and nothing is
+    ///      broadcast, which is the correct outcome for a shell that was not prepared for this.
+    ///
+    ///      Keys live in `/etc/usecert/mainnet-deployer.env`, root-owned 0600, and are never in
+    ///      this repository. See `deploy/mainnet/SWITCHING.md` for how a run loads them.
+    function _senderKeys()
+        internal
+        view
+        override
+        returns (uint256 deployerPk, uint256 govPk, uint256 attesterPk)
+    {
+        return (
+            vm.envUint("MAINNET_DEPLOYER_PK"),
+            vm.envUint("MAINNET_GOV_PK"),
+            vm.envUint("MAINNET_ATTESTER_PK")
+        );
+    }
+
+    /// @dev The batch keeper is a LighterSim concept: the simulator needs a registered key to
+    ///      settle its own batches. The real venue settles its own, so there is no such role.
+    function _batchKeeperAddress() internal view override returns (address) {
+        return address(0);
     }
 
     // ---------------------------------------------------------------------------------- seams
@@ -100,16 +139,43 @@ contract DeployMainnet is DeployTestnet {
         return USDG;
     }
 
-    /// @dev No simulator and no faucet. Wire the real venue and stop.
+    /// @dev No simulator, no faucet, and no price feeds of our own making.
     ///
-    ///      The parent's phase 1 deploys `TestUSDG`, a `TestFaucet`, and a `LighterSim` sized to
-    ///      the first asset's `sizeDecimals` — the last of which is itself a testnet-only
-    ///      constraint, since one simulator cannot serve two different size decimals and the
-    ///      real venue has six distinct decimal pairs across its markets.
+    ///      The parent's phase 1 deploys `TestUSDG`, a `TestFaucet`, a `LighterSim` sized to the
+    ///      first asset's `sizeDecimals`, and one `ReplayAggregator` per mirror. The simulator
+    ///      sizing is itself a testnet-only constraint: one sim cannot serve two different size
+    ///      decimals, and the real venue has six distinct decimal pairs across its markets.
+    ///
+    ///      What replaces them here: the real collateral, the real venue, and a REAL price feed
+    ///      per mirror, which this project does not deploy and must be told. `_pushAggregator`
+    ///      still has to be called once per asset in order — later phases index the array by
+    ///      mirror, and skipping it is how an earlier version of this override panicked with an
+    ///      array out-of-bounds after `SolvencyRegistry` rather than saying what was missing.
     function _phase1_simulators() internal override {
         collateral = _deployCollateral();
         lighter = ZK_LIGHTER;
         testFaucet = address(0);
+        for (uint256 i = 0; i < assets.length; ++i) {
+            _pushAggregator(_feedFor(assets[i].symbol));
+        }
+    }
+
+    /// @dev The real aggregator for one mirror, read from the environment.
+    ///
+    ///      REVERTS when unset, like the other answers this file refuses to guess. A feed is the
+    ///      single input that decides what every certificate is worth; a wrong or absent one is
+    ///      not a degraded deployment, it is a differently-priced asset. `_readFeed` also does not
+    ///      bound `decimals()`, so the feed must report 8 — a deployment-time constraint with no
+    ///      runtime check behind it.
+    function _feedFor(string memory symbol) internal view returns (address) {
+        string memory key = string.concat("MAINNET_FEED_", symbol);
+        address feed = vm.envOr(key, address(0));
+        if (feed == address(0)) {
+            revert DeployMainnet_AnswerRequired(
+                string.concat(key, ": set a real 8-decimal price aggregator for this mirror")
+            );
+        }
+        return feed;
     }
 
     /// @dev The parent allowlists each vault on `LighterSim` before bootstrapping, then seeds
@@ -118,7 +184,11 @@ contract DeployMainnet is DeployTestnet {
     ///
     ///      Bootstrapping still has to happen, so it is done here without the two testnet steps.
     function _phase5_allowlistMarksAndBootstrap() internal override {
+        uint256 seed = _seedCollateral();
+        require(seed > 0, "MAINNET: seed collateral must be non-zero; bootstrap deposits from it");
         for (uint256 i = 0; i < assets.length; ++i) {
+            IERC20(collateral).approve(deployed[i].vault, seed);
+            CertVault(deployed[i].vault).seedBuffer(seed);
             CertVault(deployed[i].vault).bootstrap();
         }
     }
