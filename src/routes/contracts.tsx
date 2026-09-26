@@ -9,7 +9,7 @@ export const Route = createFileRoute("/contracts")({
       {
         name: "description",
         content:
-          "Every UseCert contract on Robinhood Chain testnet, with a link to its verified source on the explorer. Testnet only: the collateral is a test token and the perp venue is simulated.",
+          "Every UseCert contract on Robinhood Chain mainnet, with a link to each on the explorer and its verified source on Sourcify.",
       },
       { property: "og:title", content: "UseCert Contract Addresses" },
       {

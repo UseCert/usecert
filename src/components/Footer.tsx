@@ -2,6 +2,7 @@ import { Link } from "@/lib/router-compat";
 import { motion } from "framer-motion";
 import SwapButton from "./SwapButton";
 import { SOCIALS, XIcon, TelegramIcon } from "./SocialIcons";
+import { CHAIN_ID, CHAIN_LABEL, IS_TESTNET } from "@/chain/deployment";
 
 const fadeUp = (delay: number) => ({
   initial: { opacity: 0, y: 24 },
@@ -152,7 +153,7 @@ export default function Footer() {
             </Link>
           </div>
           <p>© 2026 UseCert®. All rights reserved.</p>
-          <p>Deployed on Robinhood Chain testnet (chain 46630)</p>
+          <p>Deployed on {CHAIN_LABEL} (chain {CHAIN_ID})</p>
           {/* Stated explicitly, and not only as courtesy. This site uses a third party's
               network name, mirrors real equity tickers and asks visitors to connect a wallet -
               which together is the shape automated wallet-security classifiers score as brand
@@ -165,7 +166,9 @@ export default function Footer() {
             sponsored by Robinhood Markets, Inc., nor by Tesla, State Street, NVIDIA, Invesco or
             any issuer whose ticker a certificate mirrors. All trademarks are the property of
             their respective owners. Certificates are not equity, confer no shareholder rights,
-            and this is a testnet deployment carrying no real-world value.
+            {IS_TESTNET
+              ? "and this is a testnet deployment carrying no real-world value."
+              : "and holding one carries the risks described in the Terms of Service."}
           </p>
         </motion.div>
       </div>

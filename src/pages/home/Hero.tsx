@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { motion, useScroll, useTransform } from "framer-motion";
 import LetterReveal from "@/components/LetterReveal";
+import { IS_TESTNET } from "@/chain/deployment";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -172,7 +173,7 @@ export default function Hero() {
       >
         <span>Phase:</span>
         <SlotBars />
-        <span className="whitespace-nowrap text-white">C1 on testnet</span>
+        <span className="whitespace-nowrap text-white">{IS_TESTNET ? "C1 on testnet" : "C1 on mainnet"}</span>
       </motion.div>
 
       {/* Bottom-right: local time */}

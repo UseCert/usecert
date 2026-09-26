@@ -18,7 +18,7 @@ const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
  * they answer different questions, and a reader asking "can I use this yet" is badly
  * served by a page about token genesis.
  *
- * Every SHIPPED item is checkable by the reader against chain 46630 or against the
+ * Every SHIPPED item is checkable by the reader on chain or against the
  * dashboard, which is the only reason to claim them. Nothing here is a promise about
  * a date: the internal roadmap this is derived from sizes work in hours and days, and
  * turning that into public dates would be inventing a confidence nobody has.
@@ -69,114 +69,118 @@ interface Milestone {
 
 const SHIPPED: Milestone[] = [
   {
-    title: "Four mirrors live",
-    copy: "uTSLA, uSPY, uQQQ and uNVDA on Robinhood Chain testnet. Mint, redeem, and force-exit all work against the deployed contracts.",
-    verify: "Every address is on /contracts, each linking to its verified source on the explorer.",
+    title: "Six mirrors live on mainnet",
+    copy: "uTSLA, uSPY, uQQQ, uNVDA, uAAPL and uMSFT on Robinhood Chain mainnet, collateralised in USDG and hedged on Robinhood Chain Lighter. Each one has been through a full mint and redemption on the live venue.",
+    verify: "Every address is on /contracts, each linking to the chain explorer.",
     shot: {
-      src: "/roadmap/mirrors.jpg",
-      alt: "Dashboard table listing uTSLA, uSPY, uQQQ and uNVDA, each marked live, with oracle price, supply, attested notional and margin, buffer held and hedge ratio.",
-      caption: "The four routed vaults on the dashboard, read from chain 46630.",
+      src: "/roadmap/site-contracts.jpg",
+      alt: "The contracts page listing the six mainnet mirrors with their vault, certificate and oracle addresses.",
+      caption: "The mainnet address book, generated from the same file the app transacts against.",
+    },
+  },
+  {
+    title: "Every certificate is hedged before it exists",
+    copy: "A mint escrows your USDG and asks for a hedge. The position is opened on Robinhood Chain Lighter, and only once the venue confirms the full fill are certificates issued, at the price it actually filled at. If the hedge cannot be opened, nothing is issued and the escrow is refunded.",
+    verify: "Open any settle transaction on the explorer: the certificates are minted in the same transaction that records the fill.",
+    shot: {
+      src: "/roadmap/bs-tx-settle-s3.jpg",
+      alt: "Explorer page of a successful settle transaction minting 0.0335 uTSLA.",
+      caption: "A mainnet settle: the hedge filled on the venue, then 0.0335 uTSLA was minted.",
+    },
+  },
+  {
+    title: "Exits close on chain, with no key involved",
+    copy: "Redeeming makes the vault send its own reduce-only order to the venue through the chain. No operator, API key or keeper is needed to close a position, which is the part of the design that has to work when nothing else does.",
+    verify: "The redemption transaction on the explorer is sent by the holder, to the vault, and carries the close.",
+    shot: {
+      src: "/roadmap/bs-tx-redeem-611.jpg",
+      alt: "Explorer page of a successful redemption transaction.",
+      caption: "A mainnet redemption. The venue position was flat within ten seconds.",
     },
   },
   {
     title: "Solvency attested per batch, with its age published",
-    copy: "Backing is posted on-chain per batch rather than asserted in copy. The dashboard shows how old the figure is, and says so plainly when it is stale.",
+    copy: "Backing is posted on-chain per batch rather than asserted in copy. On mainnet the figures are the vaults' own venue accounts, read from the venue and signed by the attester. The dashboard shows how old they are.",
     verify: "The attestation age is on the dashboard, next to the figure it qualifies.",
     shot: {
-      src: "/roadmap/attestation-age.jpg",
-      alt: "Dashboard table with a Proven column showing each vault's attestation age and batch number, and a Minting column reading Allowed.",
-      caption:
-        "Every figure carries its age and batch number. The venue market column also marks which indices were read from the venue and which were chosen.",
+      src: "/roadmap/site-dashboard.jpg",
+      alt: "The mainnet dashboard overview with position notional, margin, buffer held and the attestation age.",
+      caption: "The dashboard on mainnet. Each figure carries the age of the attestation behind it.",
     },
   },
   {
-    title: "Redemption gated on nothing",
-    copy: "Exiting reads no health state, needs no keeper and no fresh attestation. It is the one path with no preconditions, deliberately, so a holder can always leave.",
-    verify: "forceExit takes no oracle and no capacity check.",
+    title: "Minting pays for its own freshness",
+    copy: "The attester signs and whoever mints relays that signature inside their own transaction, so nobody funds an idle protocol to stay open. On mainnet the signer reads the venue itself and hands out signatures with almost their whole minute of validity left.",
+    verify: "use-cert.com/api/attestations serves the current signatures.",
   },
   {
-    title: "Minting pays for its own freshness",
-    copy: "An idle protocol used to pay a keeper around the clock to stay open. Now the attester signs and whoever mints relays that signature inside their own transaction, so nobody funds an empty room.",
-    verify: "Idle days cost the protocol nothing on-chain.",
+    title: "Protocol capital can be recovered from an empty vault",
+    copy: "A vault only releases collateral by redeeming certificates, which is what stops anyone taking it from under holders. A retired vault is the one exception, and retiring refuses unless no certificates, open mints, unpaid redemptions or hedge remain. After that it never mints again.",
+    verify: "test/CertVaultRetire.t.sol is in the repository: four of its seven cases are ways retiring could hurt someone, and each must fail.",
+  },
+  {
+    title: "Source verified for every contract",
+    copy: "All 27 mainnet contracts publish their source on Sourcify, with the runtime bytecode matching exactly.",
+    verify: "Look any address up on sourcify.dev.",
     shot: {
-      src: "/roadmap/mint-refresh.jpg",
-      maxW: 660,
-      alt: "Panel headed 'Attestation idle, your mint refreshes it', explaining that the mint ceiling reads zero while the protocol is idle and that the transaction relays a fresh attestation.",
-      caption:
-        "What the mint panel says between mints. The ceiling reads zero because nobody is paying to hold it open; the mint relays a fresh attestation itself.",
+      src: "/roadmap/sourcify-vault-s3.jpg",
+      alt: "Sourcify page showing a verified CertVault on Robinhood Chain.",
+      caption: "The uTSLA vault on Sourcify.",
     },
   },
   {
     title: "A dashboard that refuses to invent data",
     copy: "Figures are read from the chain. Where a series would need an indexer that does not exist yet, the dashboard says that instead of drawing a plausible curve.",
     verify: "Look for the places it declines to plot something.",
-    shot: {
-      src: "/roadmap/no-invented-data.jpg",
-      alt: "An empty chart area reading 'No solvency history yet: needs an indexer', explaining that no view function returns a time series so a curve would have to be invented.",
-      caption: "Where a chart would go, when the data to draw one does not exist.",
-    },
-  },
-  {
-    title: "Every contract verified on the explorer",
-    copy: "All 26 deployed contracts publish their source. Paste any address into the explorer and read the code it was compiled from, including the certificate token itself.",
-    verify: "Pick any address from the dashboard and open it on the explorer.",
   },
   {
     title: "Risk thresholds read from the contracts",
-    copy: "The failure-mode table used to name its thresholds in prose. Each row now prints the number the contract actually enforces — staleness, deviation, basis band, attestation age, instant cap — read live from the oracle and the vault.",
+    copy: "Each row of the failure-mode table prints the number the contract actually enforces, including staleness, deviation, basis band, attestation age and instant cap, read live from the oracle and the vault.",
     verify: "Compare the risk table against the same values on the explorer.",
   },
   {
     title: "External security audit, criticals closed",
-    copy: "The contracts were audited by an outside reviewer. The reported Critical is fixed, as is a blocker that would have left one contract undeployable. The auditor's proof-of-concept exploits are kept in the repository as executable evidence rather than summarised: all eight were written to fail, and five now pass. Of the three that do not, two can no longer set their exploit up at all because the guard stops them first; the third asserts margin is recallable in one permissionless call, which an asynchronous venue cannot satisfy — the margin is recoverable, in two steps.",
+    copy: "The contracts were audited by an outside reviewer. The reported Critical is fixed, as is a blocker that would have left one contract undeployable. The auditor's proof-of-concept exploits are kept in the repository as executable evidence rather than summarised.",
     verify: "test/AuditPoC.t.sol and test/AttackSuite.t.sol are in the repository and runnable.",
   },
   {
     title: "The site reads its claims off the chain it is on",
-    copy: "Which network this is, whether the collateral is a test token, whether the perp venue is a simulator, whether a faucet exists \u2014 none of that is typed into the copy any more. It is read from the deployed address book, so the page cannot describe a deployment it is not talking to. On a network with no faucet the sentence about the faucet does not appear, because no contract is there to describe. There is no separate wording to remember to switch.",
-    verify: "Every address on /contracts comes from that same address book, and the disclosure above changes with it.",
+    copy: "Which network this is, what the collateral is called, whether the venue is simulated and whether a faucet exists are all read from the deployed address book, so the page cannot describe a deployment it is not talking to.",
+    verify: "Every address on /contracts comes from that same address book.",
   },
 ];
 
 const BUILDING: Milestone[] = [
   {
+    title: "Alerting on the keepers and the signer",
+    copy: "The hedge keepers and the attestation signer run, retry and journal what they do. Nothing yet pages a person when one stops, and that has to exist before larger amounts are minted.",
+  },
+  {
     title: "History worth plotting",
-    copy: "Solvency and funding over time need an indexer - no view function returns a series. Until one exists the dashboard shows a single proven point rather than a curve.",
+    copy: "Solvency and funding over time need an indexer, since no view function returns a series. Until one exists the dashboard shows a single proven point rather than a curve.",
   },
   {
     title: "Your receipts, enumerable",
     copy: "Mint and redeem receipts exist on-chain but cannot be listed by address from the contracts alone. Same dependency as the history above.",
   },
-  {
-    title: "Wallets beyond browser extensions",
-    copy: "Extension wallets already work. Mobile wallets are wired and waiting on one piece of configuration.",
-  },
 ];
 
 const BEFORE_MAINNET: Milestone[] = [
   {
-    title: "Re-audit the path that changed",
-    copy: "Moving attestation from a keeper to a signature is new since the audit, and it sits directly on the gate that admits minting. Closed criticals do not transfer to a path that did not exist when they were closed.",
+    title: "Governance and attester custody",
+    copy: "Governance and the attester are each a single key today. Moving them to threshold custody, with a rotation that has actually been rehearsed, is the largest open risk and is not done.",
   },
   {
-    title: "Trade against the real venue",
-    copy: "Lighter is live on Robinhood Chain mainnet and the interface this project calls matches it — every function checked against the deployed contract. What has never been tested is behaviour: settlement timing, partial fills, order rejection, margin accounting. On testnet the venue is a simulator this project runs, so every margin and position figure here describes a simulated position.",
+    title: "Re-audit what changed",
+    copy: "Signed attestations, keeper-opened hedges and vault retirement are all newer than the audit. Closed findings do not carry over to code that did not exist when they were closed.",
   },
   {
-    title: "Verified market indices on every mirror",
-    copy: "Checked against the live venue: none of the four indices deployed here match it, including the two previously recorded as verified. On a simulator any index works, which is exactly why a wrong one went unnoticed. The real ids are known and recorded; correcting them is a redeploy per mirror, because the index is immutable.",
-  },
-  {
-    title: "Real collateral",
-    copy: "Mainnet uses USDG. The test token and its faucet disappear, and with them the ability to mint without buying anything.",
-  },
-  {
-    title: "Key custody and rotation, in the open",
-    copy: "Rotation already exists on-chain with a published notice period. What has to be settled before mainnet is the operational half: where the signing key lives and who can move it.",
+    title: "Exact bookkeeping of venue payouts",
+    copy: "The venue pays withdrawals straight to the vault, which the vault's recall counter does not see, so that counter can overstate. Holders are paid regardless, because payouts are sized from the vault's real balance, but the published counter should be exact.",
   },
   {
     title: "Releases you can verify",
-    copy: "Signed releases and an address book a reader can check against the explorer, so the site you are reading and the contracts it talks to can be tied together by someone who trusts neither.",
+    copy: "Signed releases, so that the site you are reading and the contracts it talks to can be tied together by someone who trusts neither.",
   },
 ];
 
@@ -187,7 +191,7 @@ const BEFORE_MAINNET: Milestone[] = [
 const PAGES: { m: Milestone; status: Status; label: string }[] = [
   ...SHIPPED.map((m) => ({ m, status: "shipped" as Status, label: "Shipped" })),
   ...BUILDING.map((m) => ({ m, status: "building" as Status, label: "Building" })),
-  ...BEFORE_MAINNET.map((m) => ({ m, status: "planned" as Status, label: "Before mainnet" })),
+  ...BEFORE_MAINNET.map((m) => ({ m, status: "planned" as Status, label: "Still open" })),
 ];
 
 const DOT: Record<Status, string> = {
@@ -202,7 +206,7 @@ const TOTAL_PAGES = PAGES.length + 1;
 const GROUPS: { label: string; status: Status; items: Milestone[] }[] = [
   { label: "Shipped", status: "shipped", items: SHIPPED },
   { label: "Building", status: "building", items: BUILDING },
-  { label: "Before mainnet", status: "planned", items: BEFORE_MAINNET },
+  { label: "Still open", status: "planned", items: BEFORE_MAINNET },
 ];
 
 export default function RoadmapPage() {
@@ -339,8 +343,8 @@ export default function RoadmapPage() {
                 </h2>
                 <p className="mt-5 max-w-[64ch] text-[15px] leading-[1.65] text-white-60 md:text-[16px]">
                   {SHIPPED.length} shipped, {BUILDING.length} being built, and{" "}
-                  {BEFORE_MAINNET.length} things that have to be true before any of it touches
-                  mainnet. Open any one for what it means and how to check it.
+                  {BEFORE_MAINNET.length} things still open before this should carry
+                  size. Open any one for what it means and how to check it.
                 </p>
 
                 <div className="mt-10 grid gap-10 md:grid-cols-3 md:gap-6">

@@ -246,8 +246,9 @@ export default function Overview() {
       {/* The one line about the venue. The site is openly a testnet, so this is stated
           plainly and once, without a banner. */}
       <p className="mt-3 font-mono text-[10px] uppercase leading-[1.7] tracking-[0.06em] text-white-60/70">
-        On testnet the perp venue is simulated, so the attested margin and notional below describe a
-        simulated position.
+        {IS_TESTNET
+          ? "On testnet the perp venue is simulated, so the attested margin and notional below describe a simulated position."
+          : "The perp venue is Robinhood Chain Lighter. Margin and notional below are the vaults' own venue accounts, read from the venue and signed by the attester."}
       </p>
 
       <TickerStrip />

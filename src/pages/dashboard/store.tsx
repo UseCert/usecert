@@ -105,7 +105,7 @@ import {
   type VaultConfigView,
 } from "@/chain/useVaults";
 import { explainChainFailure } from "@/chain/walletSupport";
-import { COLLATERAL_SYMBOL } from "@/chain/deployment";
+import { CHAIN_ID, CHAIN_LABEL, COLLATERAL_SYMBOL } from "@/chain/deployment";
 import {
   signerCovers,
   useSignerFreshness,
@@ -167,7 +167,7 @@ export const STATUS_LABEL: Record<VaultStatus, string> = {
 
 /** Why a vault shows no figures. Used as the title/tooltip on greyed rows. */
 export const STATUS_HINT: Record<VaultStatus, string> = {
-  LIVE: "Deployed and routed on Robinhood Chain testnet (chain 46630).",
+  LIVE: `Deployed and routed on ${CHAIN_LABEL} (chain ${CHAIN_ID}).`,
   SOON: "On the roadmap for a later phase. No contracts are deployed, so no figures are shown.",
   UNPLANNED:
     "Not deployed and not currently planned. No contracts are deployed, so no figures are shown.",
