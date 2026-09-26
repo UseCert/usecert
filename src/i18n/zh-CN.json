@@ -924,7 +924,10 @@
   "Microsoft is one of the largest companies in the world, and on Robinhood Chain its exposure exists only as a leveraged perp. If you want MSFT today, you are running a position with funding and a liquidation price rather than holding the stock.": "微软是全球最大的公司之一，而在 Robinhood Chain 上它的敞口只以杠杆永续合约的形式存在。如果你今天想要 MSFT，你是在运行一个有资金费率和强平价格的头寸，而不是持有股票。",
   "A perp cannot be held and forgotten, posted as collateral or put in a pool. The exposure was there; the asset was not.": "永续合约无法持有后置之不理，也无法作为抵押品或放入资金池。敞口一直存在；资产却没有。",
   "The vault opens an equivalent long on the Microsoft equity perp the moment you deposit. Delta target 1.0, enforced by a band check on each attested batch and rebalanced permissionlessly: rebalance() is callable by anyone.": "你存入的那一刻，金库就在微软股票永续合约上开立等额多头。Delta 目标为 1.0，由每个已证明批次的区间检查强制执行，并以无需许可的方式再平衡：任何人都可以调用 rebalance()。",
-  "Mint and redeem certificates, track your receipts, and read solvency live from the contracts.": "铸造和赎回凭证、追踪你的回执，并直接从合约实时读取偿付能力。"
+  "Mint and redeem certificates, track your receipts, and read solvency live from the contracts.": "铸造和赎回凭证、追踪你的回执，并直接从合约实时读取偿付能力。",
+  "UseCert indexer": "UseCert 索引器",
+  "Flow history is read from UseCert's own indexer, which scans the vaults' logs straight from the Robinhood Chain RPC (eth_getLogs) and decodes them from the contracts' event signatures. Its first run matched the public explorer event for event. It is still a server's HTTP answer, not a chain read by this browser; balances, prices, capacity and solvency elsewhere on this dashboard are read directly from the contracts. If it is unreachable or behind, the public Blockscout index is used instead and this note says so.": "流水历史读取自 UseCert 自己的索引器：它直接通过 Robinhood Chain RPC（eth_getLogs）扫描金库日志，并按合约的事件签名解码。它的首次运行与公共浏览器逐条一致。它仍是服务器的 HTTP 响应，而不是本浏览器执行的链上读取；本仪表盘其他地方的余额、价格、容量和偿付能力都直接从合约读取。如果索引器无法访问或落后，将改用公共 Blockscout 索引，并在此说明。",
+  "Neither the UseCert indexer nor the explorer index could be read, so your receipts cannot be listed right now. This is not \"no receipts\": enter an id above, or try again shortly.": "UseCert 索引器和浏览器索引都无法读取，因此暂时无法列出你的回执。这并不代表“没有回执”：请在上方输入编号，或稍后重试。"
  },
  "tpl": {
   "(EST. {#} · VERSION {#}.{#})": "（创立于 {0} · 版本 {1}.{2}）",

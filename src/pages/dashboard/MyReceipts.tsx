@@ -108,13 +108,13 @@ export function MyReceipts({
     <div className="mt-5 border-t hairline-dark pt-4">
       <div className="flex flex-wrap items-center gap-2">
         <MicroLabel>My receipts · this vault</MicroLabel>
-        <ExplorerSourcedTag />
+        <ExplorerSourcedTag source={history.source} />
         {history.isFetching && <Loader2 size={11} className="animate-spin text-white-60" />}
       </div>
       {history.indexUnavailable ? (
         <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.06em] text-warn">
-          The explorer index could not be read, so your receipts cannot be listed right now. This
-          is not "no receipts": enter an id above, or try again shortly.
+          Neither the UseCert indexer nor the explorer index could be read, so your receipts cannot
+          be listed right now. This is not "no receipts": enter an id above, or try again shortly.
         </p>
       ) : history.isLoading ? (
         <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.06em] text-white-60">reading the index…</p>

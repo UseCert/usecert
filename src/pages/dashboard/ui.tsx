@@ -464,16 +464,21 @@ export function PriceUnavailable({ className }: { className?: string }) {
  * (receipt ids are not enumerable on-chain) and why a full-history `eth_getLogs` scan is
  * not an option (~104M blocks).
  */
-export function ExplorerSourcedTag({ className }: { className?: string }) {
+export function ExplorerSourcedTag({ className, source }: { className?: string; source?: string }) {
+  const own = source === "UseCert indexer";
   return (
     <span
       className={cn(
         "inline-flex items-center gap-1 border border-silver/40 px-1.5 py-px font-mono text-[9px] uppercase tracking-[0.08em] text-silver",
         className,
       )}
-      title="Decoded from the chain's public Blockscout index over HTTP. The events are real and decoded from the contract ABI, but this is a third-party index, not a chain read performed by this app."
+      title={
+        own
+          ? "Read from UseCert's own indexer, which scans the vaults' logs from the chain's RPC and decodes them from the contracts' event signatures. A server's answer, not a chain read by this browser."
+          : "Decoded from the chain's public Blockscout index over HTTP. The events are real and decoded from the contract ABI, but this is a third-party index, not a chain read performed by this app."
+      }
     >
-      Explorer index
+      {own ? "UseCert indexer" : "Explorer index"}
     </span>
   );
 }
@@ -491,7 +496,10 @@ export function ExplorerSourceNote({
   fetchedAt,
   now,
   className,
+  source,
 }: {
+  /** The index that answered, so the tag names it. */
+  source?: string;
   detail: string;
   url: string;
   /** ms epoch of the last successful index read, or `0` when there has not been one. */
@@ -504,7 +512,7 @@ export function ExplorerSourceNote({
   return (
     <div className={cn("flex flex-col gap-1.5", className)}>
       <div className="flex flex-wrap items-center gap-2">
-        <ExplorerSourcedTag />
+        <ExplorerSourcedTag source={source} />
         <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-white-60">
           {ageSec === null ? "index not read yet" : `index read ${fmtAge(ageSec)}`}
         </span>

@@ -112,6 +112,22 @@ import {
  * without the label being available to it.
  */
 export const FLOW_SOURCE = "third-party index" as const;
+/** The UseCert indexer (deploy/bin/usecert-indexer): read first, the explorer only as fallback. */
+export const OWN_INDEX_SOURCE = "UseCert indexer" as const;
+export type FlowSource = typeof FLOW_SOURCE | typeof OWN_INDEX_SOURCE;
+
+export const OWN_INDEX_DETAIL =
+  "Flow history is read from UseCert's own indexer, which scans the vaults' logs straight from " +
+  "the Robinhood Chain RPC (eth_getLogs) and decodes them from the contracts' event signatures. " +
+  "Its first run matched the public explorer event for event. It is still a server's HTTP " +
+  "answer, not a chain read by this browser; balances, prices, capacity and solvency elsewhere " +
+  "on this dashboard are read directly from the contracts. If it is unreachable or behind, the " +
+  "public Blockscout index is used instead and this note says so.";
+
+/** Served same-origin by nginx; one file per vault, Blockscout v2 logs shape. */
+const OWN_INDEX_BASE = "/data/logs/";
+/** Older than this, the indexer is behind and the explorer is used: stale is not "current". */
+const OWN_INDEX_MAX_AGE_SEC = 300;
 
 /** Human sentence for the provenance note. Kept next to the constant it explains. */
 export const FLOW_SOURCE_DETAIL =
@@ -575,6 +591,35 @@ interface FlowsSnapshot {
   ignored: number;
   /** Vaults whose logs came back, so a partial index can be reported as partial. */
   vaultsRead: number;
+  /** Which index answered: the UseCert indexer, or the explorer it falls back to. */
+  source: FlowSource;
+}
+
+/**
+ * One vault's events from the UseCert indexer, or a thrown error that sends the whole snapshot
+ * to the explorer. All six come from one source or the other, never a mix: a list stitched from
+ * two indexes at two different heights would present a moment that never existed.
+ */
+async function fetchOwnVaultLogs(address: string, signal: AbortSignal | undefined): Promise<{ items: RawLog[]; hasMore: boolean }> {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${OWN_INDEX_BASE}${address.toLowerCase()}.json`, {
+      headers: { accept: "application/json" },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (!res.ok) throw new Error(`indexer HTTP ${res.status}`);
+    const body = (await res.json()) as RawLogsPage & { indexer?: { generatedAt?: unknown } };
+    const at = asInt(body.indexer?.generatedAt);
+    if (at === null || Date.now() / 1000 - at > OWN_INDEX_MAX_AGE_SEC) throw new Error("indexer behind");
+    return { items: Array.isArray(body.items) ? (body.items as RawLog[]) : [], hasMore: false };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
 }
 
 async function fetchFlows(maxPages: number, signal: AbortSignal | undefined): Promise<FlowsSnapshot> {
@@ -589,9 +634,15 @@ async function fetchFlows(maxPages: number, signal: AbortSignal | undefined): Pr
   // One request per routed vault, in parallel — as many as the address book routes. If ANY vault fails the
   // whole snapshot fails: a list missing one vault's history, presented as the history, is
   // the same lie as an empty list.
-  const results = await Promise.all(
-    targets.map((t) => fetchVaultLogs(t.address, maxPages, signal)),
-  );
+  let source: FlowSource = OWN_INDEX_SOURCE;
+  let results: { items: RawLog[]; hasMore: boolean }[];
+  try {
+    results = await Promise.all(targets.map((t) => fetchOwnVaultLogs(t.address, signal)));
+  } catch (err) {
+    if (signal?.aborted) throw err; // a real cancellation, not an indexer failure
+    source = FLOW_SOURCE;
+    results = await Promise.all(targets.map((t) => fetchVaultLogs(t.address, maxPages, signal)));
+  }
 
   const partials: PartialFlow[] = [];
   let ignored = 0;
@@ -609,6 +660,7 @@ async function fetchFlows(maxPages: number, signal: AbortSignal | undefined): Pr
     hasMore: results.some((r) => r.hasMore),
     ignored,
     vaultsRead: targets.length,
+    source,
   };
 }
 
@@ -667,7 +719,7 @@ export interface FlowsResult {
   refetch: () => void;
 
   /** Provenance, carried with the data so a renderer always has it in hand. */
-  source: typeof FLOW_SOURCE;
+  source: FlowSource;
   sourceDetail: string;
   sourceUrl: string;
 }
@@ -749,8 +801,8 @@ export function useFlows(options?: { address?: string | undefined }): FlowsResul
     loadMore,
     refetch,
 
-    source: FLOW_SOURCE,
-    sourceDetail: FLOW_SOURCE_DETAIL,
+    source: snapshot?.source ?? OWN_INDEX_SOURCE,
+    sourceDetail: snapshot?.source === FLOW_SOURCE ? FLOW_SOURCE_DETAIL : OWN_INDEX_DETAIL,
     sourceUrl: CHAIN.blockExplorers.default.url,
   };
 }

@@ -203,6 +203,7 @@ export function RecentFlows({ limit = 5, onViewAll }: { limit?: number; onViewAl
               : `Showing flows across the ${ROUTED_VAULT_COUNT} routed vaults, newest first — connect a wallet to filter this to your own.`
           }`}
           url={history.sourceUrl}
+          source={history.source}
           fetchedAt={history.fetchedAt}
           now={now}
         />

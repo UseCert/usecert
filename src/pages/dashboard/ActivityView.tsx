@@ -241,6 +241,7 @@ export default function ActivityView() {
       <ExplorerSourceNote
         className="mt-4"
         detail={history.sourceDetail}
+        source={history.source}
         url={history.sourceUrl}
         fetchedAt={history.fetchedAt}
         now={now}
