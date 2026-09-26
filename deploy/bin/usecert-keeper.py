@@ -258,14 +258,19 @@ class Keeper:
             return
         a = self._get("/api/v1/account?by=l1_address&value=" + self.vault)["accounts"][0]
         avail = int(float(a.get("available_balance") or 0) * 10 ** 6)
-        if avail == 0:
+        # Ask for the shortfall and no more. The vault's marginPendingRecall is not cleared by
+        # Lighter's direct payouts (they bypass the pending balance _sweepPending reads), so after
+        # the first redemption it overstates, and a cap of the whole available balance would pull
+        # the free margin behind every OTHER holder's hedge down to bare initial margin.
+        cap = min(avail, owed - have)
+        if cap == 0:
             return
-        out = self._cast("send", self.vault, "recallMarginUpTo(uint256)", str(avail),
+        out = self._cast("send", self.vault, "recallMarginUpTo(uint256)", str(cap),
                          "--gas-limit", "1500000", "--private-key", self.attester_pk, "--rpc-url", self.rpc)
         self.state["last_recall"] = time.time()
         self._save()
-        log("recall: owed %d, vault holds %d, venue available %d -> recallMarginUpTo sent (%s)"
-            % (owed, have, avail, "ok" if any(l.split()[:2] == ["status", "1"] for l in out.splitlines()) else "REVERTED"))
+        log("recall: owed %d, vault holds %d, venue available %d -> recallMarginUpTo(%d) sent (%s)"
+            % (owed, have, avail, cap, "ok" if any(l.split()[:2] == ["status", "1"] for l in out.splitlines()) else "REVERTED"))
 
     def run_once(self):
         reqs = self.new_requests()
