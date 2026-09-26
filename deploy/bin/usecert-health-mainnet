@@ -16,6 +16,7 @@ WHAT IS CHECKED, and why each one matters to a holder:
   site       https://use-cert.com/ returns 200.
   backup     the nightly encrypted copy to Montreal succeeded within 36 h.
   indexer    all six vault event files were rewritten within 5 min.
+  book       every address this host runs on matches the book tracked on GitHub.
 
 What is NOT checked: attestation age. Between mints it is stale and capacity reads zero BY DESIGN
 (the signer signs, the minter relays); alerting on it describes correct behaviour.
@@ -44,6 +45,8 @@ MIN_ETH = 0.002
 MEMO = "/var/lib/usecert-health/mainnet.json"
 BACKUP_STAMP = "/var/lib/usecert-backup/last-ok"
 INDEX_GLOB = "/var/www/usecert-data/logs/*.json"
+TRACKED_BOOK_URL = "https://raw.githubusercontent.com/UseCert/usecert/backend/contracts-c1/deployments/4663.json"
+HOST_BOOKS = ["/opt/keeper/book-stack4.json", "/opt/usecert-history/4663.json"]
 UA = {"User-Agent": "usecert-health/1.0", "Content-Type": "application/json"}
 
 
@@ -136,6 +139,31 @@ def checks():
             P.append("indexer: vault files last written %d min ago (usecert-indexer)" % (max(ages) // 60))
     except (OSError, ValueError, KeyError) as e:
         P.append("indexer: files unreadable (%s)" % type(e).__name__)
+
+    # ROADMAP 6.22, twice: the stack went live with its book only on this host while the
+    # tracked copy described an older stack. Compare every address the host runs on with the
+    # book tracked on GitHub. A mismatch is a problem; GitHub being unreachable is not (it is
+    # checked again in five minutes and says nothing about the chain).
+    try:
+        req = urllib.request.Request(TRACKED_BOOK_URL, headers={"User-Agent": UA["User-Agent"]})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            tracked = json.load(r)
+        def addrs(book):
+            out = {("shared", k): str(v).lower() for k, v in book.get("shared", {}).items() if str(v).startswith("0x")}
+            for v in book.get("vaults", []):
+                for k, x in v.items():
+                    if isinstance(x, str) and x.startswith("0x") and len(x) == 42:
+                        out[(v.get("symbol"), k)] = x.lower()
+            out[("senders", "governance")] = str(book.get("senders", {}).get("governance", "")).lower()
+            return out
+        for local in HOST_BOOKS:
+            mine, theirs = addrs(json.load(open(local))), addrs(tracked)
+            diff = sorted(k for k in set(mine) | set(theirs) if mine.get(k) != theirs.get(k))
+            if diff:
+                P.append("book drift: %s differs from the tracked deployments/4663.json at %d address(es), e.g. %s"
+                         % (local, len(diff), "/".join(map(str, diff[0]))))
+    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+        print("book drift check skipped: %s" % type(e).__name__)
 
     # usecert-backup-france writes this after Montreal confirms the byte count.
     try:
