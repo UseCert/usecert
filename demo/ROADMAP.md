@@ -1925,7 +1925,12 @@ so every read failed. It now uses `cast`'s checksum.
 * An audit. Promotion needs the legal read: paying CERT holders a share of revenue is the most
   security-like thing here.
 * Automatic income: K2.
-* The owner sent 10,000 more CERT to the deployer. They are unused, awaiting instruction.
+* The owner sent 10,000 more CERT to the deployer. **Returned 2026-09-26, signed by the owner:**
+  * `exit()` took the 500 staked CERT out (tx `0xdf3c0eb9…`, block 73,382,862);
+  * all 11,000 CERT went to `0x0E67…7C0E` (tx `0x5bbbc5f9…`, block 73,382,888);
+  * the deployer now holds 0 CERT.
+  * CertStaking now holds no stakes. It keeps 0.971071 USDG of the test stream, which carries
+    over to the next funding and is not lost.
 
 ---
 
@@ -1941,7 +1946,9 @@ so every read failed. It now uses `cast`'s checksum.
   unstreamable. An EOA that forwards by calling `notifyRewardAmount` is correct.
 * **The old governance EOA's 12.379248 USDG goes to `0x0E670BbfFc7ead71e4eb05DFe77016729B6b7C0E`**
   (item 8). It is a transfer of funds, so the owner signs it himself on Montréal; the command was
-  given, not run. The EOA holds 0.0036 ETH for gas.
+  given, not run. The EOA holds 0.0036 ETH for gas. **Done by the owner:** 12.379248 USDG to
+  `0x0E67…7C0E` (tx `0xd00e7131…`, block 73,382,911, status 1). The old governance EOA now
+  holds 0 USDG.
 
 **J: use-cert.com mail moves to France.**
 * **The DNS trap.** qwilon.com and orion-safe.com also use `mail.use-cert.com` as their MX, and
@@ -1995,8 +2002,14 @@ so every read failed. It now uses `cast`'s checksum.
   * All four pass `certbot renew --dry-run`, and all eight mail ports verify with the hostname
     checked.
   * Each host has a `reload-mail` deploy hook, so mail picks up a renewed certificate.
-  * Still to retire: Montréal's old `use-cert.com` lineage and its nginx site. The site serves
-    nothing, since DNS points at France, but its renewal will keep failing until removed.
+  * **Retired:** Montréal's old `use-cert.com` certificate and nginx site, archived first to
+    `/root/usecert-site-and-cert.retired-*.tgz`.
+    * Before removing it, I checked its `/supabase/` route: every caller uses
+      `qwilon.com/supabase` or `orion-safe.com/supabase`, and use-cert.com's A and AAAA
+      records point only at France.
+    * qwilon.com, orion-safe.com, both Supabase routes and monitor.use-cert.com return the same
+      codes before and after.
+    * The mail and monitor certificates still pass the renewal dry run.
 * **MX switched (owner, 2026-09-26):** `10 mx.use-cert.com.`, confirmed on both OVH
   nameservers, Google and Cloudflare.
   * During the TTL a sender with the old MX cached still reaches Montréal, which forwards to
