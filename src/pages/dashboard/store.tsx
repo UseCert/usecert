@@ -105,7 +105,7 @@ import {
   type VaultConfigView,
 } from "@/chain/useVaults";
 import { explainChainFailure } from "@/chain/walletSupport";
-import { CHAIN_ID, CHAIN_LABEL, COLLATERAL_SYMBOL } from "@/chain/deployment";
+import { CHAIN_LABEL, COLLATERAL_SYMBOL } from "@/chain/deployment";
 import {
   signerCovers,
   useSignerFreshness,
