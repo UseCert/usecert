@@ -16,7 +16,7 @@ export const CHAIN = {
   name: 'Robinhood Chain',
   nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
   rpcUrls: { default: { http: ['https://rpc.mainnet.chain.robinhood.com'] } },
-  blockExplorers: { default: { name: 'Blockscout', url: 'https://explorer.chain.robinhood.com' } },
+  blockExplorers: { default: { name: 'Blockscout', url: 'https://robinhoodchain.blockscout.com' } },
   testnet: false,
 } as const;
 
