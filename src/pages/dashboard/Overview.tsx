@@ -428,14 +428,6 @@ export default function Overview() {
                         aria-hidden
                       />
                       <span className="flex items-center gap-3">
-                        <img
-                          src={v.img}
-                          alt=""
-                          className={cn(
-                            "h-8 w-8 border hairline-dark object-cover",
-                            v.imgPlaceholder && "object-contain p-1 opacity-80",
-                          )}
-                        />
                         <span className="font-sans text-[14px] font-semibold uppercase tracking-[-0.01em] text-white">
                           {v.name}
                         </span>

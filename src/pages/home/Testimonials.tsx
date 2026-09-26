@@ -51,16 +51,6 @@ export default function Testimonials() {
         </p>
 
         <div className="relative mt-14">
-          {/* Giant quote glyph */}
-          <motion.span
-            className="pointer-events-none absolute -top-16 left-0 select-none text-[220px] font-semibold leading-none text-ink/10"
-            animate={{ y: [ -10, 10, -10 ] }}
-            transition={{ duration: 8, repeat: Infinity, ease: "easeInOut" }}
-            aria-hidden
-          >
-            "
-          </motion.span>
-
           <div className="relative grid items-center gap-10 lg:grid-cols-[1fr_360px] lg:gap-20">
             <AnimatePresence mode="wait">
               <motion.blockquote
