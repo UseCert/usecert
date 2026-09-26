@@ -201,7 +201,7 @@ export const ARTICLES: Article[] = [
       {
         heading: "Draws, described honestly",
         paragraphs: [
-          "If the funding buffer runs out, the 2-of-3 Safe can propose a draw from the insurance pool: after a public delay, capped at 30% of the pool, the USDG moves into the vault and every staker shares the loss pro rata. The pool is live since 2026-09-26, unaudited and capped at 10,000 USDG, so it is small; staked CERT does not exist. How much to draw is the Safe's decision, bounded by that 30% cap, the public delay and the 7-day gap between proposals. No loss model sets it, and no expected-loss figure is published, because no stress model has been run against this deployment.",
+          "If the funding buffer runs out, the 2-of-3 Safe can propose a draw from the insurance pool: after a public delay, capped at 30% of the pool, the USDG moves into the vault and every staker shares the loss pro rata. The pool is live since 2026-09-26, unaudited and capped at 10,000 USDG, so it is small; CERT staking is a share of fees and is never drawn. How much to draw is the Safe's decision, bounded by that 30% cap, the public delay and the 7-day gap between proposals. No loss model sets it, and no expected-loss figure is published, because no stress model has been run against this deployment.",
         ],
       },
       {

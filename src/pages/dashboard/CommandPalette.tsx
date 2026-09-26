@@ -54,7 +54,7 @@ export default function CommandPalette() {
       { id: "mint", label: "Mint / Redeem", icon: ArrowLeftRight },
       { id: "activity", label: "Activity", icon: List },
       { id: "risk", label: "Risk & Parameters", icon: ShieldAlert },
-      { id: "stake", label: "Insurance", icon: Shield },
+      { id: "stake", label: "Staking", icon: Shield },
     ];
     const list: Cmd[] = nav.map((n) => ({
       id: `nav-${n.id}`,

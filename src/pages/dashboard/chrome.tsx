@@ -19,7 +19,7 @@ const NAV_ITEMS: { id: ViewId; label: string; short: string; icon: LucideIcon }[
   { id: "mint", label: "Mint / Redeem", short: "Mint", icon: ArrowLeftRight },
   { id: "activity", label: "Activity", short: "Flows", icon: List },
   { id: "risk", label: "Risk & Parameters", short: "Risk", icon: ShieldAlert },
-  { id: "stake", label: "Insurance", short: "Insure", icon: Shield },
+  { id: "stake", label: "Staking", short: "Stake", icon: Shield },
 ];
 
 /* ---------------------------------------------------------------- top bar */

@@ -9,6 +9,7 @@ import { INSURANCE_ADDRESS, INSURANCE_DEPLOY_TX, INSURANCE_SHARE_DECIMALS, Insur
 import { useDashboard } from "./store";
 import { MicroLabel, Panel, Stagger, ViewHeader } from "./ui";
 import { cn } from "@/lib/utils";
+import CertStakePanel from "./CertStakePanel";
 
 /**
  * The insurance pool (InsuranceStaking, K1): stake USDG as the first-loss layer behind the
@@ -152,7 +153,7 @@ export default function StakeView() {
   return (
     <div className="mx-auto max-w-[1180px] px-4 py-8 md:px-8">
       <ViewHeader
-        label="Insurance"
+        label="Staking · insurance pool"
         title={
           <>
             Insure the <span className="text-metallic">certificates.</span>
@@ -289,6 +290,8 @@ export default function StakeView() {
         </a>
         <span>{`Updated ${reads.dataUpdatedAt ? Math.round((now - reads.dataUpdatedAt) / 1000) : "—"}s ago`}</span>
       </p>
+
+      <CertStakePanel />
     </div>
   );
 }

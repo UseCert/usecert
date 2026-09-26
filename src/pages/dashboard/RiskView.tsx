@@ -32,7 +32,7 @@ const DESIGN_LAWS: { n: string; title: string; body: string }[] = [
     title: "Holders are senior",
     // The CERT token exists on mainnet; staking it does not. Only the second makes a tranche.
     body: HAS_CERT_TOKEN
-      ? "The junior tranche absorbs buffer exhaustion before holder backing. An insurance pool is live: InsuranceStaking holds stakers' USDG and can be drawn into a vault, after a public Safe-proposed and capped draw, before holder backing is touched. It is unaudited and capped at 10,000 USDG, so it is small; staked CERT, the design's second junior layer, does not exist yet."
+      ? "The junior tranche absorbs buffer exhaustion before holder backing. An insurance pool is live: InsuranceStaking holds stakers' USDG and can be drawn into a vault, after a public Safe-proposed and capped draw, before holder backing is touched. It is unaudited and capped at 10,000 USDG, so it is small. CERT staking exists only as a share of fees and is never drawn, so the insurance layer is USDG alone."
       : "By design the junior tranche absorbs buffer exhaustion before holder backing. That tranche does not exist here: InsuranceStaking and CERT are C3 and are not deployed, so there is nothing junior to holders on this deployment.",
   },
   {
