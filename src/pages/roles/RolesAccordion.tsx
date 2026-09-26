@@ -41,12 +41,15 @@ const ROWS: RoleRow[] = [
     title: "Staker",
     meta: "Backstop the buffer",
     body: [
-      "Stake the token to underwrite the insurance buffer. If sustained negative funding draws the buffer past its threshold, staked tokens absorb the loss before holder backing is ever touched. Holders are senior, always. That is the deal, and it is priced in.",
-      "Reward: a share of mint and redeem fees plus funding-surplus fees. Paid for real risk, named plainly.",
+      "Planned, not deployed. There is no token and no staking contract on chain today — this describes the role the design creates, not one anybody can take.",
+      "The intent: stake the token to underwrite the insurance buffer, so that if sustained negative funding draws the buffer past its threshold, staked tokens absorb the loss before holder backing is ever touched. Holders would be senior, always. That is the deal, and it would be priced in.",
+      "Intended reward: a share of mint and redeem fees plus funding-surplus fees. Paid for real risk, named plainly.",
     ],
     image: "/roles-staker.jpg",
     imageAlt: "Steel vault door wheel with certificate plates behind glass",
-    cta: { label: "Stake Token", to: "/dashboard", variant: "primary" },
+    // No CTA. "Stake Token" pointed at /dashboard, which has no staking on it — an
+    // actionable button for a thing that does not exist is worse than the copy around it.
+    cta: { label: "See the roadmap", to: "/roles", variant: "outline" },
   },
   {
     title: "Arbitrageur",

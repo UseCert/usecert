@@ -155,7 +155,7 @@ export const ARTICLES: Article[] = [
       {
         heading: "Who pays what, when",
         paragraphs: [
-          "Holders pay nothing while the buffer is positive, and a published fee only after it is exhausted. Stakers underwrite the tail beyond that, and are compensated for it with a share of protocol fees. Keepers sweep accrued funding into the buffer every hour, so the balance the dashboard shows is always current.",
+          "Holders pay nothing while the buffer is positive, and a published fee only after it is exhausted. In the intended design stakers underwrite the tail beyond that, though no staking contract is deployed, and are compensated for it with a share of protocol fees. Keepers sweep accrued funding into the buffer every hour, so the balance the dashboard shows is always current.",
         ],
       },
       {
@@ -184,7 +184,7 @@ export const ARTICLES: Article[] = [
       {
         heading: "The seniority stack",
         paragraphs: [
-          "The order is fixed in the contracts. The per-asset funding buffer absorbs the first loss. The staked insurance buffer absorbs the second. Holder backing is never impaired by either. There is no governance vote that can reorder this, and no emergency mode that can touch holder margin to cover a staking shortfall.",
+          "Only the first layer exists. The per-asset funding buffer absorbs the first loss, and that part is deployed and on chain. The staked insurance buffer is not built, so there is no second layer today: once the funding buffer is exhausted, the loss reaches holders. In the intended design the insurance buffer absorbs the second loss and holder backing is never impaired by either. There is no governance vote that can reorder this, and no emergency mode that can touch holder margin to cover a staking shortfall.",
         ],
       },
       {
@@ -196,13 +196,13 @@ export const ARTICLES: Article[] = [
       {
         heading: "Slashing, described honestly",
         paragraphs: [
-          "If the funding buffer runs out and the insurance draw threshold is crossed, staked tokens are slashed pro rata to make holders whole. The sizing comes from the published stress parameters, not discretion. Stakers opt into this explicitly, and the expected loss distribution is printed next to the yield.",
+          "In the intended design, if the funding buffer runs out and the insurance draw threshold is crossed, staked tokens would be slashed pro rata to make holders whole. No staking contract is deployed, so no slashing can happen and nothing stands behind holders past the funding buffer. The sizing comes from the published stress parameters, not discretion. Stakers opt into this explicitly, and the expected loss distribution is printed next to the yield.",
         ],
       },
       {
         heading: "The 80/10/5/5 fee flow",
         paragraphs: [
-          "Protocol fees split 80/10/5/5: 80% to stakers as underwriting compensation, 10% to top up the insurance buffer, 5% to keepers who run the peg infrastructure, and 5% to the treasury. Every flow is an on chain transfer you can audit, not an accounting line you have to trust.",
+          "The intended split is 80/10/5/5: 80% to stakers as underwriting compensation, 10% to top up the insurance buffer, 5% to keepers who run the peg infrastructure, and 5% to the treasury. None of it is deployed — there is no token, no staking contract and no fee split on chain, so nothing routes a single unit of fee anywhere described here. Every flow is an on chain transfer you can audit, not an accounting line you have to trust.",
         ],
       },
     ],
