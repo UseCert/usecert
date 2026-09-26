@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""UseCert's own event indexer: the eight flow events of every stack-4 vault, from the chain.
+
+    usecert-indexer            run forever (usecert-indexer.service), a pass every ~12 s
+    usecert-indexer --once     one pass, then exit
+
+WHY. The dashboard's activity, receipts and history came only from the public Blockscout
+index - a third party whose API, rate limits and decoding the site does not control (its
+MintRequested field names differ from the vault's, which silently dropped every two-step mint
+until 7bd8641). This reads the logs straight from the Robinhood Chain RPC with eth_getLogs and
+decodes them from the contracts' own event signatures.
+
+OUTPUT. One static file per vault, /var/www/usecert-data/logs/<vault lowercase>.json, served
+same-origin by nginx at /data/logs/. Each file is in the Blockscout v2 logs shape
+({items: [...], next_page_params: null}, newest first) so the front end's single parser,
+receipt join and attribution stay the one source of truth, and a fallback to Blockscout is a
+URL change, not a second code path.
+
+WHAT IT TRUSTS. The RPC's answer to eth_getLogs, nothing else. Topics are the keccak of the
+event signatures (checked against the explorer's topics for the same logs), decoding is by
+fixed ABI word positions for these static-typed events, and a log whose topic or width does
+not match is dropped and counted, never guessed at. The scan stops CONFIRMATIONS blocks short
+of the head.
+
+One eth_getLogs call covers all six vaults per range, so a caught-up pass costs one request
+plus one eth_getBlockByNumber per new block that carried an event.
+"""
+import json
+import os
+import sys
+import time
+import urllib.request
+from datetime import datetime, timezone
+
+RPC = "https://rpc.mainnet.chain.robinhood.com"
+BOOK = "/opt/usecert-history/4663.json"
+STATE = "/var/lib/usecert-indexer/state.json"
+OUT = "/var/www/usecert-data/logs"
+# Below every stack-4 vault's first event. Not searched for: the public RPC is not an archive
+# node, so eth_getCode at a past block fails ("historical state ... is not available"). The
+# keepers were started from 72,766,528 at deploy time; this starts a little before that. The
+# first run was checked event-for-event against the explorer, which proves nothing was missed.
+START_BLOCK = 72_760_000
+CHUNK = 5000
+CONFIRMATIONS = 2
+PASS_SEC = 12
+KEEP_PER_VAULT = 5000
+UA = {"Content-Type": "application/json", "User-Agent": "usecert-indexer/1.0"}
+
+# topic0 = keccak256(signature)  (cast sig-event; identical to the explorer's topics)
+EVENTS = {
+    "0x19f5f791ee407773427bf7b970bbbc3375065c32edd1ab142e23a84f94b0719b":
+        ("Minted", [("user", "address", True), ("amountIn", "uint256", False), ("certOut", "uint256", False), ("px18", "uint256", False), ("fee", "uint256", False)]),
+    "0x32f62f6e38f01677299722b6f618d17026edcb8decf51f73dd4c6d8ffcebd74f":
+        ("MintRequested", [("receiptId", "uint256", True), ("user", "address", True), ("amountIn", "uint256", False)]),
+    "0x1b3264952cc476d765340a3df72dcfc4f7d0043e43b759bef7ee5144888dbfb7":
+        ("MintSettled", [("receiptId", "uint256", True), ("certOut", "uint256", False), ("fillPx18", "uint256", False)]),
+    "0x3ac63b7f3c69a364c43c1feadeaff2d2177548968e4810277f93ad3ebc2c6243":
+        ("MintRefunded", [("receiptId", "uint256", True), ("user", "address", True), ("amountOut", "uint256", False)]),
+    "0x484c40561359f3e3b8be9101897f8680aa82fbe1df9fd9038e0dbc6284032646":
+        ("Redeemed", [("user", "address", True), ("certIn", "uint256", False), ("amountOut", "uint256", False), ("px18", "uint256", False)]),
+    "0x6fa20e8a2bf862a268957ae9f0c89adc7760cb43938376d614e555551a209c6b":
+        ("RedeemRequested", [("receiptId", "uint256", True), ("user", "address", True), ("certIn", "uint256", False), ("expiresAt", "uint64", False)]),
+    "0x0868d8a19273a65b127e5f4e861778032a2eee0c1bf84595e252493bc84a9442":
+        ("RedeemClaimed", [("receiptId", "uint256", True), ("amountOut", "uint256", False)]),
+    "0xe246424cdbc6bfe5d2f5daec4d057eea24135f881ece7fda1580c3648aae59df":
+        ("ForceExited", [("receiptId", "uint256", True), ("user", "address", True), ("certIn", "uint256", False)]),
+}
+
+
+def rpc(method, params):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+    delay = 2
+    for attempt in range(7):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(RPC, body, UA), timeout=30) as r:
+                out = json.load(r)
+            if "error" in out:
+                raise RuntimeError("%s: %s" % (method, out["error"]))
+            return out["result"]
+        except urllib.error.HTTPError as e:
+            if (e.code != 429 and e.code < 500) or attempt == 6:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if attempt == 6:
+                raise
+        time.sleep(delay)
+        delay = min(delay * 2, 30)
+
+
+def decode(lg, sig):
+    name, fields = sig
+    topics, data = lg["topics"], lg["data"][2:]
+    indexed = [f for f in fields if f[2]]
+    plain = [f for f in fields if not f[2]]
+    if len(topics) != 1 + len(indexed) or len(data) != 64 * len(plain):
+        return None                                    # not the shape this event has: drop, count
+    params, ti, di = [], 1, 0
+    for fname, ftype, is_idx in fields:
+        word = topics[ti][2:] if is_idx else data[64 * di:64 * (di + 1)]
+        if is_idx:
+            ti += 1
+        else:
+            di += 1
+        value = ("0x" + word[-40:]) if ftype == "address" else str(int(word, 16))
+        params.append({"name": fname, "type": ftype, "indexed": is_idx, "value": value})
+    return {
+        "address": {"hash": lg["address"]},
+        "block_number": int(lg["blockNumber"], 16),
+        "index": int(lg["logIndex"], 16),
+        "transaction_hash": lg["transactionHash"],
+        "decoded": {"method_call": "%s(%s)" % (name, ", ".join("%s%s %s" % (t, " indexed" if i else "", n) for n, t, i in fields)),
+                    "parameters": params},
+    }
+
+
+def load_state():
+    try:
+        return json.load(open(STATE))
+    except (OSError, ValueError):
+        return {"next_block": None, "items": [], "timestamps": {}, "dropped": 0}
+
+
+def save(st, vaults, head):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    json.dump(st, open(STATE + ".tmp", "w"))
+    os.replace(STATE + ".tmp", STATE)
+    os.makedirs(OUT, exist_ok=True)
+    now = int(time.time())
+    for v in vaults:
+        addr = v["vault"].lower()
+        items = sorted((x for x in st["items"] if x["address"]["hash"].lower() == addr),
+                       key=lambda x: (x["block_number"], x["index"]), reverse=True)[:KEEP_PER_VAULT]
+        for x in items:
+            ts = st["timestamps"].get(str(x["block_number"]))
+            if ts is not None:
+                x["block_timestamp"] = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+        doc = {"items": items, "next_page_params": None,
+               "indexer": {"source": "usecert-indexer", "generatedAt": now, "indexedThroughBlock": st["next_block"] - 1,
+                           "headBlock": head, "vault": v["vault"], "symbol": v["symbol"]}}
+        path = os.path.join(OUT, addr + ".json")
+        json.dump(doc, open(path + ".tmp", "w"), separators=(",", ":"))
+        os.replace(path + ".tmp", path)
+
+
+def one_pass(st, vaults):
+    head = int(rpc("eth_blockNumber", []), 16) - CONFIRMATIONS
+    if st["next_block"] is None:
+        st["next_block"] = START_BLOCK
+        print("bootstrap: scanning from block %d" % START_BLOCK, flush=True)
+    addrs = [v["vault"] for v in vaults]
+    added = 0
+    while st["next_block"] <= head:
+        to = min(st["next_block"] + CHUNK - 1, head)
+        logs = rpc("eth_getLogs", [{"address": addrs, "topics": [list(EVENTS)],
+                                    "fromBlock": hex(st["next_block"]), "toBlock": hex(to)}])
+        seen = {(x["transaction_hash"], x["index"]) for x in st["items"][-500:]}
+        for lg in logs:
+            item = decode(lg, EVENTS[lg["topics"][0]])
+            if item is None:
+                st["dropped"] += 1
+                continue
+            if (item["transaction_hash"], item["index"]) in seen:
+                continue
+            st["items"].append(item)
+            added += 1
+            b = str(item["block_number"])
+            if b not in st["timestamps"]:
+                st["timestamps"][b] = int(rpc("eth_getBlockByNumber", [hex(item["block_number"]), False])["timestamp"], 16)
+        st["next_block"] = to + 1
+    save(st, vaults, head)
+    return added, head
+
+
+def main():
+    vaults = json.load(open(BOOK))["vaults"]
+    st = load_state()
+    while True:
+        try:
+            added, head = one_pass(st, vaults)
+            if added:
+                print("indexed %d new event(s); through block %d; %d total" % (added, head, len(st["items"])), flush=True)
+        except Exception as e:                                   # noqa: BLE001 - next pass retries
+            print("pass failed: %s" % str(e)[:200], flush=True)
+        if "--once" in sys.argv:
+            return
+        time.sleep(PASS_SEC)
+
+
+if __name__ == "__main__":
+    main()

@@ -15,6 +15,7 @@ WHAT IS CHECKED, and why each one matters to a holder:
              least MIN_ETH. Out of gas, the keeper fills on the venue and cannot settle on chain.
   site       https://use-cert.com/ returns 200.
   backup     the nightly encrypted copy to Montreal succeeded within 36 h.
+  indexer    all six vault event files were rewritten within 5 min.
 
 What is NOT checked: attestation age. Between mints it is stale and capacity reads zero BY DESIGN
 (the signer signs, the minter relays); alerting on it describes correct behaviour.
@@ -42,6 +43,7 @@ STUCK_SEC = 900          # a hedge normally fills in under a minute; fill_timeou
 MIN_ETH = 0.002
 MEMO = "/var/lib/usecert-health/mainnet.json"
 BACKUP_STAMP = "/var/lib/usecert-backup/last-ok"
+INDEX_GLOB = "/var/www/usecert-data/logs/*.json"
 UA = {"User-Agent": "usecert-health/1.0", "Content-Type": "application/json"}
 
 
@@ -123,6 +125,17 @@ def checks():
     s = status_of(SITE)
     if s != 200:
         P.append("site: %s -> %s" % (SITE, s))
+
+    # The dashboard's activity and receipts read these first; stale means the site falls back
+    # to the explorer silently, so it is the indexer's own freshness that is checked here.
+    try:
+        ages = [now - json.load(open(f))["indexer"]["generatedAt"] for f in glob.glob(INDEX_GLOB)]
+        if len(ages) != 6:
+            P.append("indexer: %d of 6 vault files present (%s)" % (len(ages), INDEX_GLOB))
+        elif max(ages) > 300:
+            P.append("indexer: vault files last written %d min ago (usecert-indexer)" % (max(ages) // 60))
+    except (OSError, ValueError, KeyError) as e:
+        P.append("indexer: files unreadable (%s)" % type(e).__name__)
 
     # usecert-backup-france writes this after Montreal confirms the byte count.
     try:
