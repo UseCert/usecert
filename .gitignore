@@ -11,3 +11,6 @@ security/snapshots/
 
 # Agent worktrees - local scratch, not repo content
 .claude/
+
+# unlisted roadmap page tokens: a token in this shared repo would be a published link
+roadmap-tokens*.json
