@@ -1880,6 +1880,53 @@ view all said there was no staking or insurance.
 * Fee income: K2 is a new vault stack.
 * Choosing the buyback fund and ops wallet addresses.
 
+### 6.30 CERT staking for a share of the buyback fund, live on mainnet — ✅ 2026-09-26 (`7f305c7`, `520fad2`; front end `7013d48`, `42ceef3`)
+
+**The owner's decision.** CERT staking is a **share of fees, not insurance** (option 2). The
+buyback fund's 20% of the 70/20/5/5 split is paid in as USDG and streamed to CERT stakers pro
+rata. Staked CERT is never drawn; the insurance layer stays USDG.
+
+**`CertStaking`** uses the standard staking-rewards pattern, with these differences:
+* **Funding is permissionless:** no distributor key.
+* **Stakes and rewards are credited by balance delta.** CERT's source is not verified.
+* **No stranding.** Reward accrued while nobody is staked is carried into the next stream.
+* **Precision.** It uses 1e36 and a 1e18-scaled rate, because USDG has 6 decimals and CERT 18.
+  At the usual precision a large stake rounded every second's reward to zero, and an unscaled
+  rate streamed only 699.75 of 700.
+* **An immutable stake cap:** 10,000,000 CERT.
+* **Otherwise fixed.** Withdrawals are immediate; there is no owner, pause or upgrade.
+
+**Tests.** 14, including a 3,000-run solvency fuzz: stakes are always covered exactly, and
+rewards are always covered.
+
+**Deployed:** `0x6491f2a764F65982641F3C63AeB6895cC33ba0Ae`, block 73,206,833. Parameters read
+back; Sourcify exact match. Recorded in `deployments/4663.certstaking.json`.
+
+**Proven on mainnet.**
+* Funded 1 USDG (rate 1.6534 units/s, 1 unit of dust carried).
+* Staked 1,000 CERT, the owner's, and was credited exactly 1,000. **CERT has no transfer fee.**
+* 278 pre-stake units were carried, not lost.
+* Earned 153 units in about 90 s; the claim paid 157.
+* Withdrew 500 CERT at once. 500 CERT remain staked, so the live pool is not empty.
+
+**Interface.** The Staking tab (formerly Insurance) gains CERT staking.
+* It shows total staked and room under the cap, what is streaming now, your stake and your
+  reward.
+* Actions: stake, claim and withdraw, each confirmed on chain.
+* No APR is shown: with rewards funded by hand it would be a forecast.
+* "No CERT staking exists" is corrected in the Terms, Learn, Roles and Risk.
+* The contract is listed on /contracts with its Sourcify evidence: 29 UseCert contracts, 20
+  exact and 9 runtime-exact.
+
+**Caught by the live check.** The staking address had been hand-typed with the wrong checksum,
+so every read failed. It now uses `cast`'s checksum.
+
+**Not done.**
+* An audit. Promotion needs the legal read: paying CERT holders a share of revenue is the most
+  security-like thing here.
+* Automatic income: K2.
+* The owner sent 10,000 more CERT to the deployer. They are unused, awaiting instruction.
+
 ---
 
 ## Keeping the public page in sync

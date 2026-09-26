@@ -1006,6 +1006,36 @@
      "The deployment record in the repository"
     ]
    ]
+  },
+  "6.30": {
+   "commits": [
+    "7f305c7",
+    "520fad2",
+    "7013d48",
+    "42ceef3"
+   ],
+   "shots": [
+    [
+     "r630-proof",
+     "Deployed, verified, and the full stake/earn/claim/withdraw cycle on mainnet"
+    ],
+    [
+     "r630-panel",
+     "The CERT staking panel, live"
+    ],
+    [
+     "r630-panel-zh",
+     "The same in Chinese"
+    ],
+    [
+     "r630-contracts",
+     "CertStaking on /contracts, Sourcify exact match"
+    ],
+    [
+     "r630-source",
+     "The contract source on GitHub"
+    ]
+   ]
   }
  }
 }
