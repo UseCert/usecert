@@ -1581,6 +1581,48 @@ covers unset, malformed and uppercase values, a real hash, and testnet unchanged
 **Still open.** The France deploy should commit the book it writes, so the tracked file cannot
 lag the host.
 
+### 6.23 Solvency and funding history, and the ops fixes found in the logs — ✅ 2026-09-26 (`a8d1395`; front end `a987964`, `8fc6498`)
+
+**Charts.** Four dashboard panels said "needs an indexer." They now draw data.
+
+* **Solvency.** `usecert-history` on France samples the dashboard's own backing
+  (`solvency().margin18 + buffer18`) and obligation (supply × `oracle.px()`) every 5 minutes, and
+  serves them same-origin at `/data/history.json`.
+  - The chart carries a "Recorded by UseCert" tag. The values are chain reads; the timestamps are
+    the server's word.
+  - Resampling takes the latest real sample per slot. A gap ends the curve; nothing is
+    interpolated.
+  - Checked against the live figures: $2.06 + $2.06 = the $4 backing shown, and $0 obligation.
+* **Funding.** The venue's last 48 hourly rates per vault market.
+  - The API docs don't state units, so they were derived from the data: `rate × price / 100`
+    equals the venue's own `value`. TSLA: 0.0004 × $371.9 / 100 = 0.00149.
+  - So `rate` is percent per hour, and `direction` names the side that pays.
+  - Rates are published signed from the long vault's side. Right now the vaults pay 0.0004%/h
+    on TSLA.
+
+**Chart bugs.** These components had never drawn real data before today:
+
+* negative bars ran through the axis labels;
+* no scale was shown;
+* the last 12 of 48 bars never finished growing;
+* the solvency axis clipped whichever series crossed the other, and went below $0.
+
+**Found in the access and service logs.**
+
+* **Deploy downtime.** Every deploy served about 90 s of 502s, because node ignores SIGTERM and
+  systemd waited its default stop timeout. With `TimeoutStopSec=5s`, a restart returns 200 in
+  6 s.
+* **Supabase reported down.** Montréal's uptime check had reported supabase down since the move:
+  it checked `use-cert.com/supabase/`, a path that left with the site. It now checks the
+  loopback gateway (401 = up).
+* **Doc 404s.** Visitors looking for `/docs`, `/whitepaper` and `/tokenomics` got 404s (over
+  100 from ordinary browsers). They now 302 to `/learn` and `/roles`.
+* **Testnet id in copy.** "not deployed on chain 46630" now names the live chain.
+
+**Awaiting the owner (copy).** `/learn` says "Every hour, a keeper settles accrued funding into
+the per-asset buffer." Nothing on this deployment does that. A correction is drafted for
+approval.
+
 ---
 
 ## Keeping the public page in sync
