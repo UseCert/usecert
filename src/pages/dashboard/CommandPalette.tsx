@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowLeftRight, Layers, LayoutGrid, List, Search, ShieldAlert, Wallet } from "lucide-react";
+import { ArrowLeftRight, Layers, LayoutGrid, List, Search, Shield, ShieldAlert, Wallet } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDashboard } from "./store";
@@ -54,6 +54,7 @@ export default function CommandPalette() {
       { id: "mint", label: "Mint / Redeem", icon: ArrowLeftRight },
       { id: "activity", label: "Activity", icon: List },
       { id: "risk", label: "Risk & Parameters", icon: ShieldAlert },
+      { id: "stake", label: "Insurance", icon: Shield },
     ];
     const list: Cmd[] = nav.map((n) => ({
       id: `nav-${n.id}`,

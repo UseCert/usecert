@@ -38,7 +38,7 @@ export default function TokenFlow() {
         {/* Stated before the numbers, not after them. A reader who takes in the counters and
             leaves should not have been misled by the time they go. */}
         <p className="mt-3 inline-block border border-warn/40 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.08em] text-warn">
-          {HAS_CERT_TOKEN ? "Token deployed · fee split, buyback and staking design only" : "Not deployed — design only"}
+          {HAS_CERT_TOKEN ? "Token and insurance pool deployed · fee split and buyback design only" : "Not deployed — design only"}
         </p>
         {CERT_TOKEN_ADDRESS && (
           <p className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] uppercase tracking-[0.06em] text-white-60">
@@ -120,9 +120,9 @@ export default function TokenFlow() {
                 <>
                   The design: mint and redeem fees, plus the funding-surplus share, would fund buybacks and staker
                   pay — stakers paid because they are first in line when the buffer breaks. No emissions games, no
-                  hidden dilution. The CERT token is deployed; nothing else here is. There is no staking contract,
-                  no insurance tranche, no buyback and no fee split on chain today; this is the intent the contracts
-                  are being built toward, published so it can be argued with early.
+                  hidden dilution. The CERT token is deployed, and so is the insurance pool (USDG, unaudited, capped at 10,000).
+                  There is no buyback and no fee split on chain today: routing fees to the pool and the buyback fund
+                  is written and tested and needs a new vault version. Published so it can be argued with early.
                 </>
               ) : (
                 <>

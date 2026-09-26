@@ -46,7 +46,7 @@ const ROWS: RoleRow[] = [
     meta: "Backstop the buffer",
     body: [
       HAS_CERT_TOKEN
-        ? "Planned, not deployed. The CERT token exists on chain, but there is no staking contract today — this describes the role the design creates, not one anybody can take."
+        ? "Live, in its first form: the insurance pool (InsuranceStaking) takes USDG, not CERT. It is unaudited and capped at 10,000 USDG, and it has no automatic income yet. Staking CERT itself is still a design, not a role anybody can take."
         : "Planned, not deployed. There is no token and no staking contract on chain today — this describes the role the design creates, not one anybody can take.",
       "The intent: stake the token to underwrite the insurance buffer, so that if sustained negative funding draws the buffer past its threshold, staked tokens absorb the loss before holder backing is ever touched. Holders would be senior, always. That is the deal, and it would be priced in.",
       "Intended reward: a share of mint and redeem fees plus funding-surplus fees. Paid for real risk, named plainly.",

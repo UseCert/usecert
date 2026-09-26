@@ -33,7 +33,7 @@ export const FAQ_ROWS: AccordionRow[] = [
     title: "Who takes the loss if the buffer runs out?",
     body: [
       HAS_CERT_TOKEN
-        ? "In the design, stakers — staked tokens would underwrite the insurance buffer and be slashed before holder backing is ever touched, with holders senior always, and stakers earning a share of mint and redeem fees plus funding-surplus fees in exchange. Only the token exists: CERT is deployed on Robinhood Chain, but there is no staking contract and no insurance buffer on chain today. Until there is, the per-asset funding buffer is the only thing absorbing this loss, and after it is exhausted the loss reaches holders."
+        ? "The insurance pool, after the vault's own buffer. InsuranceStaking is live on Robinhood Chain: stakers deposit USDG, and if a vault's buffer is ever not enough, the 2-of-3 Safe can propose a public, capped draw that moves pool USDG into that vault. Stakers share that loss pro rata; holders are senior, always. The pool is unaudited and capped at 10,000 USDG, so it is small. It has no automatic income yet: routing fees to it is the next vault version."
         : "In the design, stakers — staked tokens would underwrite the insurance buffer and be slashed before holder backing is ever touched, with holders senior always, and stakers earning a share of mint and redeem fees plus funding-surplus fees in exchange. None of that is deployed: there is no token, no staking contract and no insurance buffer on chain today. Until there is, the per-asset funding buffer is the only thing absorbing this loss, and after it is exhausted the loss reaches holders.",
     ],
   },

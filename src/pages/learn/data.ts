@@ -160,7 +160,7 @@ export const ARTICLES: Article[] = [
       {
         heading: "Who pays what, when",
         paragraphs: [
-          "Holders pay nothing while the buffer is positive, and a published fee only after it is exhausted. In the intended design stakers underwrite the tail beyond that, though no staking contract is deployed, and are compensated for it with a share of protocol fees. Funding itself is paid on the venue every hour, into and out of the vault's margin account there; the dashboard charts the venue's hourly rates.",
+          "Holders pay nothing while the buffer is positive, and a published fee only after it is exhausted. Stakers in the insurance pool underwrite the tail beyond that: the pool is live, unaudited and capped at 10,000 USDG, and fee sharing with it is the next vault version. Funding itself is paid on the venue every hour, into and out of the vault's margin account there; the dashboard charts the venue's hourly rates.",
         ],
       },
       {
@@ -199,9 +199,9 @@ export const ARTICLES: Article[] = [
         ],
       },
       {
-        heading: "Slashing, described honestly",
+        heading: "Draws, described honestly",
         paragraphs: [
-          "In the intended design, if the funding buffer runs out and the insurance draw threshold is crossed, staked tokens would be slashed pro rata to make holders whole. No staking contract is deployed, so no slashing can happen and nothing stands behind holders past the funding buffer. The sizing comes from the published stress parameters, not discretion. Stakers opt into this explicitly, and the expected loss distribution is printed next to the yield.",
+          "If the funding buffer runs out, the 2-of-3 Safe can propose a draw from the insurance pool: after a public delay, capped at 30% of the pool, the USDG moves into the vault and every staker shares the loss pro rata. The pool is live since 2026-09-26, unaudited and capped at 10,000 USDG, so it is small; staked CERT does not exist. How much to draw is the Safe's decision, bounded by that 30% cap, the public delay and the 7-day gap between proposals. No loss model sets it, and no expected-loss figure is published, because no stress model has been run against this deployment.",
         ],
       },
       {

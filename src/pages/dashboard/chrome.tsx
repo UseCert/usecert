@@ -1,6 +1,6 @@
 import { Link } from "@/lib/router-compat";
 import { motion } from "framer-motion";
-import { ArrowLeftRight, ArrowUpRight, Layers, LayoutGrid, List, ShieldAlert } from "lucide-react";
+import { ArrowLeftRight, ArrowUpRight, Layers, LayoutGrid, List, Shield, ShieldAlert } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDashboard } from "./store";
@@ -10,15 +10,16 @@ import { WalletButton } from "./modals";
 import { CommandTrigger } from "./CommandPalette";
 import { LanguageSwitcher } from "@/i18n";
 
-/* Staking and Keepers were removed with the views behind them: no insurance-staking
- * contract and no keeper-rewards mechanism is deployed on chain 46630, and both screens
- * ran entirely on invented figures. */
+/* Keepers stays removed: no keeper-rewards mechanism is deployed, and that screen ran on
+ * invented figures. Insurance came back on 2026-09-26 with the pool actually deployed
+ * (InsuranceStaking, 0xDbdA…dAFb1): every figure on it is a chain read of that contract. */
 const NAV_ITEMS: { id: ViewId; label: string; short: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", short: "Home", icon: LayoutGrid },
   { id: "vaults", label: "Vaults", short: "Vaults", icon: Layers },
   { id: "mint", label: "Mint / Redeem", short: "Mint", icon: ArrowLeftRight },
   { id: "activity", label: "Activity", short: "Flows", icon: List },
   { id: "risk", label: "Risk & Parameters", short: "Risk", icon: ShieldAlert },
+  { id: "stake", label: "Insurance", short: "Insure", icon: Shield },
 ];
 
 /* ---------------------------------------------------------------- top bar */

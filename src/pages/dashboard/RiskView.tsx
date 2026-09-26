@@ -1,5 +1,6 @@
 import { AlertTriangle, Check, FileText, Layers, Lock, Radio } from "lucide-react";
 import { useFlows } from "@/chain/useFlows";
+import { useInsurancePool } from "@/chain/useInsurance";
 import { useDashboard } from "./store";
 import { AgeLine, EmptyState, MicroLabel, Panel, PulseDot, Stagger, UnverifiedTag, ViewHeader } from "./ui";
 import { EM_DASH, NO_POSITION, fmtCompactUSD, fmtOrDash } from "./format";
@@ -31,7 +32,7 @@ const DESIGN_LAWS: { n: string; title: string; body: string }[] = [
     title: "Holders are senior",
     // The CERT token exists on mainnet; staking it does not. Only the second makes a tranche.
     body: HAS_CERT_TOKEN
-      ? "By design the junior tranche absorbs buffer exhaustion before holder backing. That tranche does not exist here: the CERT token is deployed, but InsuranceStaking is C3 and is not, so no CERT is staked and there is nothing junior to holders on this deployment."
+      ? "The junior tranche absorbs buffer exhaustion before holder backing. An insurance pool is live: InsuranceStaking holds stakers' USDG and can be drawn into a vault, after a public Safe-proposed and capped draw, before holder backing is touched. It is unaudited and capped at 10,000 USDG, so it is small; staked CERT, the design's second junior layer, does not exist yet."
       : "By design the junior tranche absorbs buffer exhaustion before holder backing. That tranche does not exist here: InsuranceStaking and CERT are C3 and are not deployed, so there is nothing junior to holders on this deployment.",
   },
   {
@@ -69,7 +70,7 @@ const SCENARIOS: {
     name: "Sustained negative funding",
     shock: "Funding runs against the vault's long for an extended period",
     behaviour:
-      "Draws down the buffer the vault holds. No fee passthrough and no insurance tranche is deployed to take over once it is exhausted.",
+      "Draws down the buffer the vault holds. No fee passthrough is deployed; once the buffer is exhausted, a Safe-proposed draw from the insurance pool (capped, unaudited, up to 10,000 USDG) is what can take over.",
     severity: "warn",
     governedBy: "bufferLedger",
   },
@@ -132,25 +133,25 @@ function LawCard({ law, index }: { law: (typeof DESIGN_LAWS)[number]; index: num
 /**
  * The loss waterfall, with the legs that exist and the leg that does not.
  *
- * `InsuranceStaking` is C3 and is not deployed, so the junior tranche has no size. The CERT
- * token itself exists on mainnet, but an unstaked token underwrites nothing. It is shown as a named-but-unsized leg rather than the previous
- * `4_820_000 × 0.42`, which was a figure with no source at all.
+ * The junior leg is the insurance pool (InsuranceStaking, deployed 2026-09-26): its size is a live
+ * read of the pool's totalAssets. Before that it was a named-but-unsized leg, and before that the
+ * invented `4_820_000 × 0.42`. Staked CERT, the design's other junior layer, still does not exist.
  */
 function Waterfall({
   bufferHeld,
   holderBacking,
+  poolAssets,
 }: {
   bufferHeld: number | null;
   holderBacking: number | null;
+  poolAssets: number | null;
 }) {
   const legs: { label: string; sub: string; value: number | null; tone: string }[] = [
     { label: "Funding buffer", sub: "First loss · ERC-20 balance held", value: bufferHeld, tone: "bg-green-bright" },
     {
-      label: "Staked CERT",
-      sub: HAS_CERT_TOKEN
-        ? "Junior tranche · token live, staking not deployed (C3)"
-        : "Junior tranche · not deployed (C3)",
-      value: null,
+      label: HAS_CERT_TOKEN ? "Insurance pool" : "Staked CERT",
+      sub: HAS_CERT_TOKEN ? "Junior tranche · InsuranceStaking, USDG, capped 10,000 · unaudited" : "Junior tranche · not deployed (C3)",
+      value: HAS_CERT_TOKEN ? poolAssets : null,
       tone: "bg-green-bright/45",
     },
     {
@@ -191,8 +192,8 @@ function Waterfall({
         ))}
       </div>
       <p className="mt-6 border-t hairline-dark pt-4 font-mono text-[10px] uppercase leading-[1.7] tracking-[0.06em] text-white-60">
-        Losses consume the buffer first. The insurance tranche it would consume next does not exist on
-        this deployment, so no size is shown for it.
+        Losses consume the buffer first, then the insurance pool - only through a public, capped,
+        Safe-proposed draw - and never holder backing. The pool's size is a live chain read.
       </p>
     </Panel>
   );
@@ -201,6 +202,7 @@ function Waterfall({
 /* ------------------------------------------------------------------ view */
 
 export default function RiskView() {
+  const pool = useInsurancePool();
   const {
     totals,
     liveVaults,
@@ -354,12 +356,12 @@ export default function RiskView() {
     },
     {
       label: "Junior tranche",
-      value: EM_DASH,
+      value: HAS_CERT_TOKEN && pool.assets !== null ? `${pool.assets.toLocaleString("en-US", { maximumFractionDigits: 2 })} USDG` : EM_DASH,
       note: HAS_CERT_TOKEN
-        ? "CERT is deployed; InsuranceStaking is C3 and not deployed"
+        ? `InsuranceStaking live · cap ${pool.cap?.toLocaleString("en-US") ?? "10,000"} USDG · unaudited${pool.drawPending ? " · DRAW PENDING" : ""}`
         : "InsuranceStaking / CERT are C3 and not deployed",
       icon: Lock,
-      muted: true,
+      muted: !HAS_CERT_TOKEN,
     },
   ];
 
@@ -634,7 +636,7 @@ export default function RiskView() {
             <p className="bg-section-deep px-5 py-2 font-mono text-[10px] uppercase tracking-[0.1em] text-white-60">
               No on-chain source on this deployment
             </p>
-            {["Buffer target as % of notional", "Fee passthrough threshold", "Max holding fee", "Junior tranche size", "Keeper bounty"].map(
+            {["Buffer target as % of notional", "Fee passthrough threshold", "Max holding fee", ...(HAS_CERT_TOKEN ? [] : ["Junior tranche size"]), "Keeper bounty"].map(
               (k) => (
                 <div
                   key={k}
@@ -649,6 +651,7 @@ export default function RiskView() {
         </Panel>
 
         <Waterfall
+          poolAssets={pool.assets}
           bufferHeld={bufferHeld}
           holderBacking={totals ? totals.margin + totals.buffer : null}
         />

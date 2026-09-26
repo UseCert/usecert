@@ -9,6 +9,7 @@ import VaultsView from "./dashboard/VaultsView";
 import MintRedeem from "./dashboard/MintRedeem";
 import ActivityView from "./dashboard/ActivityView";
 import RiskView from "./dashboard/RiskView";
+import StakeView from "./dashboard/StakeView";
 
 function ViewRouter() {
   const { view } = useDashboard();
@@ -21,6 +22,8 @@ function ViewRouter() {
       return <ActivityView />;
     case "risk":
       return <RiskView />;
+    case "stake":
+      return <StakeView />;
     default:
       return <Overview />;
   }

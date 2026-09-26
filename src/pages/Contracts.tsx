@@ -6,6 +6,7 @@ import { COLLATERAL_SYMBOL, FAUCET_ADDRESS, IS_TESTNET, VENUE_SIM_ADDRESS } from
 import { MARKET_INDEX_UNVERIFIED_NOTE, isMarketIndexVerified } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
 import { SourcifyEvidence, SourcifySummary } from "./contracts/Sourcify";
+import { INSURANCE_ADDRESS } from "@/chain/insurance";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -55,6 +56,16 @@ const SHARED_ROWS: Row[] = [
       ? "The test collateral, 6 decimals. On mainnet this is replaced by real USDG and nothing here mints it."
       : "Real USDG, 6 decimals. Nothing in this deployment mints it; the vaults only hold what holders deposit.",
   },
+  // Deployed on its own (not by the stack script), so it is not in the generated module.
+  ...(IS_TESTNET
+    ? []
+    : [
+        {
+          label: "InsuranceStaking",
+          address: INSURANCE_ADDRESS,
+          note: "The insurance pool: stakers' USDG, drawn into a vault only after a public, capped, Safe-proposed draw. Unaudited; deposits capped at 10,000 USDG.",
+        },
+      ]),
 ];
 
 // Appended only where the contract is actually deployed. The address book is generated from

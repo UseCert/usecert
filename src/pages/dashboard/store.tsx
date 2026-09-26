@@ -141,7 +141,7 @@ export type VaultId = ChainVaultId | UnroutedVaultId;
  * nor a keeper-rewards mechanism is deployed on chain 46630, and the views that used to
  * render them ran entirely on invented figures.
  */
-export type ViewId = "overview" | "vaults" | "mint" | "activity" | "risk";
+export type ViewId = "overview" | "vaults" | "mint" | "activity" | "risk" | "stake";
 /* `FlowType` ("MINT" | "REDEEM" | "CLAIM") is gone. Three values cannot describe these
  * contracts: the two-step paths have a request, a settle and a refund, and `ForceExited`
  * is a fourth outcome. The eight real event kinds live in `FlowKind`

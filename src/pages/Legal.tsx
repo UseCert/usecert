@@ -89,7 +89,7 @@ const DOCS: Record<LegalDoc, { title: string; updated: string; sections: LegalSe
       {
         heading: "4. Risks",
         paragraphs: [
-          "Using the protocol involves risk, including smart contract risk, oracle risk, market and funding risk, dependence on a single trading venue and a single attester, and the risk that backing mechanisms behave differently under extreme conditions. No staking or insurance layer is deployed: today nothing sits between a vault’s own buffer and holders’ backing. You are responsible for understanding these risks before minting, holding or redeeming. Nothing in the interface constitutes a guarantee of value.",
+          "Using the protocol involves risk, including smart contract risk, oracle risk, market and funding risk, dependence on a single trading venue and a single attester, and the risk that backing mechanisms behave differently under extreme conditions. An insurance pool (InsuranceStaking) is deployed; it is unaudited and its deposits are capped at 10,000 USDG. Staking in it means your stake can be drawn, in part or in full, to cover a vault's shortfall, after a public, capped draw proposed by the protocol's 2-of-3 Safe. No CERT staking exists. You are responsible for understanding these risks before minting, holding or redeeming. Nothing in the interface constitutes a guarantee of value.",
         ],
       },
       {
