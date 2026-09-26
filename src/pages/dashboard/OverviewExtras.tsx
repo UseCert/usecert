@@ -16,7 +16,9 @@ import { cn } from "@/lib/utils";
  * can do.
  */
 export function TickerStrip() {
-  const { liveVaults, maxAttestationAgeSec } = useDashboard();
+  const { liveVaults, maxAttestationAgeSec,
+  attestationRefreshable,
+} = useDashboard();
   const items = [...liveVaults, ...liveVaults]; // duplicate for seamless loop
 
   if (liveVaults.length === 0) {
@@ -43,7 +45,9 @@ export function TickerStrip() {
                 <Flash value={v.price} format={(n) => fmtUSD(n)} />
               </span>
             )}
-            <AgeLine ageSec={v.ageSec} stale={v.attestationStale} maxAgeSec={maxAttestationAgeSec} />
+            <AgeLine ageSec={v.ageSec} stale={v.attestationStale} maxAgeSec={maxAttestationAgeSec}
+              refreshable={attestationRefreshable(v.id)}
+            />
           </span>
         ))}
       </div>
@@ -61,7 +65,9 @@ export function TickerStrip() {
  * part of any sum here. Those two were one field once and it was the ledger.
  */
 export function BackingComposition() {
-  const { liveVaults, totals, maxAttestationAgeSec } = useDashboard();
+  const { liveVaults, totals, maxAttestationAgeSec,
+  allAttestationsRefreshable,
+} = useDashboard();
 
   const rows = useMemo(() => {
     const rs = liveVaults.map((v) => ({
@@ -95,7 +101,8 @@ export function BackingComposition() {
         ageSec={totals?.worstAgeSec ?? null}
         stale={Boolean(totals?.anyStale)}
         maxAgeSec={maxAttestationAgeSec}
-      />
+              refreshable={allAttestationsRefreshable}
+            />
 
       {rows.rs.length === 0 ? (
         <EmptyState className="mt-5" title="No chain data yet" detail="Reading chain 46630…" />
@@ -159,7 +166,9 @@ export function BackingComposition() {
  * claim per vault, labelled, and says plainly that the 48-bar history needs an indexer.
  */
 export function FundingMonitor() {
-  const { liveVaults, maxAttestationAgeSec } = useDashboard();
+  const { liveVaults, maxAttestationAgeSec,
+  attestationRefreshable,
+} = useDashboard();
 
   return (
     <Panel className="flex h-full flex-col p-5">
@@ -173,7 +182,9 @@ export function FundingMonitor() {
           <div key={v.id} className="flex items-center justify-between gap-4 py-3">
             <div className="min-w-0">
               <p className="font-sans text-[13px] font-semibold uppercase text-white">{v.name}</p>
-              <AgeLine ageSec={v.ageSec} stale={v.attestationStale} maxAgeSec={maxAttestationAgeSec} />
+              <AgeLine ageSec={v.ageSec} stale={v.attestationStale} maxAgeSec={maxAttestationAgeSec}
+              refreshable={attestationRefreshable(v.id)}
+            />
             </div>
             <div className="text-right">
               <p className="font-mono text-[15px] tabular-nums leading-none text-silver">
@@ -205,7 +216,15 @@ export function FundingMonitor() {
 
 /** Chain vitals. Every cell is either a read or a documented deployment constant. */
 export function NetworkStrip() {
-  const { block, blockKnown, liveVaults, vaults, totals, maxAttestationAgeSec } = useDashboard();
+  const {
+    block,
+    blockKnown,
+    liveVaults,
+    vaults,
+    totals,
+    maxAttestationAgeSec,
+    allAttestationsRefreshable,
+  } = useDashboard();
   /* The flow index is a THIRD-PARTY HTTP index, not a chain read like every other cell in
    * this strip, so the chip names the source rather than saying a bare "connected". It
    * stays `warn`-toned whatever it says: a reader should not take an explorer-sourced cell
@@ -222,7 +241,19 @@ export function NetworkStrip() {
     {
       label: `Attestation age (max ${maxAttestationAgeSec}s)`,
       value: totals ? `${Math.round(totals.worstAgeSec)}s` : EM_DASH,
-      ...(totals?.anyStale ? { tone: "warn" as const } : {}),
+      // Amber only when nothing can refresh it. Past the max is the idle state of a
+      // protocol nobody is minting on, and a permanently amber cell is a cell nobody reads.
+      ...(totals?.anyStale && allAttestationsRefreshable === false
+        ? { tone: "warn" as const }
+        : {}),
+      ...(totals?.anyStale
+        ? {
+            title:
+              allAttestationsRefreshable === false
+                ? "Past the max, and the attester is not serving signatures, so nothing can refresh it. Minting is off; redemption is unaffected."
+                : "Past the max, which is normal between mints: nothing pays to keep the registry fresh while the protocol is idle. A mint relays a fresh attestation in its own transaction.",
+          }
+        : {}),
     },
     {
       label: "Minting allowed",
@@ -308,7 +339,9 @@ export function NetworkStrip() {
  * anywhere else, so it is published rather than filed.
  */
 export function PegMonitor() {
-  const { liveVaults, vaultConfig, maxAttestationAgeSec } = useDashboard();
+  const { liveVaults, vaultConfig, maxAttestationAgeSec,
+  attestationRefreshable,
+} = useDashboard();
 
   const unverifiedIndexNames = liveVaults.filter((v) => !v.marketIndexVerified).map((v) => v.name);
 
@@ -413,7 +446,8 @@ export function PegMonitor() {
                       stale={v.attestationStale}
                       maxAgeSec={maxAttestationAgeSec}
                       batch={v.backing.provenAtBatch}
-                    />
+              refreshable={attestationRefreshable(v.id)}
+            />
                   </td>
                   <td className="px-3 py-3.5 text-right">
                     <span

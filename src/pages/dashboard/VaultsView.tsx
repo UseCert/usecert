@@ -49,7 +49,15 @@ function MiniStat({
 }
 
 export default function VaultsView() {
-  const { vaults, selectedVault, goVault, goMint, vaultConfig, maxAttestationAgeSec } = useDashboard();
+  const {
+    vaults,
+    selectedVault,
+    goVault,
+    goMint,
+    vaultConfig,
+    maxAttestationAgeSec,
+    attestationRefreshable,
+} = useDashboard();
 
   const vault = vaults.find((v) => v.id === selectedVault) ?? vaults[0];
   const routed = isRouted(vault);
@@ -147,7 +155,8 @@ export default function VaultsView() {
                 stale={vault.attestationStale}
                 maxAgeSec={maxAttestationAgeSec}
                 batch={backing ? backing.provenAtBatch : null}
-              />
+              refreshable={attestationRefreshable(vault.id)}
+            />
             )}
           </div>
         </Panel>
@@ -271,6 +280,7 @@ export default function VaultsView() {
                     className="mt-4"
                     view={vault.capacity}
                     bufferHeld={vault.buffer}
+                    attestationRefreshable={attestationRefreshable(vault.id)}
                   />
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
                     <MiniStat

@@ -181,7 +181,9 @@ export default function Overview() {
     maxAttestationAgeSec,
     isLoading,
     isError,
-  } = useDashboard();
+    attestationRefreshable,
+  allAttestationsRefreshable,
+} = useDashboard();
 
   // The one solvency point we can prove right now, summed across routed vaults. Stage 1
   // computes obligation as supply × oracle price, falling back to the attested notional18
@@ -236,6 +238,7 @@ export default function Overview() {
               ageSec={totals?.worstAgeSec ?? null}
               stale={Boolean(totals?.anyStale)}
               maxAgeSec={maxAttestationAgeSec}
+              refreshable={allAttestationsRefreshable}
             />
             <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.06em] text-white-60/60">
               Worst attestation age across routed vaults
@@ -263,6 +266,7 @@ export default function Overview() {
               ageSec={totals?.worstAgeSec ?? null}
               stale={Boolean(totals?.anyStale)}
               maxAgeSec={maxAttestationAgeSec}
+              refreshable={allAttestationsRefreshable}
             />
           }
         />
@@ -501,7 +505,8 @@ export default function Overview() {
                           stale={v.attestationStale}
                           maxAgeSec={maxAttestationAgeSec}
                           batch={v.backing ? v.backing.provenAtBatch : null}
-                        />
+              refreshable={attestationRefreshable(v.id)}
+            />
                       ) : (
                         <span className="text-white-60">{EM_DASH}</span>
                       )}

@@ -351,12 +351,27 @@ export function AgeLine({
   stale,
   maxAgeSec,
   batch,
+  refreshable,
   className,
 }: {
   ageSec: number | null;
   stale: boolean;
   maxAgeSec: number;
   batch?: number | null;
+  /**
+   * Can a mint refresh this attestation? `undefined`/`null` when the caller does not know.
+   *
+   * This line used to end "minting off" whenever `stale` was true. That was correct under
+   * a keeper broadcasting on a timer, where a stale attestation meant the keeper had died.
+   * On-demand attestation inverted it: nobody keeps the registry fresh between mints, so
+   * an aged attestation is the resting state and the mint relays a signature itself. The
+   * line was telling every reader that minting had stopped on a protocol where it worked.
+   *
+   * Callers that cannot answer pass nothing, and the line then states the age and its
+   * threshold without drawing a conclusion from them - which is the honest default, since
+   * the conclusion is the part that was wrong.
+   */
+  refreshable?: boolean | null;
   className?: string;
 }) {
   const age =
@@ -365,15 +380,24 @@ export function AgeLine({
       : ageSec < 90
         ? `proven ${Math.round(ageSec)}s ago`
         : `proven ${Math.floor(ageSec / 60)}m ${Math.round(ageSec % 60)}s ago`;
+  // Only an unrefreshable stale attestation is a warning. Colouring the idle state warn
+  // is how a warning stops being read.
+  const alarming = stale && refreshable === false;
+  const staleNote =
+    refreshable === true
+      ? ` · aged out (>${maxAgeSec}s) · a mint refreshes it`
+      : refreshable === false
+        ? ` · aged out (>${maxAgeSec}s) · attester not serving`
+        : ` · aged out (>${maxAgeSec}s)`;
   return (
     <span
       className={cn(
         "font-mono text-[10px] uppercase tracking-[0.06em]",
-        stale ? "text-warn" : "text-white-60",
+        alarming ? "text-warn" : "text-white-60",
         className,
       )}
     >
-      {ageSec === null ? age : stale ? `${age} · attestation stale (>${maxAgeSec}s) · minting off` : age}
+      {ageSec === null ? age : stale ? `${age}${staleNote}` : age}
       {batch !== undefined && batch !== null && ageSec !== null ? ` · batch ${batch}` : ""}
     </span>
   );
@@ -721,26 +745,69 @@ export function CapacityLegLine({
 export function CapacityHalt({
   view,
   bufferHeld,
+  attestationRefreshable,
   className,
 }: {
   view: CapacityView;
   /** `solvency.buffer18` — shown beside the ledger to make the gap between them explicit. */
   bufferHeld?: number | null;
+  /**
+   * Can a mint refresh the attestation itself? `null` when unknown.
+   *
+   * Only consulted when staleness is the SOLE reason the ceiling is zero. Under on-demand
+   * attestation that is the idle state of a working protocol - nobody pays to keep the
+   * registry fresh between mints - and the mint relays a signature before it mints. A
+   * warning card over that condition fires permanently and means nothing by the time it
+   * fires over something real.
+   */
+  attestationRefreshable?: boolean | null;
   className?: string;
 }) {
   if (!view.capIsZero) return null;
 
+  // "Only" matters. A stale attestation alongside a drained buffer ledger is still a halt:
+  // the refresh clears one leg and the mint then fails on the other.
+  const onlyStale =
+    view.bindingLegs.length === 1 && view.bindingLegs[0] === "stale-attestation";
+  const selfHealing = onlyStale && attestationRefreshable === true;
+
   const ledger = view.bufferLedger;
   return (
-    <div className={cn("border border-warn/40 bg-[#12120d] p-4", className)}>
-      <p className="font-mono text-[11px] uppercase tracking-[0.06em] text-warn">
-        Minting halted · mint ceiling is zero
+    <div
+      className={cn(
+        "border p-4",
+        selfHealing ? "border-white/15 bg-[#0f1010]" : "border-warn/40 bg-[#12120d]",
+        className,
+      )}
+    >
+      <p
+        className={cn(
+          "font-mono text-[11px] uppercase tracking-[0.06em]",
+          selfHealing ? "text-white-60" : "text-warn",
+        )}
+      >
+        {selfHealing ? "Attestation idle · your mint refreshes it" : "Minting halted · mint ceiling is zero"}
       </p>
       <p className="mt-1 font-mono text-[11px] leading-[1.6] text-white-60">
-        capacityOracle.maxNotional18 is 0, so _requireCapacity refuses every mint regardless of
-        the collateral this vault holds. Redemption is unaffected: no redemption path reads
-        capacity, and forceExit is gated on nothing.
-        {view.bindingLegs.length > 0 ? ` Cause: ${capacityLegsLabel(view.bindingLegs)}.` : ""}
+        {selfHealing ? (
+          <>
+            capacityOracle.maxNotional18 reads 0 right now because the on-chain attestation has
+            aged out, which is what an idle protocol looks like: nobody pays a keeper to refresh
+            it between mints. Your transaction relays a fresh signed attestation before it mints,
+            so the ceiling is non-zero by the time it is checked. Redemption never reads capacity
+            at all.
+          </>
+        ) : (
+          <>
+            capacityOracle.maxNotional18 is 0, so _requireCapacity refuses every mint regardless of
+            the collateral this vault holds. Redemption is unaffected: no redemption path reads
+            capacity, and forceExit is gated on nothing.
+            {view.bindingLegs.length > 0 ? ` Cause: ${capacityLegsLabel(view.bindingLegs)}.` : ""}
+            {onlyStale && attestationRefreshable === false
+              ? " The attester is not serving signatures, so nothing can refresh it."
+              : ""}
+          </>
+        )}
       </p>
       {view.bindingLeg === "buffer-ledger-nonpositive" && (
         <p className="mt-2 font-mono text-[10px] uppercase leading-[1.7] tracking-[0.06em] text-white-60/70">

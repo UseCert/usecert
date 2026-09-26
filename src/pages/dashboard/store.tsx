@@ -104,6 +104,11 @@ import {
   type LiveVault,
   type VaultConfigView,
 } from "@/chain/useVaults";
+import {
+  signerCovers,
+  useSignerFreshness,
+  type SignerFreshness,
+} from "@/chain/useSignerFreshness";
 
 /* ------------------------------------------------------------------ types */
 
@@ -478,8 +483,27 @@ interface DashboardCtx {
   vaultConfig: (id: VaultId) => VaultConfigView | undefined;
   /** `null` until real data lands. */
   totals: Totals | null;
-  /** Documented `maxAttestationAgeSec`: past this, capacity is 0 and minting is off. */
+  /**
+   * Documented `maxAttestationAgeSec`: past this the registry reports zero capacity.
+   *
+   * This is NOT "minting is off" any more. Under on-demand attestation a mint relays a
+   * fresh signature inside its own transaction, so an aged registry is the idle state
+   * rather than a fault. Read it together with `signer` before telling anyone that
+   * minting has stopped.
+   */
   maxAttestationAgeSec: number;
+  /** Whether the attester is currently serving relayable signatures. See the hook. */
+  signer: SignerFreshness;
+  /**
+   * Can a mint refresh THIS vault's attestation right now? `null` when not yet known.
+   *
+   * Every view that shows an attestation age needs this, and none of them should have to
+   * know that the answer comes from an HTTP endpoint keyed by vault address. Per vault,
+   * not protocol-wide: the signer serves a batch and a batch can be short one mirror.
+   */
+  attestationRefreshable: (id: VaultId) => boolean | null;
+  /** The same question across every routed vault: true only when the batch covers them all. */
+  allAttestationsRefreshable: boolean | null;
 
   /* ---- history (absent) --------------------------------------------- */
   agg: Record<Timeframe, SeriesPoint[]>;
@@ -706,6 +730,28 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   // by `useFlows()` in the views, not published from this provider, because it is a
   // third-party HTTP index and not a contract read. See the file header.
 
+  /* -------------------------------------------------------------- signer */
+
+  // Polled over HTTP, not read from chain: whether a mint can refresh the attestation
+  // depends on the attester being up, and no contract knows that.
+  const signer = useSignerFreshness();
+
+  const attestationRefreshable = useCallback(
+    (id: VaultId) => signerCovers(signer, liveVault(id)?.vaultAddress),
+    [signer, liveVault],
+  );
+
+  // `every` over an EMPTY list is true, which would claim a refresh is available before any
+  // vault has loaded. The length guard keeps that from becoming a green light.
+  const allAttestationsRefreshable =
+    signer.available === null
+      ? null
+      : !signer.available
+        ? false
+        : live.vaults.length === 0
+          ? null
+          : live.vaults.every((v) => signer.vaults.has(v.vaultAddress.toLowerCase()));
+
   /* --------------------------------------------------------------- value */
 
   const value: DashboardCtx = {
@@ -731,6 +777,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     vaultConfig,
     totals,
     maxAttestationAgeSec: MAX_ATTESTATION_AGE_SEC,
+    signer,
+    attestationRefreshable,
+    allAttestationsRefreshable,
 
     agg: EMPTY_AGG,
     historyUnavailable: true,

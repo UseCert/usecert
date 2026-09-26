@@ -168,6 +168,7 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
     faucet,
     now,
     maxAttestationAgeSec,
+    attestationRefreshable,
     refetch,
     refetchBalances,
     pushToast,
@@ -198,6 +199,10 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
   const priceUnavailable = Boolean(lv?.priceUnavailable);
   const mintAllowed = Boolean(lv?.mintAllowed);
   const attestationStale = Boolean(lv?.attestationStale);
+  // Whether THIS vault's attestation can be refreshed by the mint about to be sent. Asked
+  // per vault rather than protocol-wide: the signer serves a batch, and a batch can be
+  // short one mirror - "the signer is up" would then be a false positive for that mirror.
+  const refreshable = attestationRefreshable(asset);
 
   /* ---------------------------------------------------------------- quote */
 
@@ -602,7 +607,12 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
                 with a healthy oracle and mintAllowed() == true, so folding it into "minting
                 paused because the oracle is unhealthy" would misattribute it. */}
             {tab === "mint" && capacity !== null && (
-              <CapacityHalt className="mt-4" view={capacity} bufferHeld={vault.buffer} />
+              <CapacityHalt
+                className="mt-4"
+                view={capacity}
+                bufferHeld={vault.buffer}
+                attestationRefreshable={refreshable}
+              />
             )}
 
             {mintBlocked && (!mintAllowed || priceUnavailable) && (
@@ -614,9 +624,13 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
                   {priceUnavailable
                     ? "oracle.px() reverted: the feed is stale, deviant or badly fed. That is designed behaviour, not an outage."
                     : "oracle.mintAllowed() is false."}
-                  {attestationStale
-                    ? ` The attestation is also older than ${maxAttestationAgeSec}s, which sets capacity to zero — that alone stops minting.`
-                    : ""}{" "}
+                  {!attestationStale
+                    ? ""
+                    : refreshable === true
+                      ? ` The attestation is also older than ${maxAttestationAgeSec}s, but that is not what is blocking you — your mint would relay a fresh one.`
+                      : refreshable === false
+                        ? ` The attestation is also older than ${maxAttestationAgeSec}s and the attester is not serving signatures, so nothing can refresh it — that alone stops minting.`
+                        : ` The attestation is also older than ${maxAttestationAgeSec}s, which sets capacity to zero until a fresh one is relayed.`}{" "}
                   Redemption is unaffected and still works.
                 </p>
               </div>
@@ -715,7 +729,8 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
                   stale={attestationStale}
                   maxAgeSec={maxAttestationAgeSec}
                   batch={lv?.backing.provenAtBatch ?? null}
-                />
+              refreshable={refreshable}
+            />
               </div>
 
               <div className="mt-4 flex flex-col">
