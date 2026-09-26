@@ -6,6 +6,7 @@ import { EM_DASH, NO_POSITION, fmtCompactUSD, fmtOrDash } from "./format";
 import { fromBps, fromPrice18 } from "@/chain/units";
 import { BASIS_ON_THIS_DEPLOYMENT } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
+import { VENUE_IS_SIMULATED } from "@/chain/deployment";
 
 /* --------------------------------------------------------------- content */
 
@@ -779,14 +780,17 @@ export default function RiskView() {
               <span className="text-white">Venue market index</span>: the market a vault hedges on is a
               constructor immutable, and {unverifiedIndexNames.length} of the {liveVaults.length}{" "}
               indices here were chosen rather than read back from the venue's own market list
-              {unverifiedIndexNames.length > 0 ? ` (${unverifiedIndexNames.join(", ")})` : ""}. The
-              testnet simulator creates any index on first use, so nothing misbehaves; against a real
-              venue an unverified index would hedge the wrong market, and the mirror would have to be
-              redeployed rather than reconfigured.
+              {unverifiedIndexNames.length > 0 ? ` (${unverifiedIndexNames.join(", ")})` : ""}.{" "}
+              {VENUE_IS_SIMULATED
+                ? "The testnet simulator creates any index on first use, so nothing misbehaves; against a real venue an unverified index would hedge the wrong market, and the mirror would have to be redeployed rather than reconfigured."
+                : "Every index on this deployment was read from the venue's market list before deploying, by a preflight that refuses unlisted markets; a wrong one would hedge the wrong market and need a redeploy."}
             </li>
             <li>
               <span className="text-white">Single-venue dependency</span>: all exposure sits on one perp venue and its
-              operator. On this testnet that venue is a simulator, not a live exchange.
+              operator.{" "}
+              {VENUE_IS_SIMULATED
+                ? "On this testnet that venue is a simulator, not a live exchange."
+                : "Here that is Robinhood Chain Lighter. Hedges are opened by a keeper holding the vault's API key and closed by the vault on chain."}
             </li>
             <li>
               Named risks: sustained negative funding drawing the buffer down with no fee passthrough or insurance

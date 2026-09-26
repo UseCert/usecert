@@ -1,5 +1,6 @@
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
+import { IS_TESTNET } from "@/chain/deployment";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -9,7 +10,9 @@ const PHASES = [
     status: "Live",
     live: true,
     title: "uTSLA, uSPY, uQQQ + uNVDA vaults",
-    copy: "Four mirrors live on testnet. Mint, redeem, and the public solvency dashboard.",
+    copy: IS_TESTNET
+      ? "Four mirrors live on testnet. Mint, redeem, and the public solvency dashboard."
+      : "Six mirrors live on Robinhood Chain mainnet, hedged on Robinhood Chain Lighter. Mint, redeem, and the public solvency dashboard.",
   },
   {
     tag: "C2",

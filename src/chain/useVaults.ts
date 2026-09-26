@@ -70,6 +70,7 @@ import {
   fromPrice18,
 } from "./units";
 import type { FundingBar, SeriesPoint, Vault } from "@/pages/dashboard/store";
+import { IS_TESTNET } from "./deployment";
 
 /* ────────────────────────────────────────────────────────────────────────── ids */
 
@@ -123,11 +124,13 @@ export const MAX_ATTESTATION_AGE_SEC = 300;
  * feed pair in a second way: how much of a genuine reference price sits behind the replayed
  * value differs per market, and this deployment publishes nothing about that either.
  */
-export const BASIS_ON_THIS_DEPLOYMENT =
-  "Basis reads 0 bps on every mirror by construction, not by agreement: chain 46630 has no " +
-  "Chainlink, so each CertOracle reads a ReplayAggregator this project writes, and the same " +
-  "keeper sets the simulator's mark in the same transaction. Treat it as proof the guard is " +
-  "wired, never as an independent source confirming the price.";
+export const BASIS_ON_THIS_DEPLOYMENT = IS_TESTNET
+  ? "Basis reads 0 bps on every mirror by construction, not by agreement: chain 46630 has no " +
+    "Chainlink, so each CertOracle reads a ReplayAggregator this project writes, and the same " +
+    "keeper sets the simulator's mark in the same transaction. Treat it as proof the guard is " +
+    "wired, never as an independent source confirming the price."
+  : "Basis compares Chainlink's total-return feed with the venue's spot mark, two independent " +
+    "sources. It was measured at 12-46 bps against a 500 bps band and widens with dividends.";
 
 /**
  * `deltaBps === 10_000` means the hedge-to-obligation ratio is EXACTLY 1.0 — at target.

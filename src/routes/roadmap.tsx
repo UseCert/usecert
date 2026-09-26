@@ -9,13 +9,13 @@ export const Route = createFileRoute("/roadmap")({
       {
         name: "description",
         content:
-          "What is live on UseCert today, what is being built, and what has to be true before mainnet. Testnet only: the collateral is a test token and the perp venue is simulated.",
+          "What is live on UseCert on Robinhood Chain mainnet today, what is being built, and what is still open.",
       },
       { property: "og:title", content: "UseCert Milestones" },
       {
         property: "og:description",
         content:
-          "Delivery status without dates. Every shipped item is checkable against chain 46630.",
+          "Delivery status without dates. Every shipped item is checkable on chain.",
       },
     ],
   }),

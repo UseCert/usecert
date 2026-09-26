@@ -4,6 +4,7 @@ import { ArrowUpRight } from "lucide-react";
 import LetterReveal from "@/components/LetterReveal";
 import type { VaultData } from "./data";
 import { StatusPill } from "./StackCards";
+import { CHAIN_ID, IS_TESTNET } from "@/chain/deployment";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -181,7 +182,7 @@ export function MediaBlock({ vault }: { vault: VaultData }) {
               {live ? (
                 <span className="absolute left-4 top-4 inline-flex items-center gap-1.5 rounded-full border border-green-bright/40 bg-ink/70 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.08em] text-green-bright backdrop-blur-sm md:left-6 md:top-6">
                   <span className="h-[6px] w-[6px] rounded-full bg-green-bright" aria-hidden />
-                  Deployed on testnet 46630
+                  {IS_TESTNET ? `Deployed on testnet ${CHAIN_ID}` : `Deployed on mainnet ${CHAIN_ID}`}
                 </span>
               ) : (
                 <span className="absolute left-4 top-4 inline-flex items-center gap-1.5 rounded-full border border-warn/40 bg-ink/70 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.08em] text-warn backdrop-blur-sm md:left-6 md:top-6">

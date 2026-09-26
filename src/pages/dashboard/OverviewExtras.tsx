@@ -6,6 +6,7 @@ import { EM_DASH, fmtCompactUSD, fmtNum, fmtOrDash, fmtUSD } from "./format";
 import { fromBps, fromPrice18 } from "@/chain/units";
 import { BASIS_ON_THIS_DEPLOYMENT, MARKET_INDEX_UNVERIFIED_NOTE } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
+import { CHAIN_ID, IS_TESTNET } from "@/chain/deployment";
 
 /* --------------------------------------------------------- live ticker */
 
@@ -236,7 +237,7 @@ export function NetworkStrip() {
 
   const stats: { label: string; value: string; tone?: "warn"; title?: string }[] = [
     { label: "Block height", value: blockKnown ? block.toLocaleString("en-US") : EM_DASH },
-    { label: "Chain", value: "46630 · testnet" },
+    { label: "Chain", value: IS_TESTNET ? `${CHAIN_ID} · testnet` : `${CHAIN_ID} · mainnet` },
     { label: "Vaults routed", value: `${liveVaults.length}/${vaults.length}` },
     {
       label: `Attestation age (max ${maxAttestationAgeSec}s)`,
