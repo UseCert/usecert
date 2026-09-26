@@ -1737,6 +1737,35 @@ source answered. Verified live:
 
 **Watched.** `usecert-health-mainnet` alerts if the files go stale.
 
+### 6.27 K1: the insurance contract, written and tested — ✅ 2026-09-26 (`edccc08`), not deployed
+
+`src/InsuranceStaking.sol` builds the middle rung of the loss order: buffer → insurance → never
+holder backing. The design and the reason for each decision are in
+`docs/K-INSURANCE-STAKING.md`.
+
+* **Staked asset.** Stakers deposit USDG, not CERT. A draw must deliver collateral, and CERT
+  would first have to be sold into a falling market.
+* **Draws.** A draw sends USDG to a registered vault, where it is the buffer the solvency math
+  counts. No deployed vault changes. Rules:
+  - proposed by the Safe, executable by anyone after a delay, expiring 3 days later;
+  - capped at 50% or less of the pool, checked twice;
+  - at least 7 days between proposals.
+* **Exits.** A cooldown, then a withdrawal window. Exits and deposits pause while a draw is
+  pending, and the proposal gap bounds that pause.
+* **Yield.** Only income actually sent to the pool. No emissions.
+
+**Tests.** 21, with the solvency fuzz at 5,000 runs. The full suite passes 518; the 3 failures
+are the deliberate AuditPoC ones.
+
+**Not done, and why.**
+
+* **Deployment** waits for an external audit, a legal read, and the owner's decision.
+* **Fee-funded yield** needs a new vault version: fees cannot leave today's vaults (K2).
+* **An objective draw trigger** is K3.
+
+A test run rewrote `deployments/46630.json` again. It was restored from the pre-run backup, and
+the tree is clean.
+
 ---
 
 ## Keeping the public page in sync
