@@ -12,7 +12,9 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as R404RouteImport } from './routes/404'
 import { Route as AboutRouteImport } from './routes/about'
+import { Route as ContractsRouteImport } from './routes/contracts'
 import { Route as DashboardRouteImport } from './routes/dashboard'
+import { Route as RoadmapRouteImport } from './routes/roadmap'
 import { Route as RolesRouteImport } from './routes/roles'
 import { Route as LearnIndexRouteImport } from './routes/learn/index'
 import { Route as LearnSlugRouteImport } from './routes/learn/$slug'
@@ -36,9 +38,19 @@ const AboutRoute = AboutRouteImport.update({
   path: '/about',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ContractsRoute = ContractsRouteImport.update({
+  id: '/contracts',
+  path: '/contracts',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const DashboardRoute = DashboardRouteImport.update({
   id: '/dashboard',
   path: '/dashboard',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RoadmapRoute = RoadmapRouteImport.update({
+  id: '/roadmap',
+  path: '/roadmap',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RolesRoute = RolesRouteImport.update({
@@ -81,7 +93,9 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/404': typeof R404Route
   '/about': typeof AboutRoute
+  '/contracts': typeof ContractsRoute
   '/dashboard': typeof DashboardRoute
+  '/roadmap': typeof RoadmapRoute
   '/roles': typeof RolesRoute
   '/learn/$slug': typeof LearnSlugRoute
   '/legal/privacy-policy': typeof LegalPrivacyPolicyRoute
@@ -94,7 +108,9 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/404': typeof R404Route
   '/about': typeof AboutRoute
+  '/contracts': typeof ContractsRoute
   '/dashboard': typeof DashboardRoute
+  '/roadmap': typeof RoadmapRoute
   '/roles': typeof RolesRoute
   '/learn/$slug': typeof LearnSlugRoute
   '/legal/privacy-policy': typeof LegalPrivacyPolicyRoute
@@ -108,7 +124,9 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/404': typeof R404Route
   '/about': typeof AboutRoute
+  '/contracts': typeof ContractsRoute
   '/dashboard': typeof DashboardRoute
+  '/roadmap': typeof RoadmapRoute
   '/roles': typeof RolesRoute
   '/learn/$slug': typeof LearnSlugRoute
   '/legal/privacy-policy': typeof LegalPrivacyPolicyRoute
@@ -123,7 +141,9 @@ export interface FileRouteTypes {
     | '/'
     | '/404'
     | '/about'
+    | '/contracts'
     | '/dashboard'
+    | '/roadmap'
     | '/roles'
     | '/learn/$slug'
     | '/legal/privacy-policy'
@@ -136,7 +156,9 @@ export interface FileRouteTypes {
     | '/'
     | '/404'
     | '/about'
+    | '/contracts'
     | '/dashboard'
+    | '/roadmap'
     | '/roles'
     | '/learn/$slug'
     | '/legal/privacy-policy'
@@ -149,7 +171,9 @@ export interface FileRouteTypes {
     | '/'
     | '/404'
     | '/about'
+    | '/contracts'
     | '/dashboard'
+    | '/roadmap'
     | '/roles'
     | '/learn/$slug'
     | '/legal/privacy-policy'
@@ -163,7 +187,9 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   R404Route: typeof R404Route
   AboutRoute: typeof AboutRoute
+  ContractsRoute: typeof ContractsRoute
   DashboardRoute: typeof DashboardRoute
+  RoadmapRoute: typeof RoadmapRoute
   RolesRoute: typeof RolesRoute
   LearnSlugRoute: typeof LearnSlugRoute
   LegalPrivacyPolicyRoute: typeof LegalPrivacyPolicyRoute
@@ -196,11 +222,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AboutRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/contracts': {
+      id: '/contracts'
+      path: '/contracts'
+      fullPath: '/contracts'
+      preLoaderRoute: typeof ContractsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/dashboard': {
       id: '/dashboard'
       path: '/dashboard'
       fullPath: '/dashboard'
       preLoaderRoute: typeof DashboardRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/roadmap': {
+      id: '/roadmap'
+      path: '/roadmap'
+      fullPath: '/roadmap'
+      preLoaderRoute: typeof RoadmapRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/roles': {
@@ -259,7 +299,9 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   R404Route: R404Route,
   AboutRoute: AboutRoute,
+  ContractsRoute: ContractsRoute,
   DashboardRoute: DashboardRoute,
+  RoadmapRoute: RoadmapRoute,
   RolesRoute: RolesRoute,
   LearnSlugRoute: LearnSlugRoute,
   LegalPrivacyPolicyRoute: LegalPrivacyPolicyRoute,
