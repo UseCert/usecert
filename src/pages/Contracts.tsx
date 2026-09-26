@@ -5,6 +5,7 @@ import { explorerAddressUrl } from "@/chain/config";
 import { COLLATERAL_SYMBOL, FAUCET_ADDRESS, IS_TESTNET, VENUE_SIM_ADDRESS } from "@/chain/deployment";
 import { MARKET_INDEX_UNVERIFIED_NOTE, isMarketIndexVerified } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
+import { SourcifyEvidence, SourcifySummary } from "./contracts/Sourcify";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -100,6 +101,7 @@ function RowLine({ row }: { row: Row }) {
       {row.note && (
         <p className="mt-1.5 max-w-[78ch] text-[12px] leading-[1.6] text-white-60/70">{row.note}</p>
       )}
+      <SourcifyEvidence address={row.address} />
     </div>
   );
 }
@@ -123,6 +125,8 @@ export default function ContractsPage() {
           by hand beside it — so this page cannot drift from the contracts the dashboard is
           actually talking to.
         </p>
+
+        <SourcifySummary />
 
         {/* Shared */}
         <div className="mt-16 md:mt-24">

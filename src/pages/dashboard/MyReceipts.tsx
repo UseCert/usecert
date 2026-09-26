@@ -1,9 +1,9 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useReadContracts } from "wagmi";
 import { Loader2 } from "lucide-react";
 import { CertVaultABI } from "@/chain/contracts";
 import { CHAIN_ID } from "@/chain/deployment";
-import { useFlows } from "@/chain/useFlows";
+import { useFlows, type FlowEvent } from "@/chain/useFlows";
 import { vaultAddresses, type ChainVaultId } from "@/chain/useVaults";
 import { useDashboard } from "./store";
 import { ExplorerSourcedTag, MicroLabel } from "./ui";
@@ -30,6 +30,17 @@ type Row = {
   status: string;
   tone: "open" | "done" | "wait";
   action: ReceiptAction | null;
+  /** Every indexed event for this receipt, oldest first: the evidence timeline. */
+  events: FlowEvent[];
+};
+
+const STEP_LABEL: Record<string, string> = {
+  MINT_REQUESTED: "Mint request confirmed on chain",
+  MINT_SETTLED: "Settlement observed: certificates issued",
+  MINT_REFUNDED: "Refund observed: escrow returned",
+  REDEEM_REQUESTED: "Redemption request confirmed on chain",
+  FORCE_EXITED: "Force exit confirmed on chain",
+  REDEEM_CLAIMED: "Claim observed: collateral paid",
 };
 
 /** A hedge normally fills in under a minute; before this, a refund would only revert. */
@@ -80,7 +91,11 @@ export function MyReceipts({
       const amount = mint
         ? f.collateral !== null ? `${fmtNum(f.collateral, 2)} USDG in` : "—"
         : f.cert !== null ? `${fmtNum(f.cert, 4)} burned` : "—";
-      const base = { kind: mint ? ("mint" as const) : ("redeem" as const), id, timeMs: f.timeMs, amount };
+      const kinds = mint ? ["MINT_REQUESTED", "MINT_SETTLED", "MINT_REFUNDED"] : ["REDEEM_REQUESTED", "FORCE_EXITED", "REDEEM_CLAIMED"];
+      const events = (history.mine ?? [])
+        .filter((e) => e.vaultId === asset && e.receiptId === f.receiptId && kinds.includes(e.kind))
+        .sort((a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex);
+      const base = { kind: mint ? ("mint" as const) : ("redeem" as const), id, timeMs: f.timeMs, amount, events };
       if (!r || r.status !== "success") return { ...base, status: "reading chain…", tone: "wait", action: null };
       if (mint) {
         const [, , settled, , requestedAt, refundStaged] = r.result as readonly [string, bigint, boolean, bigint, bigint, boolean, bigint];
@@ -101,6 +116,8 @@ export function MyReceipts({
       return { ...base, status: "ready to claim once the collateral is back", tone: "open", action: { kind: "claim", id, staged: false } };
     });
   }, [requests, reads.data, now, history.mine, asset]);
+
+  const [open, setOpen] = useState<string | null>(null);
 
   if (!address) return null;
 
@@ -137,6 +154,13 @@ export function MyReceipts({
               >
                 {row.status}
               </span>
+              <button
+                type="button"
+                onClick={() => setOpen(open === `${row.kind}-${row.id}` ? null : `${row.kind}-${row.id}`)}
+                className="font-mono text-[10px] uppercase tracking-[0.06em] text-white-60 underline decoration-white/20 underline-offset-2 hover:text-green-bright"
+              >
+                {open === `${row.kind}-${row.id}` ? "hide evidence" : "evidence"}
+              </button>
               {row.action && (
                 <button
                   type="button"
@@ -147,6 +171,28 @@ export function MyReceipts({
                   {busy === row.id && <Loader2 size={11} className="animate-spin" />}
                   {row.action.kind === "claim" ? "Claim" : "Refund now"}
                 </button>
+              )}
+              {open === `${row.kind}-${row.id}` && (
+                <ol className="mt-1 w-full border-l hairline-dark pl-3">
+                  {row.events.map((e) => (
+                    <li key={e.id} className="py-1 text-[10px] uppercase tracking-[0.05em] text-white-60">
+                      <span className="text-white">{STEP_LABEL[e.kind] ?? e.kind}</span>
+                      {` · block ${e.blockNumber.toLocaleString("en-US")} · log ${e.logIndex}`}
+                      {e.timeMs ? ` · ${new Date(e.timeMs).toISOString().slice(0, 16).replace("T", " ")} UTC` : ""}
+                      {" · "}
+                      <a href={e.txUrl} target="_blank" rel="noreferrer noopener" className="underline decoration-white/20 underline-offset-2 hover:text-green-bright">
+                        {e.txHash.slice(0, 10)}…
+                      </a>
+                    </li>
+                  ))}
+                  {row.status.startsWith("refund staged") && (
+                    <li className="py-1 text-[10px] uppercase tracking-[0.05em] text-white-60">Refund staged (read from the contract)</li>
+                  )}
+                  <li className="py-1 text-[10px] normal-case leading-[1.5] text-white-60/70">
+                    On-chain evidence only. The keeper's hedge on the venue is off chain and is not proven here, and a confirmed
+                    request is not a completed mint or redemption until its settlement or claim appears above.
+                  </li>
+                </ol>
               )}
             </li>
           ))}

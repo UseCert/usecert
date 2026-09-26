@@ -15,7 +15,7 @@ export const Route = createFileRoute("/contracts")({
       {
         property: "og:description",
         content:
-          "All 26 contracts, each linking to its source on the explorer. Taken from the same module the app transacts against.",
+          "Every UseCert contract on mainnet, each with its explorer link and live Sourcify verification evidence. Taken from the same module the app transacts against.",
       },
     ],
   }),

@@ -354,7 +354,7 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
           tone: "info",
           title: "Mint requested — escrowed, awaiting the fill",
           body:
-            "Your collateral is escrowed and the hedge has been requested. Certificates are issued to your wallet as soon as the venue confirms the fill, at the price it filled at, usually within a minute. Nothing more is needed from you. If it is not settled within the 24-hour window, anyone (including you) may stage and claim a full refund of the escrow.",
+            "Your collateral is escrowed and the hedge has been requested. Certificates are issued to your wallet as soon as the venue confirms the fill, at the price it filled at, usually within a minute. Nothing more is needed from you. If it is not settled within the 24-hour window, the full escrow is refunded to your wallet: the keeper does it automatically, and anyone (including you) can do it from My receipts.",
         });
       }
       after();

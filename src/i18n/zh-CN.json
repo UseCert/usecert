@@ -949,7 +949,26 @@
   "settle": "结算",
   "refund": "退款",
   "claim": "领取",
-  "tx": "交易"
+  "tx": "交易",
+  "Verified code evidence · Sourcify": "已验证代码证据 · Sourcify",
+  "Verification evidence unavailable right now. Every address below links to its Sourcify lookup.": "暂时无法获取验证证据。下方每个地址都链接到其 Sourcify 查询页。",
+  "This shows public source/bytecode verification status for these addresses on Robinhood Chain. It does not prove a signed release, an audit, the website build, the keeper's or attester's behaviour, a hedge or fill on the venue, collateral sufficiency, settlement, redemption, custody, dividends or voting rights. Certificates are synthetic exposure, not shares.": "这里显示这些地址在 Robinhood Chain 上公开的源码/字节码验证状态。它不能证明已签名的发布版本、审计、网站构建、执行程序或证明方的行为、交易场所上的对冲或成交、抵押品充足性、结算、赎回、托管、股息或投票权。凭证是合成敞口，而不是股票。",
+  "Sourcify · Exact source/bytecode match": "Sourcify · 源码/字节码完全匹配",
+  "Sourcify · Runtime bytecode exact match": "Sourcify · 运行时字节码完全匹配",
+  "Sourcify · Partial match": "Sourcify · 部分匹配",
+  "Sourcify · No verification returned": "Sourcify · 未返回验证",
+  "Sourcify · Verification evidence unavailable": "Sourcify · 验证证据不可用",
+  "not UseCert code": "非 UseCert 代码",
+  "evidence": "证据",
+  "hide evidence": "收起证据",
+  "Mint request confirmed on chain": "铸造请求已在链上确认",
+  "Settlement observed: certificates issued": "已观察到结算：凭证已发行",
+  "Refund observed: escrow returned": "已观察到退款：托管资金已返还",
+  "Redemption request confirmed on chain": "赎回请求已在链上确认",
+  "Force exit confirmed on chain": "强制退出已在链上确认",
+  "Claim observed: collateral paid": "已观察到领取：抵押品已支付",
+  "Refund staged (read from the contract)": "退款已登记（读取自合约）",
+  "On-chain evidence only. The keeper's hedge on the venue is off chain and is not proven here, and a confirmed request is not a completed mint or redemption until its settlement or claim appears above.": "仅为链上证据。执行程序在交易场所的对冲在链下，此处无法证明；已确认的请求在其结算或领取出现在上方之前，并不是一次已完成的铸造或赎回。"
  },
  "tpl": {
   "(EST. {#} · VERSION {#}.{#})": "（创立于 {0} · 版本 {1}.{2}）",
@@ -1170,6 +1189,9 @@
   "{#} mints · {#} redemptions · none awaiting · source: third-party index": "{0} 次铸造 · {1} 次赎回 · 无待处理 · 来源：第三方索引",
   "{#} mints · {#} redemptions · {#} awaiting · source: UseCert indexer": "{0} 次铸造 · {1} 次赎回 · {2} 笔待处理 · 来源：UseCert 索引器",
   "{#} mints · {#} redemptions · {#} awaiting · source: third-party index": "{0} 次铸造 · {1} 次赎回 · {2} 笔待处理 · 来源：第三方索引",
-  "{#} USDG refunded": "已退还 {0} USDG"
+  "{#} USDG refunded": "已退还 {0} USDG",
+  "{#} UseCert contracts: {#} exact source/bytecode match (creation and runtime), {#} runtime bytecode exact match with no creation match recorded (normal for a contract created by another contract). {#} external contracts (collateral, venue, price feeds) are shown too and marked as not UseCert code. Checked {#} min ago.": "{0} 个 UseCert 合约：{1} 个源码/字节码完全匹配（创建与运行时），{2} 个运行时字节码完全匹配但未记录创建匹配（由另一个合约创建的合约通常如此）。另有 {3} 个外部合约（抵押品、交易场所、价格数据源）一并列出，并标注为非 UseCert 代码。{4} 分钟前检查。",
+  "verified {#}-{#}-{#}": "验证于 {0}-{1}-{2}",
+  "Your collateral is escrowed and the hedge has been requested. Certificates are issued to your wallet as soon as the venue confirms the fill, at the price it filled at, usually within a minute. Nothing more is needed from you. If it is not settled within the {#}-hour window, the full escrow is refunded to your wallet: the keeper does it automatically, and anyone (including you) can do it from My receipts.": "你的抵押品已托管，对冲已请求。交易场所确认成交后，凭证会按实际成交价格发行到你的钱包，通常在一分钟内完成。你无需再做任何操作。如果在 {0} 小时窗口内未完成结算，全部托管资金会退还到你的钱包：执行程序会自动处理，任何人（包括你）也都可以在“我的回执”中操作。"
  }
 }
