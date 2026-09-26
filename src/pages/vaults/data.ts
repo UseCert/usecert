@@ -28,7 +28,8 @@ export interface VaultData {
   approach: [string, string];
   stats: [VaultStat, VaultStat];
   resultsCopy: string;
-  quote: { text: string; name: string; role: string; image: string };
+  /** Optional: the band is not rendered without one. Vaults added after the template carry none. */
+  quote?: { text: string; name: string; role: string; image: string };
   /* The `snapshot` field (a hardcoded price and circulating supply, rendered as a live
    * feed on the detail page) was removed: no number on a public page may come from here
    * rather than from a contract read. The dashboard reads those figures on chain. */
@@ -230,10 +231,74 @@ export const VAULTS: VaultData[] = [
     },
     roadmapCopy: UAAPL_LIVE ? undefined : "This vault deploys in phase C2.",
   },
+  // uSPY and uMSFT are deployed on mainnet (markets 26 and 14) and had no page: their slugs
+  // fell through to uTSLA. No testimonial on either - there is no holder to quote.
+  {
+    slug: "uspy",
+    name: "uSPY",
+    tagline: "The S&P 500, as a holdable certificate. Mint it, LP it, lend it, redeem it.",
+    intro:
+      "The uSPY vault holds a fully backed long on the S&P 500 perp on Robinhood Chain and mints certificates against it, one token's worth of exposure plus USDG margin behind every certificate in circulation.",
+    image: "/vault-uspx.jpg",
+    tags: "Index, Mint + Redeem",
+    category: "index",
+    status: "LIVE",
+    year: "2026",
+    problem: [
+      "The S&P 500 is the default long-term allocation in public markets, and on Robinhood Chain it trades only as a leveraged perp. Holding it means funding, margin and a liquidation price on what should be the simplest position in a portfolio.",
+      "Broad market beta is something you hold for years. On chain it was locked inside an instrument built to be traded by the hour.",
+    ],
+    approach: [
+      "The vault opens an equivalent long on the S&P 500 perp the moment you deposit. Delta target 1.0, enforced by a band check on each attested batch and rebalanced permissionlessly: rebalance() is callable by anyone.",
+      FUNDING_PARA,
+    ],
+    stats: [
+      {
+        value: 100,
+        suffix: "%",
+        decimals: 2,
+        caption: "Backing ratio target, enforced in the vault's solvency math at each attestation",
+      },
+      { value: 0, caption: REDEEM_CAPTION },
+    ],
+    resultsCopy: resultsCopy("uSPY"),
+  },
+  {
+    slug: "umsft",
+    name: "uMSFT",
+    tagline: "Microsoft, as a holdable certificate. Mint it, LP it, lend it, redeem it.",
+    intro:
+      "The uMSFT vault holds a fully backed long on the Microsoft equity perp on Robinhood Chain and mints certificates against it, one token's worth of exposure plus USDG margin behind every certificate in circulation.",
+    image: "/strategy-vault.jpg",
+    tags: "Single Stock, Mint + Redeem",
+    category: "stock",
+    status: "LIVE",
+    year: "2026",
+    problem: [
+      "Microsoft is one of the largest companies in the world, and on Robinhood Chain its exposure exists only as a leveraged perp. If you want MSFT today, you are running a position with funding and a liquidation price rather than holding the stock.",
+      "A perp cannot be held and forgotten, posted as collateral or put in a pool. The exposure was there; the asset was not.",
+    ],
+    approach: [
+      "The vault opens an equivalent long on the Microsoft equity perp the moment you deposit. Delta target 1.0, enforced by a band check on each attested batch and rebalanced permissionlessly: rebalance() is callable by anyone.",
+      FUNDING_PARA,
+    ],
+    stats: [
+      {
+        value: 100,
+        suffix: "%",
+        decimals: 2,
+        caption: "Backing ratio target, enforced in the vault's solvency math at each attestation",
+      },
+      { value: 0, caption: REDEEM_CAPTION },
+    ],
+    resultsCopy: resultsCopy("uMSFT"),
+  },
 ];
 
-export function getVault(slug: string | undefined): VaultData {
-  return VAULTS.find((v) => v.slug === slug) ?? VAULTS[0];
+/** undefined for an unknown slug: the route turns that into a 404. It used to fall back to
+ *  VAULTS[0], so /vaults/uspy - a live vault with no entry - rendered the uTSLA page. */
+export function getVault(slug: string | undefined): VaultData | undefined {
+  return VAULTS.find((v) => v.slug === slug);
 }
 
 export function nextVault(slug: string): VaultData {

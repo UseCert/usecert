@@ -7,13 +7,14 @@ import { getVault, nextVault } from "./vaults/data";
 /**
  * /vaults/:slug detail page: hero, intro + meta grid, problem, media block,
  * results, approach, holder words, next vault, CTA band. Driven entirely by
- * the per-vault data module (slugs: utsla, unvda, uqqq, uaapl). `uspx` was removed: the
- * venue has no SPX perpetual, so that vault cannot exist. uSPY, which tracks the same
- * index and IS deployed, has no marketing entry yet — see `vaults/data.ts`.
+ * the per-vault data module (slugs: utsla, unvda, uqqq, uaapl, uspy, umsft - the six deployed
+ * vaults). `uspx` was removed: the venue has no SPX perpetual. An unknown slug is a 404.
  */
 export default function VaultDetail() {
   const { slug } = useParams();
+  // The route's loader 404s an unknown slug before this renders; the guard keeps the type honest.
   const vault = getVault(slug);
+  if (!vault) return null;
   const next = nextVault(vault.slug);
 
   return (

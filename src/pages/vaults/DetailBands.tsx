@@ -64,7 +64,9 @@ export function Results({ vault }: { vault: VaultData }) {
 /** Section 7: "HOLDER WORDS." testimonial block (replaces "Client words."). */
 export function HolderWords({ vault }: { vault: VaultData }) {
   const R = useReveal();
-  const words = R(vault.quote.text);
+  const quote = vault.quote;
+  const words = R(quote?.text ?? "");
+  if (!quote) return null;
 
   return (
     <section className="grain bg-ink text-white">
@@ -102,7 +104,7 @@ export function HolderWords({ vault }: { vault: VaultData }) {
               ))}
               <footer className="mt-6 flex items-center gap-3">
                 <span className="h-[8px] w-[8px] bg-green-bright" aria-hidden />
-                <p className="font-mono text-[12px] uppercase tracking-[0.08em] text-white-60">{vault.quote.role}</p>
+                <p className="font-mono text-[12px] uppercase tracking-[0.08em] text-white-60">{quote.role}</p>
               </footer>
             </motion.blockquote>
 
@@ -119,8 +121,8 @@ export function HolderWords({ vault }: { vault: VaultData }) {
                 }}
               >
                 <img
-                  src={vault.quote.image}
-                  alt={vault.quote.name}
+                  src={quote.image}
+                  alt={quote.name}
                   className="aspect-[4/5] w-full max-w-[360px] object-cover"
                 />
               </motion.div>

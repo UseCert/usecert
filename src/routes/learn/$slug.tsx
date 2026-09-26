@@ -1,23 +1,27 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, notFound } from "@tanstack/react-router";
+import { getArticle } from "@/pages/learn/data";
 import Layout from "@/components/Layout";
 import Article from "@/pages/Article";
 
 export const Route = createFileRoute("/learn/$slug")({
-  head: () => ({
-    meta: [
-      { title: "Article - UseCert Research" },
-      {
-        name: "description",
-        content:
-          "A UseCert research article on synthetic equity certificates, perp funding and on-chain market design.",
-      },
-      { property: "og:title", content: "UseCert Research Article" },
-      {
-        property: "og:description",
-        content: "Long-form notes from the UseCert team on certificates and perp markets.",
-      },
-    ],
-  }),
+  loader: ({ params }) => {
+    if (!getArticle(params.slug)) throw notFound();
+  },
+  // Every article carried the same title and description; each now has its own.
+  head: ({ params }) => {
+    const a = getArticle(params.slug);
+    const title = a ? `${a.title} | UseCert Research` : "Article not found | UseCert";
+    const description = a?.subtitle ?? "This article does not exist.";
+    return {
+      meta: [
+        { title },
+        { name: "description", content: description },
+        { property: "og:title", content: a?.title ?? title },
+        { property: "og:description", content: description },
+        { property: "og:type", content: "article" },
+      ],
+    };
+  },
   component: () => (
     <Layout>
       <Article />

@@ -90,16 +90,23 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       {
         name: "description",
         content:
-          "UseCert issues perp-backed certificates that track equity exposure fully on chain: mint, hold, stake and redeem.",
+          "Perp-backed certificates for TSLA, NVDA, AAPL, MSFT, SPY and QQQ on Robinhood Chain: mint, hold and redeem, with solvency proven on chain.",
       },
       { name: "author", content: "UseCert" },
       { property: "og:title", content: "UseCert - On-Chain Equity Certificates" },
       {
         property: "og:description",
-        content: "Perp-backed certificates tracking equity exposure, fully on chain.",
+        content: "Perp-backed certificates for TSLA, NVDA, AAPL, MSFT, SPY and QQQ on Robinhood Chain. Mint, hold, redeem.",
       },
       { property: "og:type", content: "website" },
+      { property: "og:site_name", content: "UseCert" },
+      // The card type was summary_large_image with no image, so every shared link rendered
+      // without a picture. Absolute URL: crawlers do not resolve relative ones.
+      { property: "og:image", content: "https://use-cert.com/og-image.png" },
+      { property: "og:image:width", content: "1200" },
+      { property: "og:image:height", content: "630" },
       { name: "twitter:card", content: "summary_large_image" },
+      { name: "twitter:image", content: "https://use-cert.com/og-image.png" },
     ],
     links: [
       {
@@ -113,6 +120,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         href: "https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Inter:wght@400;500&display=swap",
       },
       { rel: "icon", href: "/logo.png", type: "image/png" },
+      { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
     ],
   }),
   shellComponent: RootShell,

@@ -15,7 +15,7 @@ export const Route = createFileRoute("/")({
       {
         property: "og:description",
         content:
-          "Mint, hold and redeem perp-backed certificates tracking TSLA, NVDA, SPX, QQQ and AAPL exposure on chain.",
+          "Mint, hold and redeem perp-backed certificates tracking TSLA, NVDA, AAPL, MSFT, SPY and QQQ on Robinhood Chain.",
       },
     ],
   }),
