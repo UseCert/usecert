@@ -679,12 +679,14 @@ export function useCertActions(id: ChainVaultId): CertActions {
       }
 
       const amountIn6 = toCollateral(amountInput);
-      if (routeMint(amountIn6, cap) === "instant") {
+      // A keeper-mode vault cannot hedge an instant mint (see VaultConfigView.keeperHedging):
+      // every size goes through the receipt, and the certificates arrive when the keeper settles.
+      if (!cfg?.keeperHedging && routeMint(amountIn6, cap) === "instant") {
         return { status: "instant", hash: await mintInstant(amountInput) };
       }
       return { status: "requested", hash: await requestMint(amountInput) };
     },
-    [cfg?.instantCap18, mintInstant, publicClient, refreshAttestationIfStale, requestMint],
+    [cfg?.instantCap18, cfg?.keeperHedging, mintInstant, publicClient, refreshAttestationIfStale, requestMint],
   );
 
   const redeemInstant = useCallback(
@@ -729,12 +731,14 @@ export function useCertActions(id: ChainVaultId): CertActions {
           "Cannot route this redemption: vault.cfg() has not loaded, so instantCap18 is unknown.",
         );
       }
-      if (routeRedeem(toCert(certInput), cap) === "instant") {
+      // Keeper mode posts nearly all of a mint's escrow to the venue, so the vault's own float
+      // cannot pay an instant exit; the queue closes the hedge on chain and pays by claim.
+      if (!cfg?.keeperHedging && routeRedeem(toCert(certInput), cap) === "instant") {
         return redeemInstant(certInput);
       }
       return { status: "queued", hash: await requestRedeem(certInput) };
     },
-    [cfg?.instantCap18, redeemInstant, requestRedeem],
+    [cfg?.instantCap18, cfg?.keeperHedging, redeemInstant, requestRedeem],
   );
 
   const redeemWithFallback = useCallback(
