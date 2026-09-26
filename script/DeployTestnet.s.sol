@@ -381,6 +381,26 @@ contract DeployTestnet is Script {
     ///      in exchange for nothing, since every value is immutable at the vault. The JSON is
     ///      documentation of these values; the compiler is the source of truth. Keep them in sync
     ///      by review.
+    /// @dev Safe mode: the multisig that is governance, or zero for an EOA governance key.
+    function _externalGovernance() internal view virtual returns (address) {
+        return address(0);
+    }
+
+    /// @dev Safe mode: the SolvencyRegistry the Safe created (its governance is the Safe).
+    function _externalRegistry() internal view virtual returns (address) {
+        revert("SAFE MODE: no external registry configured");
+    }
+
+    /// @dev Safe mode: asset i's CertOracle, created by the Safe.
+    function _externalOracle(uint256) internal view virtual returns (address) {
+        revert("SAFE MODE: no external oracle configured");
+    }
+
+    /// @dev False in Safe mode until the phase-4 Safe batch has executed on chain.
+    function _phase4Applied() internal view returns (bool) {
+        return _externalGovernance() == address(0);
+    }
+
     function _loadAssets() internal virtual {
         // uTSLA FIRST: market 16, for continuity with the existing suite (the whole test fixture
         // is built at TSLA's price and market index).
@@ -476,6 +496,14 @@ contract DeployTestnet is Script {
         govAddr = vm.addr(govPk);
         attesterAddr = vm.addr(attesterPk);
 
+        // SAFE MODE (ROADMAP 6.15). Governance is an existing multisig rather than an EOA key. It
+        // cannot sign here, so the two governance phases change shape: the msg.sender-bound
+        // contracts (registry, oracles) were already created BY THE SAFE through a delegatecall to
+        // Safe's CreateCall and are adopted - and fully verified - rather than deployed; and
+        // phase 4 is not broadcast at all, it is a Safe batch (script/SafeBatches.s.sol).
+        address safeGov = _externalGovernance();
+        if (safeGov != address(0)) govAddr = safeGov;
+
         // Three DISTINCT senders. Collapsing any two would silently defeat §4's separation: with
         // governance == deployer, "governance is a multisig" stops being true and the emergency
         // `setAbsoluteCap(vault, 0)` lever sits on the same key that ran the deployment.
@@ -533,9 +561,9 @@ contract DeployTestnet is Script {
         // rotation is unreachable forever, and the only remedy is a full redeployment. Same for a
         // CREATE2 factory. They stay written out inline, in this frame, on purpose — an internal
         // function would in fact keep the same frame, but writing them here removes the question.
-        vm.startBroadcast(govPk);
+        if (safeGov == address(0)) vm.startBroadcast(govPk);
 
-        registry = address(new SolvencyRegistry(attesterAddr));
+        registry = safeGov == address(0) ? address(new SolvencyRegistry(attesterAddr)) : _externalRegistry();
 
         uint256 n = assets.length;
         for (uint256 i = 0; i < n; ++i) {
@@ -552,21 +580,23 @@ contract DeployTestnet is Script {
         // The aggregators were deployed in phase 1; the oracles that read them are governance's.
         for (uint256 i = 0; i < n; ++i) {
             deployed[i].aggregator = _aggregatorOf(i);
-            deployed[i].oracle = address(
-                new CertOracle(
-                    _aggregatorOf(i),
-                    attesterAddr,
-                    assets[i].priceDecimals,
-                    _stalenessSeconds(),
-                    DEVIATION_BPS,
-                    BASIS_BAND_BPS,
-                    POKE_CONFIRMATION_SECONDS,
-                    _singleSource()
-                )
-            );
+            deployed[i].oracle = safeGov != address(0)
+                ? _externalOracle(i)
+                : address(
+                    new CertOracle(
+                        _aggregatorOf(i),
+                        attesterAddr,
+                        assets[i].priceDecimals,
+                        _stalenessSeconds(),
+                        DEVIATION_BPS,
+                        BASIS_BAND_BPS,
+                        POKE_CONFIRMATION_SECONDS,
+                        _singleSource()
+                    )
+                );
         }
 
-        vm.stopBroadcast();
+        if (safeGov == address(0)) vm.stopBroadcast();
 
         // ------------------------------------------------------------------- phase 3: deployer
         vm.startBroadcast(deployerPk);
@@ -574,9 +604,11 @@ contract DeployTestnet is Script {
         vm.stopBroadcast();
 
         // ----------------------------------------------------------------- phase 4: governance
-        vm.startBroadcast(govPk);
-        _phase4_governance();
-        vm.stopBroadcast();
+        if (safeGov == address(0)) {
+            vm.startBroadcast(govPk);
+            _phase4_governance();
+            vm.stopBroadcast();
+        }
 
         // ------------------------------------------------- phase 5: deployer / venue operator
         vm.startBroadcast(deployerPk);
@@ -903,7 +935,9 @@ contract DeployTestnet is Script {
         require(CertFactory(factory).registry() == registry, "S9: factory.registry wrong");
         require(CertFactory(factory).capacity() == capacity, "S9: factory.capacity wrong");
         require(CertFactory(factory).governance() == govAddr, "S9: factory.governance != GOV");
-        require(CertFactory(factory).vaultCount() == assets.length, "S9: factory.vaultCount != vaults deployed");
+        if (_phase4Applied()) {
+            require(CertFactory(factory).vaultCount() == assets.length, "S9: factory.vaultCount != vaults deployed");
+        }
 
         // ---- §1: the collateral decimals, immutably baked into every vault
         require(IERC20Metadata(collateral).decimals() == COLLATERAL_DECIMALS, "S9: collateral decimals != 6");
@@ -1021,8 +1055,10 @@ contract DeployTestnet is Script {
         //      The `!= 0` assertion comes FIRST deliberately: it is the failure that actually
         //      happens (governance forgot `setAbsoluteCap`), and "UNSET - cannot mint" tells the
         //      operator what to do, where the generic "wrong" would send them looking for a typo.
-        require(CapacityOracle(capacity).absoluteCap18(d.vault) != 0, "S9: absoluteCap18(vault) UNSET - cannot mint");
-        require(CapacityOracle(capacity).absoluteCap18(d.vault) == a.absoluteCap18, "S9: absoluteCap18(vault) wrong");
+        if (_phase4Applied()) {
+            require(CapacityOracle(capacity).absoluteCap18(d.vault) != 0, "S9: absoluteCap18(vault) UNSET - cannot mint");
+            require(CapacityOracle(capacity).absoluteCap18(d.vault) == a.absoluteCap18, "S9: absoluteCap18(vault) wrong");
+        }
     }
 
     // ------------------------------------------------------- accessors, for tests and Task 11
@@ -1070,8 +1106,10 @@ contract DeployTestnet is Script {
         require(v.governance() == CertFactory(factory).governance(), "S9: vault.governance != factory.governance");
 
         // ---- §9: registration, and exactly one slot
-        require(CertFactory(factory).isVault(d.vault), "S9: factory.isVault(vault) false");
-        require(CertFactory(factory).vaults(i) == d.vault, "S9: factory.vaults(i) != vault");
+        if (_phase4Applied()) {
+            require(CertFactory(factory).isVault(d.vault), "S9: factory.isVault(vault) false");
+            require(CertFactory(factory).vaults(i) == d.vault, "S9: factory.vaults(i) != vault");
+        }
         require(!CertFactory(factory).enabled(d.vault), "S9: vault enabled - L-1 says do not, it is cosmetic");
 
         // ---- §9: the certificate cross-check (`registerVault` enforced it; this is the read-back)
