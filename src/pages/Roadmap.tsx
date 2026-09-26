@@ -131,6 +131,11 @@ const SHIPPED: Milestone[] = [
     copy: "The contracts were audited by an outside reviewer. The reported Critical is fixed, as is a blocker that would have left one contract undeployable. The auditor's proof-of-concept exploits are kept in the repository as executable evidence rather than summarised: all eight were written to fail, and five now pass. Of the three that do not, two can no longer set their exploit up at all because the guard stops them first; the third asserts margin is recallable in one permissionless call, which an asynchronous venue cannot satisfy — the margin is recoverable, in two steps.",
     verify: "test/AuditPoC.t.sol and test/AttackSuite.t.sol are in the repository and runnable.",
   },
+  {
+    title: "The site reads its claims off the chain it is on",
+    copy: "Which network this is, whether the collateral is a test token, whether the perp venue is a simulator, whether a faucet exists \u2014 none of that is typed into the copy any more. It is read from the deployed address book, so the page cannot describe a deployment it is not talking to. On a network with no faucet the sentence about the faucet does not appear, because no contract is there to describe. There is no separate wording to remember to switch.",
+    verify: "Every address on /contracts comes from that same address book, and the disclosure above changes with it.",
+  },
 ];
 
 const BUILDING: Milestone[] = [
