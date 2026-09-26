@@ -1772,6 +1772,58 @@ are the deliberate AuditPoC ones.
 A test run rewrote `deployments/46630.json` again. It was restored from the pre-run backup, and
 the tree is clean.
 
+### 6.28 Closing the list: drift, cleanup, a third backup, a manifest, honest copy, evidence, and K2 — ✅ 2026-09-26
+
+* **Book-drift check (`8312d24`).** Health compares every address the France host runs on with
+  `deployments/4663.json` on GitHub.
+  - Its first fetch returned 404: `210dc33` had deleted the tracked mainnet book (see the 6.22
+    correction). It is restored in `d3e1880`.
+  - Falsified: one changed vault address is reported by name.
+* **The pre-deploy plan is history (`9d5d1c7`).** Its market indices predate 6.8, and the
+  generator now names the live book.
+* **Montréal retired from UseCert, with a third backup copy (`1fdae53`).**
+  - The testnet directories were archived first (512 MB, read back) and then removed.
+  - Found first: the nightly DB backup read a file from one of them. It now carries the newest
+    encrypted France archive offsite instead, to the Google Drive crypt: 26 files, France state
+    included.
+  - The live script also had a `yamale` backup the repo lacked; the repo now matches.
+* **Release manifest (`5bb09e4`).** Every deployed script, config and book, and every web
+  `src/` and `public/` file, is compared blob-for-blob with GitHub, hourly, at
+  `/data/manifest.json`.
+  - First run: 3 real differences, all fixed. An uncommitted nginx snippet, a front-end file
+    pushed but never deployed, and a stale generated route tree.
+  - Now 12 of 12 files and 230 of 230 site files match. Health alerts on any difference.
+* **Copy approved by the owner (front end `4bba890`).**
+  - Terms: redemption is always queued in keeper mode; no staking; single-venue and
+    single-attester dependence named.
+  - The vault funding paragraph no longer mentions a fee pass-through that isn't deployed.
+  - **Testimonials removed.** They were attributed to roles for vaults nobody held, and one
+    claimed a collateral listing that never happened. The home section is now "On-chain record":
+    all 12 real mainnet mints and redemptions, each linked to its transactions.
+* **Sourcify evidence (`15b9ad4`; front end `4527d3b`).**
+  - An hourly job checks every contract in the live book. The browser never calls Sourcify.
+  - Result: 27 of 27 UseCert contracts are runtime-exact, and 18 also match their creation
+    transaction. The other 9 were created by other contracts. External contracts are labelled.
+  - The external integration plan's allowlist named the retired stack. A typed list would have
+    shown green for contracts nobody uses.
+* **Per-receipt evidence timeline (front end `4527d3b`).** Request confirmed, then settlement,
+  refund or claim observed, each with block, log index, time and transaction. It states that
+  the off-chain hedge is not proven.
+* **K2, fee routing: code and tests only, on its own branch `backend/k2-fee-routing` (`39f2493`
+  to `81a5711`), not merged and not deployed.**
+  - CertVault counts fees and adds a permissionless, pull-only `sweepFees()` to a set-once
+    `feeSink`. The sweep only takes collateral beyond every obligation: owed claims, open mint
+    escrow, each certificate's retained float, seeded buffer capital and any declared deficit.
+  - `FeeVault` splits fees with an ownerless, fixed split.
+  - 27 new tests; the full suite passes 545, with only the 3 deliberate AuditPoC failures.
+    CertVault is 22,224 B against the 24,576 B limit.
+  - **Deploying K2 means a new stack 5** through the Safe, plus holder migration.
+  - **The owner decides the split.** The docs disagree: 80/10/5/5 buyback / stakers / treasury /
+    ops, or the Learn page's version.
+* **Monday-gap idea: principle agreed** (owner, 2026-09-26). A free weekly prediction
+  leaderboard with no deposit and no bet, rewarded from a marketing budget, once staking is
+  live. Not the deposit-and-forfeit-yield version, which is a binary option on equities.
+
 ---
 
 ## Keeping the public page in sync

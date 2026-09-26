@@ -913,6 +913,55 @@
      "21 tests, fuzz at 5,000 runs"
     ]
    ]
+  },
+  "6.28": {
+   "commits": [
+    "8312d24",
+    "d3e1880",
+    "9d5d1c7",
+    "1fdae53",
+    "5bb09e4",
+    "15b9ad4",
+    "4bba890",
+    "4527d3b",
+    "39f2493",
+    "b2a7e4c",
+    "1672d20"
+   ],
+   "shots": [
+    [
+     "r628-manifest",
+     "Release manifest: 12/12 files and 230/230 site files identical to GitHub"
+    ],
+    [
+     "r628-drift",
+     "The drift check's first run found the tracked book missing"
+    ],
+    [
+     "r628-backup",
+     "Third backup copy offsite, and the Montreal cleanup"
+    ],
+    [
+     "r628-record",
+     "The home page's new on-chain record"
+    ],
+    [
+     "r628-terms",
+     "Terms, in the approved wording"
+    ],
+    [
+     "r628-sourcify",
+     "Sourcify evidence on /contracts"
+    ],
+    [
+     "r628-sourcify-rows",
+     "Per-contract evidence, external contracts labelled"
+    ],
+    [
+     "r628-timeline",
+     "A receipt's on-chain evidence timeline"
+    ]
+   ]
   }
  }
 }
