@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""Record the dashboard's solvency point and the venue's funding rates, so there is a history to draw.
+
+    usecert-history          take one sample, rewrite /var/www/usecert-data/history.json
+
+Run every 5 minutes by usecert-history.timer on the France host. Served same-origin at
+https://use-cert.com/data/history.json.
+
+WHY THIS EXISTS. No view function on the UseCert contracts returns a time series, so the
+dashboard had one provable solvency point and no curve, and no funding history at all. The
+chain cannot give a series; something has to sample it. This is that something, and it records
+nothing the dashboard does not already show:
+
+  solvency, per vault, every 5 min - the SAME two numbers as the dashboard's "Solvency now":
+    backing    = vault.solvency().margin18 + .buffer18     (attested margin + ERC-20 held)
+    obligation = certificate supply x oracle.px()           (falls back to solvency().notional18
+                                                            when px() reverts, flagged per point)
+    Chain reads, recorded by this server. The recording is a trust point the reads are not: a
+    reader has this host's word that the values were read when it says. Each point is
+    re-checkable against the chain at its block only with an archive node.
+
+  funding, per vault market, the last 48 hours - the venue's own hourly history
+    (GET /api/v1/fundings). `rate` there is PERCENT PER HOUR and `value` is USD per unit of
+    base: TSLA 0.0004 x $371.9 / 100 = 0.00149, which is the value the venue returns.
+    `direction` names the side that PAYS (the venue's docs: positive rate, longs pay shorts).
+    Every UseCert vault is long, so the series is published SIGNED FROM THE VAULT'S SIDE:
+    negative = the vault pays, positive = the vault receives. Third-party data, labelled so.
+
+Fails soft per vault: a read that fails leaves a gap for that vault at that time rather than a
+guessed value, and one vault's failure does not drop the others.
+"""
+import json
+import os
+import time
+import urllib.request
+
+RPC = "https://rpc.mainnet.chain.robinhood.com"
+VENUE = "https://api.rh.lighter.xyz"
+BOOK = "/opt/usecert-history/4663.json"
+STATE = "/var/lib/usecert-history/samples.json"
+OUT = "/var/www/usecert-data/history.json"
+KEEP_SEC = 7 * 86400
+ONE18 = 10 ** 18
+
+
+# Selectors, fixed: this host has no foundry for this user, and a JSON-RPC eth_call needs none.
+#   cast sig "solvency()" / "totalSupply()" / "px()"
+SEL = {"solvency": "0x773c5049", "totalSupply": "0x18160ddd", "px": "0x922469eb"}
+
+
+def eth_call(to, fn):
+    """The raw return data, or None when the call reverts (px() past staleness is an answer)."""
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                       "params": [{"to": to, "data": SEL[fn]}, "latest"]}).encode()
+    for attempt in range(5):
+        try:
+            req = urllib.request.Request(RPC, body, {"Content-Type": "application/json", "User-Agent": "usecert-history/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                out = json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 502, 503, 504) or attempt == 4:
+                raise
+            time.sleep(3 * 2 ** attempt)
+            continue
+        if "error" in out:
+            return None
+        return out["result"]
+    return None
+
+
+def words(hexdata, n):
+    """The first n 32-byte words as ints; int256 fields are two's-complement decoded by the caller."""
+    h = hexdata[2:]
+    return [int(h[64 * i:64 * (i + 1)], 16) for i in range(n)]
+
+
+def signed(x):
+    return x - (1 << 256) if x >= 1 << 255 else x
+
+
+def venue(path):
+    req = urllib.request.Request(VENUE + path, headers={"User-Agent": "usecert-history/1.0"})
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or attempt == 3:
+                raise
+            time.sleep(3 * 2 ** attempt)
+
+
+def sample(v):
+    sol = eth_call(v["vault"], "solvency")
+    sup = eth_call(v["certificate"], "totalSupply")
+    if not sol or not sup or len(sol) < 2 + 64 * 4:
+        return None
+    _supply, notional18, margin18, buffer18 = words(sol, 4)
+    buffer18 = signed(buffer18)
+    supply18 = words(sup, 1)[0]
+    px = eth_call(v["certOracle"], "px")
+    px18 = words(px, 1)[0] if px and len(px) >= 66 else None
+    obligation18 = supply18 * px18 // ONE18 if px18 is not None else notional18
+    return {"backing": round((margin18 + buffer18) / ONE18, 6), "obligation": round(obligation18 / ONE18, 6),
+            "pxUnavailable": px18 is None}
+
+
+def funding(market):
+    now = int(time.time())
+    d = venue("/api/v1/fundings?market_id=%d&resolution=1h&start_timestamp=%d&end_timestamp=%d&count_back=48"
+              % (market, now - 49 * 3600, now))
+    rows = sorted(d.get("fundings", []), key=lambda f: f["timestamp"])[-48:]
+    return {"hours": [int(f["timestamp"]) for f in rows],
+            # signed from the long vault's side: the paying side is `direction`
+            "ratePctPerHour": [(-1 if f["direction"] == "long" else 1) * float(f["rate"]) for f in rows],
+            "usdPerUnit": [(-1 if f["direction"] == "long" else 1) * float(f["value"]) for f in rows]}
+
+
+def main():
+    book = json.load(open(BOOK))
+    now = int(time.time())
+    try:
+        st = json.load(open(STATE))
+    except (OSError, ValueError):
+        st = {"samples": []}
+    point = {"t": now, "vaults": {}}
+    for v in book["vaults"]:
+        try:
+            s = sample(v)
+        except Exception as e:                                   # noqa: BLE001 - a gap, never a guess
+            print("%s: sample failed: %s" % (v["symbol"], str(e)[:120]))
+            s = None
+        if s is not None:
+            point["vaults"][v["symbol"]] = s
+    st["samples"] = [p for p in st["samples"] if now - p["t"] <= KEEP_SEC] + [point]
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    json.dump(st, open(STATE + ".tmp", "w"))
+    os.replace(STATE + ".tmp", STATE)
+
+    fund = {}
+    prev = {}
+    try:
+        prev = json.load(open(OUT)).get("funding", {})
+    except (OSError, ValueError):
+        pass
+    for v in book["vaults"]:
+        try:
+            fund[v["symbol"]] = dict(market=v["marketIndex"], **funding(v["marketIndex"]))
+        except Exception as e:                                   # noqa: BLE001
+            print("%s: funding read failed: %s" % (v["symbol"], str(e)[:120]))
+            if v["symbol"] in prev:
+                fund[v["symbol"]] = dict(prev[v["symbol"]], stale=True)
+
+    series = {}
+    for v in book["vaults"]:
+        sym = v["symbol"]
+        pts = [(p["t"], p["vaults"][sym]) for p in st["samples"] if sym in p["vaults"]]
+        series[sym] = {"t": [t for t, _ in pts], "backing": [x["backing"] for _, x in pts],
+                       "obligation": [x["obligation"] for _, x in pts],
+                       "pxUnavailable": [1 if x["pxUnavailable"] else 0 for _, x in pts]}
+    out = {
+        "generatedAt": now,
+        "chainId": book["chainId"],
+        "intervalSec": 300,
+        "solvencySource": "vault.solvency() and oracle.px() chain reads, sampled every 5 min and recorded by the UseCert server; not a chain read by your browser",
+        "fundingSource": "Robinhood Chain Lighter /api/v1/fundings, hourly; rate in percent per hour, signed from the long vault's side (negative = the vault pays)",
+        "solvency": series,
+        "funding": fund,
+    }
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    json.dump(out, open(OUT + ".tmp", "w"), separators=(",", ":"))
+    os.replace(OUT + ".tmp", OUT)
+    print("sampled %d/%d vaults, funding %d/%d, %d samples kept"
+          % (len(point["vaults"]), len(book["vaults"]), len(fund), len(book["vaults"]), len(st["samples"])))
+
+
+if __name__ == "__main__":
+    main()

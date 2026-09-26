@@ -19,7 +19,10 @@ check() {  # name url -> "name|code|ms|up"
 ROWS=$( { check "use-cert.com"     "https://use-cert.com/"
           check "qwilon.com"       "https://qwilon.com/"
           check "orion-safe.com"   "https://orion-safe.com/"
-          check "supabase"         "https://use-cert.com/supabase/rest/v1/"
+          # Loopback, not https://use-cert.com/supabase/: that path was this host's nginx until
+          # use-cert.com moved to France on 2026-09-26, and has answered 404 (reported as down)
+          # since. The gateway listens on 127.0.0.1:8000 only; 401 without a key means it is up.
+          check "supabase"         "http://127.0.0.1:8000/rest/v1/"
           check "netdata"          "http://127.0.0.1:19999/api/v1/info"; } )
 
 # append to a rolling 7-day history for the uptime percentages
