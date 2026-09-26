@@ -103,8 +103,24 @@ export function attestationFor(
  * gas that went with it.
  */
 export function isRelayable(a: SignedAttestation, nowSec = Math.floor(Date.now() / 1000)): boolean {
-  return a.deadline - nowSec >= 10;
+  return a.deadline - nowSec >= RELAY_HEADROOM_SEC;
 }
+
+/**
+ * How much life a signature needs before it is worth relaying.
+ *
+ * It was 10 seconds, which is enough for ONE transaction and this path now sends up to two -
+ * `setMarkPriceSigned` and `attestSigned`, each waited on before the next - with the mint
+ * behind them. A bundle with twelve seconds left passes a ten-second test, funds the mark
+ * relay, and then expires under the registry relay: the user has paid for one transaction and
+ * gets a revert on the second, which is the worst of both outcomes.
+ *
+ * 25s is measured against the signer rather than guessed. It republishes on a 30-second cycle
+ * with 60 seconds of validity, so a bundle is at worst ~30s old when fetched and refusing
+ * below 25s costs one extra fetch of a bundle that is about to roll over anyway. The
+ * corrective re-audit asked for deadline headroom; this is the number.
+ */
+export const RELAY_HEADROOM_SEC = 25;
 
 /**
  * How stale the on-chain attestation may get before a mint needs to refresh it.

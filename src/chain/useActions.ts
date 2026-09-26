@@ -184,6 +184,43 @@ const REVERT_COPY: Record<string, { message: string; kind: RevertKind }> = {
       "The faucet is out of test collateral and needs topping up. This is a faucet problem, not a minting problem.",
     kind: "user",
   },
+  /* The relay races. All four mean the same thing to a user - somebody else's transaction
+   * landed first, or the signature aged out before this one was mined - and none of them
+   * mean anything is broken. `mint` handles these itself and does not surface them; they are
+   * here so that one reaching a user any other way still reads like what it is. "no-op"
+   * rather than "error" for the two stale cases, because the work was done, just not by
+   * this transaction. */
+  SolvencyRegistry_StaleBatch: {
+    message:
+      "Another transaction refreshed this vault's attestation first. Nothing was lost — the " +
+      "backing is fresh, which is what your mint needed.",
+    kind: "no-op",
+  },
+  SolvencyRegistry_ObservationWentBackwards: {
+    message:
+      "A newer attestation is already on chain, so this older one was refused. The backing " +
+      "is fresh.",
+    kind: "no-op",
+  },
+  CertOracle_StaleNonce: {
+    message:
+      "Another transaction set this mark price first. Nothing was lost — the oracle already " +
+      "has the value this one carried.",
+    kind: "no-op",
+  },
+  SolvencyRegistry_SignatureExpired: {
+    message:
+      "The attester's signature expired before this transaction was mined. A new one is " +
+      "published every 30 seconds — try again.",
+    kind: "retryable",
+  },
+  CertOracle_SignatureExpired: {
+    message:
+      "The attester's mark signature expired before this transaction was mined. A new one is " +
+      "published every 30 seconds — try again.",
+    kind: "retryable",
+  },
+
   CertOracle_StalePrice: {
     message: "The price feed is stale, so the oracle is refusing to answer.",
     kind: "user",
@@ -478,83 +515,145 @@ export function useCertActions(id: ChainVaultId): CertActions {
    * Called by `mint` rather than exposed as a button: refreshing is plumbing, not a user
    * intention, and the only reason anyone would click it is to make the next action work.
    */
-  const refreshAttestationIfStale = useCallback(async (): Promise<RelayHashes> => {
-    if (!publicClient) return NO_RELAY;
+  /**
+   * Make this vault's backing fresh enough to mint against, and say what happened.
+   *
+   * BOTH HALVES OF THE BUNDLE. The signer produces two signatures per vault from a single
+   * observation - `attestSig` for `SolvencyRegistry.attestSigned` and `markSig` for
+   * `CertOracle.setMarkPriceSigned` - and this relayed only the first until 2026-09-25. The
+   * registry relay reopens capacity; the oracle keeps the mark price it was last given, so
+   * the basis cross-check runs against a stale mark and `mintAllowed()` can close on a
+   * divergence that does not exist.
+   *
+   * WHY IT WATCHES RECEIPTS. `waitForTransactionReceipt` does not throw on a reverted
+   * transaction - it returns a receipt whose `status` is `"reverted"`. So a relay that lost a
+   * race used to be indistinguishable from one that worked, and the mint went out behind it
+   * and reverted too: the user paid for both. Every send here is judged on its receipt.
+   *
+   * WHY LOSING A RACE IS NOT AN ERROR. Two people minting off one bundle is the ordinary
+   * case. The second relay reverts `SolvencyRegistry_StaleBatch` or `CertOracle_StaleNonce`,
+   * which means the first one landed - exactly what this mint wanted. So a failed relay asks
+   * THE CHAIN whether it is fresh rather than parsing the revert: state is ground truth, the
+   * error name is a report about it, and a receipt does not carry the reason anyway.
+   *
+   * AT MOST TWO ATTEMPTS, EVER. A retry loop here is a loop of wallet prompts, and a bundle
+   * that cannot be relayed twice will not be relayed on the ninth try either.
+   */
+  const refreshAttestationIfStale = useCallback(async (): Promise<RefreshOutcome> => {
+    if (!publicClient) return { status: "unavailable", reason: "no-bundle" };
 
-    // Read the age first. Most mints need no relay at all - any other user's mint
-    // in the last four minutes already paid for this one's freshness - and a
-    // needless relay is a wallet prompt and a gas charge for nothing.
-    const age = (await publicClient.readContract({
-      address: SHARED.solvencyRegistry,
-      abi: SolvencyRegistryABI,
-      functionName: "ageSec",
-      args: [mirror.vault],
-    })) as bigint;
-    if (age < BigInt(REFRESH_AT_AGE_SEC)) return NO_RELAY;
+    const registryIsFresh = async (): Promise<boolean> => {
+      const age = (await publicClient.readContract({
+        address: SHARED.solvencyRegistry,
+        abi: SolvencyRegistryABI,
+        functionName: "ageSec",
+        args: [mirror.vault],
+      })) as bigint;
+      return age < BigInt(REFRESH_AT_AGE_SEC);
+    };
 
-    const batch = await fetchSignedAttestations();
-    const a = attestationFor(batch, mirror.vault);
-    // No signature available: say nothing here and let the mint revert with the
-    // contract's own `CertVault_AtCapacity`, which is the accurate reason. Inventing
-    // a different error would describe a cause we have not established.
-    if (!a || !isRelayable(a)) return NO_RELAY;
+    // Read the age first. Most mints need no relay at all - any other user's mint in the last
+    // four minutes already paid for this one's freshness - and a needless relay is a wallet
+    // prompt and a gas charge for nothing.
+    if (await registryIsFresh()) return { status: "not-needed" };
 
-    /* ----------------------------------------------------------- the mark half */
+    /**
+     * Send one transaction and report whether the CHAIN accepted it.
+     *
+     * A dismissed wallet prompt is rethrown rather than reported as a failure: it is the one
+     * outcome that must not be retried, because retrying it means prompting again.
+     */
+    const send = async (
+      request: Parameters<typeof mutateAsync>[0],
+    ): Promise<{ ok: boolean; hash: TxHash | null }> => {
+      let hash: TxHash;
+      try {
+        hash = await mutateAsync(request);
+      } catch (err) {
+        if (isRejection(err)) throw err;
+        // A failed gas estimate lands here, which is how a doomed relay usually presents:
+        // the wallet simulates, the call reverts, and nothing is ever submitted.
+        return { ok: false, hash: null };
+      }
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      return { ok: receipt.status === "success", hash };
+    };
 
-    // `setMarkPriceSigned` reverts `CertOracle_StaleNonce` on a nonce that is not ahead
-    // of the stored one, so a bundle this oracle has already been given is skipped rather
-    // than turned into a wallet prompt for a transaction that cannot succeed. Two users
-    // minting off one bundle is the ordinary case, not an edge case.
-    let mark: TxHash | null = null;
-    const markNonce = (await publicClient.readContract({
-      address: mirror.certOracle,
-      abi: CertOracleABI,
-      functionName: "markNonce",
-    })) as bigint;
+    /** One full attempt on a freshly fetched bundle. */
+    const attempt = async (): Promise<RefreshOutcome> => {
+      const batch = await fetchSignedAttestations();
+      const a = attestationFor(batch, mirror.vault);
+      if (!a) return { status: "unavailable", reason: "no-bundle" };
+      // Enough life for the mark relay, the registry relay AND the mint behind them.
+      if (!isRelayable(a)) return { status: "unavailable", reason: "expiring" };
 
-    if (BigInt(a.markNonce) > markNonce) {
-      mark = await mutateAsync({
-        chainId: CHAIN_ID,
-        // PINNED to the bundled mirror, exactly as the registry is below.
+      /* ------------------------------------------------------------- the mark half */
+
+      // Skipped when the oracle already holds this nonce or newer: `CertOracle_StaleNonce`
+      // would refuse it, and a wallet prompt for a transaction that cannot succeed is worse
+      // than no prompt at all.
+      let mark: TxHash | null = null;
+      const onChainNonce = (await publicClient.readContract({
         address: mirror.certOracle,
         abi: CertOracleABI,
-        functionName: "setMarkPriceSigned",
-        args: [BigInt(a.markPx18), BigInt(a.markNonce), BigInt(a.deadline), a.markSig],
+        functionName: "markNonce",
+      })) as bigint;
+
+      if (BigInt(a.markNonce) > onChainNonce) {
+        const sent = await send({
+          chainId: CHAIN_ID,
+          // PINNED to the bundled mirror, exactly as the registry is below.
+          address: mirror.certOracle,
+          abi: CertOracleABI,
+          functionName: "setMarkPriceSigned",
+          args: [BigInt(a.markPx18), BigInt(a.markNonce), BigInt(a.deadline), a.markSig],
+        });
+        // A lost mark race is not fatal on its own - the winner set the same price from the
+        // same attester - so the registry half still goes out. What must not happen is
+        // treating the revert as success and never checking.
+        mark = sent.hash;
+      }
+
+      /* --------------------------------------------------------- the registry half */
+
+      const sent = await send({
+        chainId: CHAIN_ID,
+        // PINNED, not taken from the payload. The signer tells us which registry it signed
+        // for, and attestationFor() refuses a payload that disagrees with the bundled
+        // address - but the transaction itself is addressed from the constant regardless.
+        // Whoever controls that endpoint should not be able to aim a user's signed
+        // transaction at a contract of their choosing.
+        address: SHARED.solvencyRegistry,
+        abi: SolvencyRegistryABI,
+        functionName: "attestSigned",
+        args: [
+          a.vault,
+          BigInt(a.batchId),
+          BigInt(a.notional18),
+          BigInt(a.margin18),
+          BigInt(a.openInterest18),
+          BigInt(a.observedAt),
+          BigInt(a.deadline),
+          a.attestSig,
+        ],
       });
-      // Confirm before the registry relay. Both must be on chain before the mint reads
-      // either, and a mint sent while these are pending reads the OLD state and reverts
-      // having charged for all three.
-      await publicClient.waitForTransactionReceipt({ hash: mark });
-    }
 
-    /* ------------------------------------------------------- the registry half */
+      if (sent.ok) return { status: "refreshed", hashes: { mark, attestation: sent.hash } };
 
-    const attestation = await mutateAsync({
-      chainId: CHAIN_ID,
-      // PINNED, not taken from the payload. The signer tells us which registry it
-      // signed for, and attestationFor() now refuses a payload that disagrees with
-      // the bundled address - but the transaction itself is addressed from the
-      // constant regardless. Whoever controls that endpoint should not be able to
-      // aim a user's signed transaction at a contract of their choosing, even
-      // though the calldata is fixed to a nonpayable attestSigned and no user holds
-      // an allowance to the registry.
-      address: SHARED.solvencyRegistry,
-      abi: SolvencyRegistryABI,
-      functionName: "attestSigned",
-      args: [
-        a.vault,
-        BigInt(a.batchId),
-        BigInt(a.notional18),
-        BigInt(a.margin18),
-        BigInt(a.openInterest18),
-        BigInt(a.observedAt),
-        BigInt(a.deadline),
-        a.attestSig,
-      ],
-    });
-    await publicClient.waitForTransactionReceipt({ hash: attestation });
+      // The relay did not land. Ask the chain, not the error: if someone else refreshed it
+      // while this was in flight, the mint can go ahead exactly as if we had won.
+      if (await registryIsFresh()) return { status: "already-fresh" };
+      return { status: "unavailable", reason: "race-lost" };
+    };
 
-    return { mark, attestation };
+    const first = await attempt();
+    if (first.status !== "unavailable" || first.reason === "no-bundle") return first;
+
+    // ONE retry, on a newly fetched bundle. `no-bundle` is excluded on purpose: the signer
+    // just said it has nothing for this vault, and asking the same question 200ms later is
+    // not a strategy.
+    if (await registryIsFresh()) return { status: "already-fresh" };
+    return attempt();
   }, [mutateAsync, mirror.vault, mirror.certOracle, publicClient]);
 
   const mint = useCallback(
@@ -569,7 +668,15 @@ export function useCertActions(id: ChainVaultId): CertActions {
       // Refresh BEFORE routing. Both relays are confirmed inside this call: sending the
       // mint while either is pending means the mint reads the old state and reverts
       // CertVault_AtCapacity, having charged the user for every transaction in the chain.
-      await refreshAttestationIfStale();
+      //
+      // And REFUSE TO SEND when the refresh could not be made to work. This used to proceed
+      // regardless, so a failed relay was followed by a mint that could only revert - the
+      // user paid twice to be told no. A mint that cannot succeed is not submitted, and the
+      // reason given is the one that actually applies.
+      const refresh = await refreshAttestationIfStale();
+      if (refresh.status === "unavailable") {
+        throw new Error(REFRESH_FAILURE_COPY[refresh.reason]);
+      }
 
       const amountIn6 = toCollateral(amountInput);
       if (routeMint(amountIn6, cap) === "instant") {
@@ -747,18 +854,58 @@ export function useCertActions(id: ChainVaultId): CertActions {
 }
 
 /**
- * What a refresh relayed.
+ * What happened when a mint tried to make this vault's backing fresh.
  *
- * A null half needed no transaction: the mark because this oracle already holds that
- * nonce or a newer one, the attestation because it was still inside its age budget.
- * Both halves come from ONE signed bundle, so they describe the same observation.
+ * `hashes` carries what was actually sent; a null half needed no transaction, the mark
+ * because the oracle already holds that nonce or newer, the attestation because it was
+ * still inside its age budget. Both halves come from ONE signed bundle.
+ *
+ * The distinction that matters is `already-fresh` versus `unavailable`. Losing a relay race
+ * is a SUCCESS: `SolvencyRegistry_StaleBatch` and `CertOracle_StaleNonce` mean somebody
+ * else's transaction landed first, which is the outcome this mint wanted. Treating that as
+ * an error would refuse a mint that is now perfectly able to proceed.
  */
+export type RefreshOutcome =
+  /** The attestation was still fresh. Nothing was sent. */
+  | { status: "not-needed" }
+  /** This mint relayed the bundle itself. */
+  | { status: "refreshed"; hashes: RelayHashes }
+  /** A relay failed, but the chain is fresh anyway - someone else won the race. Proceed. */
+  | { status: "already-fresh" }
+  /** No usable refresh. The mint MUST NOT be sent; it would revert at the user's expense. */
+  | { status: "unavailable"; reason: RefreshFailure };
+
+export type RefreshFailure =
+  /** The signer served nothing usable for this vault. */
+  | "no-bundle"
+  /** Every bundle offered was too close to its deadline to survive the relays. */
+  | "expiring"
+  /** Two attempts were relayed and both failed, and the chain is still stale. */
+  | "race-lost";
+
 export interface RelayHashes {
   mark: TxHash | null;
   attestation: TxHash | null;
 }
 
-const NO_RELAY: RelayHashes = { mark: null, attestation: null };
+/**
+ * What to tell someone whose mint could not be made ready.
+ *
+ * Each says what happened and what to do, because "the contract rejected this action
+ * (SolvencyRegistry_StaleBatch)" is accurate and useless - and worse, it reads like a fault
+ * when the usual cause is that the protocol is working and somebody else was first.
+ */
+const REFRESH_FAILURE_COPY: Record<RefreshFailure, string> = {
+  "no-bundle":
+    "The attester is not serving a signature for this vault right now, so there is nothing " +
+    "to refresh the attestation with. Nothing was submitted. Try again shortly.",
+  expiring:
+    "The attester's signature was too close to expiring to relay safely. Nothing was " +
+    "submitted. A new one is published every 30 seconds — try again.",
+  "race-lost":
+    "Another transaction refreshed this vault while yours was in flight, and the attestation " +
+    "is still not fresh enough to mint against. Nothing further was submitted. Try again.",
+};
 
 /* ───────────────────────────────────────────────────────────────────── faucet */
 
