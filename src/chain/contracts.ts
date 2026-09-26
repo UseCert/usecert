@@ -3,8 +3,8 @@
 //
 // UseCert - Robinhood Chain (chain 4663)
 // Deployment:   block 26058969
-// Address book: deployments/4663.json, sha256 dd4e2be6f90f (first 12)
-// Deployed at:  unrecorded (address book carries 'UNKNOWN - COMMIT env unset; record it by hand before publishing', which is not a commit hash)
+// Address book: deployments/4663.json, sha256 c8f724be6200 (first 12)
+// Deployed at:  91f7f2df0654
 // Generated at: commit unavailable (not a git checkout)
 //
 // Functions are filtered to the front-end surface. ALL errors and events are kept:
