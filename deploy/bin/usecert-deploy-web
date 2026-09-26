@@ -1,0 +1,196 @@
+#!/bin/bash
+# Build and deploy the front end, refusing to ship an artifact that cannot run.
+#
+# WHY THIS EXISTS. `bun run build` on its own produces a bundle Node cannot execute, and it
+# does so silently. The Lovable vite config carries `defaultPreset: "cloudflare-module"`; on a
+# bare host std-env detects no provider, nothing matches, and nitro emits a Cloudflare Worker
+# module. Node loads it, runs nothing, and EXITS ZERO. systemd reports the unit "activating"
+# forever, the app log is EMPTY, and the site returns 502 with no error anywhere saying why.
+#
+# That happened on 2026-09-25 during the deployment-derivation work: a build run without the
+# preset took use-cert.com down, and the only evidence of the cause was a comment inside the
+# systemd unit - the one file nobody opens when they are running a build.
+#
+# So the preset is set here, and then CHECKED, because setting it is not proof. `.output/
+# nitro.json` records the preset nitro actually used; if it does not say node-server, the old
+# build is left running and this exits non-zero. Every other step is likewise verified rather
+# than assumed, and a deploy that does not serve a page is rolled back.
+#
+# Usage:  sudo /opt/usecert/deploy/bin/usecert-deploy-web [--no-rollback]
+set -uo pipefail
+
+APP=/opt/usecert-web
+OUT="$APP/.output"
+PREV="$APP/.output.prev"
+SERVICE=usecert-web
+PROBE_URL=${PROBE_URL:-https://use-cert.com/}
+RUN_AS=usecert
+BUN=/home/$RUN_AS/.bun/bin/bun          # sudo makes $HOME root's, so this is explicit
+ROLLBACK=1
+[ "${1:-}" = "--no-rollback" ] && ROLLBACK=0
+
+step() { printf '\n== %s\n' "$1"; }
+ok()   { printf '   ok    %s\n' "$1"; }
+
+# Set once the build has overwritten .output, cleared once a new build is serving. While it is
+# set, .output on disk is NOT what the running process loaded.
+NEEDS_RESTORE=0
+
+# WHY die() PUTS THE OLD BUILD BACK. Refusing to restart is not the same as leaving the host in
+# a good state. A rejected build has already overwritten .output, so the running process is
+# serving from memory while the bytes on disk cannot boot - and the next restart, or the next
+# reboot, takes the site down with no deploy in sight to blame. Found by running the preset
+# guard deliberately: it correctly refused, and left a cloudflare-module build on disk.
+die() {
+  printf '   FAIL  %s\n' "$1"
+  if [ "$NEEDS_RESTORE" = "1" ] && [ -d "$PREV" ]; then
+    # Restoring an unrunnable backup is worse than leaving the bad build alone: it looks like a
+    # recovery and is not one. Check the backup before trusting it, and say so if it fails.
+    P=$(python3 -c "import json;print(json.load(open('$PREV/nitro.json'))['preset'])" 2>/dev/null || echo unreadable)
+    if [ "$P" != "node-server" ]; then
+      printf '   WARN  %s is itself not runnable (preset %s) - NOT restoring. The running\n' "$PREV" "$P"
+      printf '         process is still serving, but this host has no bootable build on disk.\n'
+      exit 1
+    fi
+    printf '   ...   putting the previous build back so disk matches what is running\n'
+    rm -rf "$OUT" && cp -a "$PREV" "$OUT" && chown -R "$RUN_AS:$RUN_AS" "$OUT" \
+      && printf '   ok    restored (preset %s)\n' \
+         "$(python3 -c "import json;print(json.load(open('$OUT/nitro.json'))['preset'])" 2>/dev/null || echo unreadable)" \
+      || printf '   FAIL  could not restore; %s still holds the last good build\n' "$PREV"
+    # Only when the unit was already restarted onto the bad build does it need restarting again.
+    if [ "${RESTART_AFTER_RESTORE:-0}" = "1" ]; then
+      systemctl restart "$SERVICE"; sleep 6
+      printf '   ...   %s now returns %s\n' "$PROBE_URL" \
+        "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$PROBE_URL")"
+    fi
+  fi
+  exit 1
+}
+
+[ -d "$APP" ] || die "$APP does not exist"
+[ "$(id -u)" = "0" ] || die "run this as root; it restarts a unit and writes to $APP"
+
+# ---------------------------------------------------------------------------- 1. what we have
+step "current deployment"
+CUR_PRESET=$(python3 -c "import json;print(json.load(open('$OUT/nitro.json'))['preset'])" 2>/dev/null || echo none)
+printf '   preset %s, service %s\n' "$CUR_PRESET" "$(systemctl is-active $SERVICE)"
+
+# The bundle is generated per chain, so say out loud which one is about to be built. A deploy
+# that quietly ships the wrong chain is the failure this whole derivation exists to prevent.
+CHAIN_ID=$(grep -oE '^\s+id: [0-9]+' "$APP/src/chain/contracts.ts" | head -1 | grep -oE '[0-9]+')
+CHAIN_NAME=$(grep -oE "^\s+name: '[^']*'" "$APP/src/chain/contracts.ts" | head -1 | cut -d"'" -f2)
+[ -n "$CHAIN_ID" ] || die "could not read the chain id out of src/chain/contracts.ts"
+printf '   building for chain %s (%s)\n' "$CHAIN_ID" "$CHAIN_NAME"
+
+# ---------------------------------------------------------------------------- 2. keep a way back
+#
+# ONLY A GOOD BUILD IS WORTH KEEPING. The first version of this copied .output to .output.prev
+# unconditionally, on the assumption that whatever is deployed must be fine. It is not: a
+# refused deploy leaves a bad .output behind, and the next run would then overwrite the last
+# GOOD backup with that bad build and later "roll back" onto it. Found by running the preset
+# guard twice - the second refusal restored a cloudflare-module build and reported success.
+#
+# So the current .output is checked with the same test applied to a new one, and the backup is
+# only refreshed when it passes. A known-good .output.prev is never traded for a broken one.
+step "keeping the running build"
+if [ -d "$OUT" ]; then
+  CUR_OK=0
+  [ "$CUR_PRESET" = "node-server" ] && [ -s "$OUT/server/index.mjs" ] && CUR_OK=1
+  if [ "$CUR_OK" = "1" ]; then
+    rm -rf "$PREV"
+    cp -a "$OUT" "$PREV" || die "could not copy $OUT aside; refusing to build over the only copy"
+    ok "previous build saved to $PREV"
+  elif [ -d "$PREV" ]; then
+    PREV_PRESET=$(python3 -c "import json;print(json.load(open('$PREV/nitro.json'))['preset'])" 2>/dev/null || echo unreadable)
+    ok "current .output is not runnable (preset $CUR_PRESET); keeping the older $PREV (preset $PREV_PRESET)"
+    [ "$PREV_PRESET" = "node-server" ] || printf '   WARN  there is no known-good build to fall back to\n'
+  else
+    printf '   WARN  current .output is not runnable (preset %s) and there is no backup\n' "$CUR_PRESET"
+  fi
+  NEEDS_RESTORE=1
+else
+  ok "no previous build to keep"
+fi
+
+# ---------------------------------------------------------------------------- 3. build
+step "building"
+sudo -u "$RUN_AS" env PATH="/home/$RUN_AS/.bun/bin:/usr/bin:/bin" \
+  NITRO_PRESET=node-server NODE_ENV=production \
+  bash -c "cd $APP && $BUN run build" >/tmp/usecert-build.log 2>&1 \
+  || { tail -25 /tmp/usecert-build.log; die "build failed (full log /tmp/usecert-build.log)"; }
+ok "build completed"
+
+# ---------------------------------------------------------------------------- 4. is it runnable
+step "checking the artifact before trusting it"
+PRESET=$(python3 -c "import json;print(json.load(open('$OUT/nitro.json'))['preset'])" 2>/dev/null || echo unreadable)
+[ "$PRESET" = "node-server" ] || die "nitro built the '$PRESET' preset, not node-server - Node cannot run this. Nothing restarted."
+ok "preset is node-server"
+
+[ -s "$OUT/server/index.mjs" ] || die "$OUT/server/index.mjs is missing or empty"
+ok "server entry present"
+
+# Every chunk the entry graph names must exist. A half-written .output resolves at request time,
+# not at start, so the unit comes up "active" and then 500s on the first render.
+MISSING=$(python3 - "$OUT/server" <<'PY'
+import os, re, sys
+root = sys.argv[1]
+missing = []
+for dirpath, _, files in os.walk(root):
+    for f in files:
+        if not f.endswith(".mjs"):
+            continue
+        p = os.path.join(dirpath, f)
+        try:
+            src = open(p, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
+        for ref in re.findall(r"""from\s*["'](\.[^"']+\.mjs)["']""", src):
+            target = os.path.normpath(os.path.join(dirpath, ref))
+            if not os.path.exists(target):
+                missing.append("%s -> %s" % (os.path.relpath(p, root), ref))
+print("\n".join(sorted(set(missing))[:10]))
+PY
+)
+[ -z "$MISSING" ] || { printf '%s\n' "$MISSING"; die "the build references chunks that are not on disk"; }
+ok "every referenced chunk is on disk"
+
+# ---------------------------------------------------------------------------- 5. restart
+step "restarting $SERVICE"
+systemctl restart "$SERVICE" || die "systemctl restart failed"
+
+HTTP=000
+for i in $(seq 1 20); do
+  HTTP=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$PROBE_URL")
+  [ "$HTTP" = "200" ] && break
+  sleep 3
+done
+
+if [ "$HTTP" != "200" ]; then
+  printf '   %s returned %s after 60s; service is %s\n' "$PROBE_URL" "$HTTP" "$(systemctl is-active $SERVICE)"
+  tail -20 /var/log/usecert/web.log 2>/dev/null | sed 's/^/     /'
+  # --no-rollback leaves the failed build in place for inspection.
+  [ "$ROLLBACK" = "1" ] || NEEDS_RESTORE=0
+  RESTART_AFTER_RESTORE=1
+  die "deploy did not serve a page"
+fi
+ok "$PROBE_URL returns 200"
+NEEDS_RESTORE=0          # from here on, the build on disk is the one that is serving
+
+# ---------------------------------------------------------------------------- 6. is it the build we meant
+step "confirming what is being served"
+BAD=0
+for path in / /contracts /roadmap /dashboard /learn; do
+  C=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${PROBE_URL%/}$path")
+  printf '   %-12s %s\n' "$path" "$C"
+  [ "$C" = "200" ] || BAD=1
+done
+[ "$BAD" = "0" ] || die "a route that should render did not"
+
+# The served page has to agree with the bundle that was built, or something else is answering.
+if [ "$CHAIN_ID" = "46630" ]; then
+  curl -fsS --max-time 10 "${PROBE_URL%/}/dashboard" | grep -q "Testnet 46630" \
+    && ok "the served dashboard names chain 46630" \
+    || die "built chain 46630 but the served dashboard does not say so"
+fi
+
+printf '\n   deployed: chain %s, preset node-server, all routes 200\n\n' "$CHAIN_ID"
