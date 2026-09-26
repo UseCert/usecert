@@ -43,7 +43,7 @@ API = os.environ.get("VENUE_API", "https://api.rh.lighter.xyz")
 CAST = os.environ.get("CAST", "/opt/keeper/bin/cast")
 UA = "usecert-signer/1.0"
 VALIDITY = 60          # SolvencyRegistry.SIGNATURE_VALIDITY
-CYCLE = 20             # served bundles keep >= ~35s of life; the site wants 25s of headroom
+CYCLE = 5              # + ~15-20 s of reads: every bundle served keeps >= ~35 s of its 60; the site wants 25
 PORT = 8787
 E18 = Decimal(10) ** 18
 
@@ -198,6 +198,16 @@ class Handler(BaseHTTPRequestHandler):
             "generatedAt": c["generatedAt"], "ageSec": age if c["generatedAt"] else None,
             "validitySec": VALIDITY, "stale": stale, "error": c["error"],
             "attestations": c["attestations"]}).encode())
+
+    def do_HEAD(self):
+        # Same status and headers as GET, no body - what monitors and the edge probe with.
+        c = cache
+        stale = c["generatedAt"] == 0 or int(time.time()) - c["generatedAt"] > VALIDITY
+        self.send_response(503 if stale else 200)
+        self.send_header("access-control-allow-origin", "*")
+        self.send_header("content-type", "application/json")
+        self.send_header("cache-control", "no-store")
+        self.end_headers()
 
     def log_message(self, *a):
         pass
