@@ -720,6 +720,199 @@
      "The open risks as the dashboard states them."
     ]
    ]
+  },
+  "6.18": {
+   "commits": [
+    "e04baec"
+   ],
+   "shots": [
+    [
+     "r618-health",
+     "Mainnet health on France: all clear live, and every injected fault reported"
+    ]
+   ]
+  },
+  "6.19": {
+   "commits": [
+    "b1312f1"
+   ],
+   "shots": [
+    [
+     "r619-refund-tests",
+     "The nine refund cases, against a stubbed chain and venue"
+    ]
+   ]
+  },
+  "6.20": {
+   "commits": [
+    "f0dd1a5",
+    "95c1ce6"
+   ],
+   "shots": [
+    [
+     "r620-zh-date",
+     "Chinese dates: 9月26日 (was 9月26,日)"
+    ],
+    [
+     "r620-zh-home",
+     "The home page in Chinese, no hydration error"
+    ]
+   ]
+  },
+  "6.21": {
+   "commits": [
+    "7bd8641"
+   ],
+   "shots": [
+    [
+     "r621-receipts-en",
+     "My receipts: each receipt with its state read from the contract"
+    ],
+    [
+     "r621-receipts-zh",
+     "The same panel in Chinese"
+    ],
+    [
+     "r621-activity",
+     "Two-step mints now joined to their settlements"
+    ]
+   ]
+  },
+  "6.22": {
+   "commits": [
+    "210dc33",
+    "b62f316",
+    "b681ea1",
+    "d3e1880"
+   ],
+   "shots": [
+    [
+     "r622-book",
+     "Repo book vs live book, and the commit guard"
+    ],
+    [
+     "r622-guard",
+     "CommitGuardTest, one sequential test"
+    ]
+   ]
+  },
+  "6.23": {
+   "commits": [
+    "a8d1395",
+    "a987964",
+    "8fc6498",
+    "843234d",
+    "62c4b35"
+   ],
+   "shots": [
+    [
+     "r623-solvency",
+     "Solvency history, recorded every 5 minutes"
+    ],
+    [
+     "r623-funding",
+     "Funding history: the venue's 48 hourly rates, from the long vault's side"
+    ],
+    [
+     "r623-vault",
+     "Per vault: backing vs obligation, and funding"
+    ],
+    [
+     "r623-learn",
+     "Learn copy corrected"
+    ],
+    [
+     "r623-ops",
+     "The ops fixes found in the logs, verified live"
+    ]
+   ]
+  },
+  "6.24": {
+   "commits": [
+    "2522862",
+    "54d09f5",
+    "f2198b6"
+   ],
+   "shots": [
+    [
+     "r624-rpc",
+     "Signer cadence and keeper 429s, before and after"
+    ],
+    [
+     "r624-attestation",
+     "Live: attester serving signatures, batch 1 s old"
+    ],
+    [
+     "r624-backup",
+     "The encrypted backup, restore-tested, and the key's restrictions"
+    ]
+   ]
+  },
+  "6.25": {
+   "commits": [
+    "9e8429e"
+   ],
+   "shots": [
+    [
+     "r625-uspy",
+     "The uSPY page"
+    ],
+    [
+     "r625-index",
+     "All six vaults on /vaults"
+    ],
+    [
+     "r625-share",
+     "The share card"
+    ],
+    [
+     "r625-titles",
+     "Titles, 404s and share metadata, verified live"
+    ],
+    [
+     "r625-404",
+     "An unknown vault is a 404"
+    ]
+   ]
+  },
+  "6.26": {
+   "commits": [
+    "bf23f37",
+    "6b67658"
+   ],
+   "shots": [
+    [
+     "r626-activity",
+     "Activity, read from the UseCert indexer"
+    ],
+    [
+     "r626-verify",
+     "First run vs the explorer: 24 of 24 identical"
+    ],
+    [
+     "r626-fallback",
+     "The fallback, tested by blocking the indexer"
+    ],
+    [
+     "r626-data",
+     "The served data"
+    ]
+   ]
+  },
+  "6.27": {
+   "commits": [
+    "edccc08"
+   ],
+   "shots": [
+    [
+     "r627-loss-order",
+     "The loss order, with the new insurance rung"
+    ],
+    [
+     "r627-tests",
+     "21 tests, fuzz at 5,000 runs"
+    ]
+   ]
   }
  }
 }

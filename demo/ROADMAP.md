@@ -1581,6 +1581,12 @@ covers unset, malformed and uppercase values, a real hash, and testnet unchanged
 **Still open.** The France deploy should commit the book it writes, so the tracked file cannot
 lag the host.
 
+**Correction, same day (`d3e1880`).** `210dc33` did not track stack 4: it *deleted* the tracked book.
+`deployments/.gitignore` ignores `*.json`, and a genuine book must be added with `git add -f`.
+The commit therefore recorded the move to `history/` and the deletion, and GitHub had no
+mainnet book at all. The book-drift check in 6.28 found it on its first run (its fetch returned
+404). The book is now force-added, byte-identical to the host's copy.
+
 ### 6.23 Solvency and funding history, and the ops fixes found in the logs — ✅ 2026-09-26 (`a8d1395`; front end `a987964`, `8fc6498`)
 
 **Charts.** Four dashboard panels said "needs an indexer." They now draw data.
