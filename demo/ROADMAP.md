@@ -1116,6 +1116,65 @@ Nobody touched the hedge by hand. Cost of the round trip: mint and redeem fees p
   vault's venue account (0.01 and 0.10 are below Lighter's minimum deposit); fix in 6.12.
 * *Gas.* Every send used an explicit limit; see 5.3's starvation guard.
 
+### 6.12 A recall that never asks the venue for more than it holds — ✅ 2026-09-26 (`0742246`, `059cc7d`)
+
+Fixes the second finding of 6.11 for **vaults deployed from now on**. The live uTSLA vault is not
+upgradeable and keeps the old behaviour.
+
+* **Contract.** `recallMarginUpTo(cap)` is the same permissionless recall with the request capped
+  at `cap`. The caller reads the account's real balance off the venue and passes it. Tested by
+  `test_recallMarginUpToNeverAsksForMoreThanTheCap`; removing the cap turns the test red.
+* **Keeper.** `auto_recall` calls it only when something owed exceeds what the vault holds. The first
+  version capped the request at the venue's whole available balance, and **that was wrong** (next
+  point). The cap is now `min(available, owed − held)`. Checked against a stubbed chain and venue:
+  owing 3.0 and holding 2.0 with 20.0 free at the venue now asks for 1.0; the old code asked for
+  20.0.
+* **Found while fixing it: `marginPendingRecall` drifts on the real venue.** OPEN, contract-level.
+  `_sweepPending` lowers the counter only for money that arrives through the venue's pending
+  balance. Lighter pays withdrawals **directly** to the vault's address, so the counter is never
+  lowered. Measured on the live vault after its redemption was paid in full: owed 0, venue holds
+  0.996, `marginPendingRecall` = **12.238750**.
+  * **Holders are not affected.** Their money is recalled through the `owed − held` term, which
+    reads the vault's real balance.
+  * **What it does affect:**
+    * Plain `recallMargin()` over-asks after the first payout, is refused, and fails open.
+    * The published counter overstates.
+    * Uncapped, it would have drained the other holders' free margin, which the keeper fix above
+      now prevents.
+  * **The proper fix** is a shadow of the vault's expected balance, updated at every transfer
+    site, so an unexplained arrival can be credited to the counter. It touches every
+    collateral-moving function of a non-upgradeable contract, so it is left for the audit
+    rather than rushed into this deploy.
+
+### 6.13 `retire()`: recover the protocol's capital from an empty vault — ✅ 2026-09-26 (`91f7f2d`)
+
+**Why it exists.** About 33 USDG sits in the earlier mainnet stacks and cannot come out. A vault
+releases collateral only by redeeming certificates, and those vaults have none. That rule (no
+owner can take collateral from under holders) is kept. `retire()` is the narrow exception, and it
+refuses unless **nobody** has anything in the vault:
+
+* no certificates exist;
+* no mint receipt is open (checked by a new `openMintReceipts` counter: +1 on request, −1 on settle
+  or refund);
+* nothing is owed on redemption receipts;
+* the hedge ledger is flat.
+
+After it runs, the vault never mints again, and governance can call `sweepRetired(venueAmount)`
+to take back the buffer and the venue balance.
+
+**The audit for it found a real gap.** No existing counter covered an unsettled mint escrow for its
+whole life. `pendingMintCerts` is released at `stageRefund` while the escrow is still owed until
+`refundMint`. So "the vault is empty" could not be established on chain until `openMintReceipts`
+was added.
+
+**Tests.** `CertVaultRetireTest` has 7 cases, 4 of them ways `retire()` could hurt someone.
+Mutation-tested: removing either the open-escrow check or the owed-redemption check turns its
+test red. The suite shows 496 passed; the 3 failures are the auditor's deliberate PoCs. CertVault
+is 20,596 B.
+
+**It cannot help the vaults already deployed**, because they predate it. **The ~33 USDG in the
+earlier stacks is lost.** Every vault from the next deploy onwards can be retired.
+
 
 ---
 
