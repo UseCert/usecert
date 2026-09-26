@@ -57,6 +57,11 @@ CHAINS = {
         "rpc": "https://rpc.mainnet.chain.robinhood.com",
         "explorer": "https://robinhoodchain.blockscout.com",
         "testnet": False,
+        # The canonical Multicall3, checked on 4663 on 2026-09-26: 3,808 B of code, and
+        # aggregate3 answers. Naming it lets wagmi batch the dashboard's reads - without it
+        # every read is its own request (221 in 30 s on /dashboard), which is what trips the
+        # RPC's rate limit and surfaces in the browser as CORS failures.
+        "multicall3": "0xcA11bde05977b3631167028862bE2a173976CA11",
     },
 }
 
@@ -281,7 +286,7 @@ export const CHAIN = {{
   nativeCurrency: {{ name: 'Ether', symbol: 'ETH', decimals: 18 }},
   rpcUrls: {{ default: {{ http: ['{rpc}'] }} }},
   blockExplorers: {{ default: {{ name: 'Blockscout', url: '{explorer}' }} }},
-  testnet: {is_testnet},
+{contracts}  testnet: {is_testnet},
 }} as const;
 
 /** Decimals differ per value class. Getting this wrong is the single largest hidden cost. */
@@ -319,6 +324,9 @@ def main():
             rpc=CHAINS[CHAIN]["rpc"],
             explorer=CHAINS[CHAIN]["explorer"],
             is_testnet="true" if CHAINS[CHAIN]["testnet"] else "false",
+            contracts=("  contracts: {{ multicall3: {{ address: '%s' }} }},\n" % CHAINS[CHAIN]["multicall3"])
+            .replace("{{", "{").replace("}}", "}")
+            if CHAINS[CHAIN].get("multicall3") else "",
             block=book.get("blockNumber"),
             bookfile=os.path.basename(BOOK_PATH),
             book=book_digest(BOOK_PATH),

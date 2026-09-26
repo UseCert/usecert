@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Send ONE transaction from the demo wallet (the mainnet deployer), for the recorded mint video.
+
+    usecert-demo-send TO CALLDATA      -> prints {"hash": "0x..."} or {"error": "..."}
+
+The video is a real mint through use-cert.com in a scripted browser. The browser never holds a
+key: its wallet hands each transaction here over SSH, and this signs and broadcasts it. So it is
+an allowlist and nothing else - one vault's user flow, refused otherwise before the key is read:
+
+  USDG / the uTSLA certificate   approve(the uTSLA vault, amount)
+  the uTSLA vault                requestMint, requestRedeem, claimRedeem
+  SolvencyRegistry               attestSigned, for the uTSLA vault only
+  the uTSLA CertOracle           setMarkPriceSigned
+
+Explicit gas: venue-touching calls starve inside try/catch at a wallet's estimate (ROADMAP 5.3).
+"""
+import json
+import re
+import subprocess
+import sys
+
+VAULT = "0x6b47000d6904215163bb6318b72f4268045256f0"
+CERT = "0xd45a902f74e7efc0f9e7b334839c409c2f8e0e76"
+ORACLE = "0x9730219f7c63d74fd834a020bcb512d8e22eb01b"
+REGISTRY = "0x22a4a08c7951a7f8c2ff218d7dc6abbe6195d7f4"
+USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+RPC = "https://rpc.mainnet.chain.robinhood.com"
+CAST = "/home/usecert/.foundry/bin/cast"
+
+APPROVE, REQ_MINT, REQ_REDEEM, CLAIM = "095ea7b3", "49733d04", "aa2f892d", "e46cf747"
+ATTEST, MARK = "ce563b91", "15529c80"
+
+
+def word(data, i):
+    return data[8 + 64 * i: 8 + 64 * (i + 1)]
+
+
+def allowed(to, data):
+    sel = data[:8]
+    if to in (USDG, CERT) and sel == APPROVE:
+        return word(data, 0)[-40:] == VAULT[2:]
+    if to == VAULT:
+        return sel in (REQ_MINT, REQ_REDEEM, CLAIM)
+    if to == REGISTRY and sel == ATTEST:
+        return word(data, 0)[-40:] == VAULT[2:]
+    if to == ORACLE:
+        return sel == MARK
+    return False
+
+
+def main():
+    if len(sys.argv) != 3:
+        sys.exit("usage: usecert-demo-send TO CALLDATA")
+    to, data = sys.argv[1].lower(), sys.argv[2].lower()
+    if not re.fullmatch(r"0x[0-9a-f]{40}", to) or not re.fullmatch(r"0x([0-9a-f]{2})+", data):
+        return print(json.dumps({"error": "malformed to/calldata"}))
+    data = data[2:]
+    if not allowed(to, data):
+        return print(json.dumps({"error": "refused: %s selector %s is not in the demo allowlist" % (to, data[:8])}))
+    env = {}
+    for line in open("/etc/usecert/mainnet-deployer.env"):
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.strip().split("=", 1)
+            env[k] = v
+    r = subprocess.run([CAST, "send", to, "0x" + data, "--gas-limit", "1500000", "--json",
+                        "--private-key", env["MAINNET_DEPLOYER_PK"], "--rpc-url", RPC],
+                       capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        return print(json.dumps({"error": (r.stderr or r.stdout).strip()[-300:]}))
+    rc = json.loads(r.stdout)
+    print(json.dumps({"hash": rc["transactionHash"], "status": rc.get("status")}))
+
+
+if __name__ == "__main__":
+    main()
