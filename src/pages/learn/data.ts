@@ -205,11 +205,11 @@ export const ARTICLES: Article[] = [
         ],
       },
       {
-        heading: "The 80/10/5/5 fee flow",
+        heading: "The 70/20/5/5 fee flow",
         paragraphs: [
           HAS_CERT_TOKEN
-            ? "The intended split is 80/10/5/5: 80% to stakers as underwriting compensation, 10% to top up the insurance buffer, 5% to keepers who run the peg infrastructure, and 5% to the treasury. None of the split is deployed. The CERT token exists on chain, but there is no staking contract and no fee split, so nothing routes a single unit of fee anywhere described here. Every flow is an on chain transfer you can audit, not an accounting line you have to trust."
-            : "The intended split is 80/10/5/5: 80% to stakers as underwriting compensation, 10% to top up the insurance buffer, 5% to keepers who run the peg infrastructure, and 5% to the treasury. None of it is deployed — there is no token, no staking contract and no fee split on chain, so nothing routes a single unit of fee anywhere described here. Every flow is an on chain transfer you can audit, not an accounting line you have to trust.",
+            ? "The intended split is 70/20/5/5: 70% to stakers in the insurance pool, as pay for taking the first loss; 20% to a buyback fund, held in USDG until there is a CERT market to buy on; 5% to a keeper and operations wallet, which pays the gas for settlements, refunds and recalls; and 5% to the treasury, the protocol's 2-of-3 Safe. None of it is deployed. The CERT token exists on chain, and the staking pool and the fee routing are written and tested, but neither is live, so nothing routes a single unit of fee anywhere described here yet. Every flow will be an on chain transfer you can audit, not an accounting line you have to trust."
+            : "The intended split is 70/20/5/5: 70% to stakers in the insurance pool, as pay for taking the first loss; 20% to a buyback fund, held in USDG until there is a CERT market to buy on; 5% to a keeper and operations wallet, which pays the gas for settlements, refunds and recalls; and 5% to the treasury, the protocol's 2-of-3 Safe. None of it is deployed: there is no token, no staking contract and no fee split on chain, so nothing routes a single unit of fee anywhere described here. Every flow will be an on chain transfer you can audit, not an accounting line you have to trust.",
         ],
       },
     ],

@@ -20,10 +20,12 @@ const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
  * because "of protocol fees go to buyback" and "is what we intend to do with protocol fees"
  * are different claims and only one of them is true today.
  */
+// The split the owner set on 2026-09-26 (70/20/5/5). It replaced three different versions this
+// site, the whitepaper and the Learn page had been publishing at once.
 const STATS = [
-  { end: 80, suffix: "%", caption: "Intended for open-market token buyback" },
-  { end: 10, suffix: "%", caption: "Intended for staker pay, for underwriting the buffer" },
-  { end: 5, suffix: "+5%", caption: "Intended split between the buffer and the treasury" },
+  { end: 70, suffix: "%", caption: "Intended for stakers in the insurance pool, as pay for taking the first loss" },
+  { end: 20, suffix: "%", caption: "Intended for a buyback fund, held in USDG until there is a CERT market to buy on" },
+  { end: 5, suffix: "+5%", caption: "Intended for the keepers' gas and operations, and for the treasury (the 2-of-3 Safe)" },
 ];
 
 /** §3 TOKEN FLOW (full-bleed section-deep): counters left, metallic statement right. */
