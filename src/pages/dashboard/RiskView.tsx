@@ -46,19 +46,35 @@ const DESIGN_LAWS: { n: string; title: string; body: string }[] = [
  * deployment and nothing on-chain publishes a stress result. Every row below names a
  * mechanism that exists on chain 46630 instead of quantifying an outcome that does not.
  */
-const SCENARIOS: { name: string; shock: string; behaviour: string; severity: "ok" | "warn" }[] = [
+/**
+ * `governedBy` names the on-chain value that decides each row, so the table can print a
+ * threshold a reader can go and check rather than one quoted from a document. `null` means
+ * the row is governed by a mechanism with no single published number - saying so beats
+ * inventing one to fill the column.
+ */
+type GovernedBy = "staleness" | "deviation" | "basis" | "attestationAge" | "bufferLedger" | "instantCap" | null;
+
+const SCENARIOS: {
+  name: string;
+  shock: string;
+  behaviour: string;
+  severity: "ok" | "warn";
+  governedBy: GovernedBy;
+}[] = [
   {
     name: "Sustained negative funding",
     shock: "Funding runs against the vault's long for an extended period",
     behaviour:
       "Draws down the buffer the vault holds. No fee passthrough and no insurance tranche is deployed to take over once it is exhausted.",
     severity: "warn",
+    governedBy: "bufferLedger",
   },
   {
     name: "Gap in the underlying",
     shock: "The underlying moves faster than a rebalance can follow",
     behaviour: "Delta drift widens against the attested perp position. Redemption is not gated on it.",
     severity: "ok",
+    governedBy: "basis",
   },
   {
     name: "Redemption run",
@@ -66,12 +82,14 @@ const SCENARIOS: { name: string; shock: string; behaviour: string; severity: "ok
     behaviour:
       "The instant path declines with CertVault_UseQueuedRedeem and redemptions route through the queue. forceExit is gated on nothing.",
     severity: "ok",
+    governedBy: "instantCap",
   },
   {
     name: "Oracle stale or deviant",
     shock: "px() reverts and mintAllowed() returns false",
     behaviour: "Minting is refused; redemption is unaffected. Both states are read live on this page.",
     severity: "warn",
+    governedBy: "staleness",
   },
   {
     name: "Attestation goes stale",
@@ -79,6 +97,7 @@ const SCENARIOS: { name: string; shock: string; behaviour: string; severity: "ok
     behaviour:
       "Capacity falls to zero and minting is off until a fresh attestation lands — the likeliest reason a healthy deployment refuses to mint.",
     severity: "warn",
+    governedBy: "attestationAge",
   },
   {
     name: "Accrual ledger goes non-positive",
@@ -86,6 +105,7 @@ const SCENARIOS: { name: string; shock: string; behaviour: string; severity: "ok
     behaviour:
       "BufferBook.capacity18 returns 0, which zeroes bufferCapacity18 and maxNotional18 with it, and EVERY mint is refused regardless of the collateral held — a vault sitting on $100,000 of tUSDG rejects a $100 mint. Redemption is untouched. This deployment publishes the ledger balance on the vault page so the halt is not silent.",
     severity: "warn",
+    governedBy: "bufferLedger",
   },
 ];
 
@@ -186,6 +206,64 @@ export default function RiskView() {
   } = useDashboard();
   // Flow history is a third-party HTTP index, not a contract read — see `useFlows`.
   const history = useFlows();
+
+  // The worst (lowest) accrual ledger across mirrors: at or below zero it zeroes the mint
+  // ceiling on its own, so the sign is the threshold and the balance is the distance to it.
+  const bufferLedgerWorst = (() => {
+    const vals = liveVaults
+      .map((v) => v.capacity.bufferLedger)
+      .filter((x): x is number => x !== null && x !== undefined);
+    return vals.length === 0 ? null : Math.min(...vals);
+  })();
+
+  // cfg().instantCap18 per vault. Identical across mirrors on this deployment, but checked.
+  const instantCapLabel = (() => {
+    const caps = liveVaults
+      .map((v) => vaultConfig(v.id))
+      .filter((c): c is NonNullable<typeof c> => !!c)
+      .map((c) => fromPrice18(c.instantCap18));
+    if (caps.length === 0) return EM_DASH;
+    const uniq = Array.from(new Set(caps));
+    return uniq.length === 1 ? fmtCompactUSD(uniq[0]) : "varies by mirror";
+  })();
+
+  /**
+   * The live threshold that decides a row, or a dash.
+   *
+   * Every mirror on this deployment is configured identically, so one number is honest
+   * here - but that is a FACT ABOUT THIS DEPLOYMENT, not a guarantee, so it is checked
+   * rather than assumed. If the mirrors ever disagree the cell says so instead of picking
+   * one and presenting it as the threshold.
+   */
+  const governingThreshold = (g: (typeof SCENARIOS)[number]["governedBy"]): string => {
+    if (g === null || liveVaults.length === 0) return EM_DASH;
+
+    const pick = (f: (v: (typeof liveVaults)[number]) => number | null): string => {
+      const vals = liveVaults.map(f).filter((x): x is number => x !== null);
+      if (vals.length === 0) return EM_DASH;
+      const uniq = Array.from(new Set(vals));
+      return uniq.length === 1 ? String(uniq[0]) : "varies by mirror";
+    };
+
+    switch (g) {
+      case "staleness":
+        return pick((v) => v.guards.stalenessSeconds) + "s";
+      case "deviation":
+        return pick((v) => v.guards.deviationBps) + " bps";
+      case "basis":
+        return pick((v) => v.guards.basisBandBps) + " bps";
+      case "attestationAge":
+        return maxAttestationAgeSec + "s";
+      case "bufferLedger":
+        // The threshold is a sign, not a magnitude: at or below zero the ledger zeroes the
+        // mint ceiling on its own. Showing the live worst balance is more use than "0".
+        return bufferLedgerWorst === null ? "<= 0" : "<= 0 (now " + fmtCompactUSD(bufferLedgerWorst) + ")";
+      case "instantCap":
+        return instantCapLabel;
+      default:
+        return EM_DASH;
+    }
+  };
 
   const bufferHeld = totals ? totals.buffer : null;
 
@@ -610,7 +688,7 @@ export default function RiskView() {
         <div className="flex items-center justify-between gap-3 border-b hairline-dark px-5 py-4">
           <MicroLabel>Failure Modes</MicroLabel>
           <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-white-60">
-            Designed behaviour · no magnitudes published
+            Designed behaviour · thresholds read from chain
           </span>
         </div>
         <table className="w-full min-w-[720px] font-mono text-[12px]">
@@ -619,6 +697,7 @@ export default function RiskView() {
               <th className="px-5 py-3 font-medium">Scenario</th>
               <th className="px-3 py-3 font-medium">Shock</th>
               <th className="px-3 py-3 font-medium">What the contracts do</th>
+              <th className="px-3 py-3 text-right font-medium">Threshold (live)</th>
             </tr>
           </thead>
           <tbody>
@@ -636,13 +715,19 @@ export default function RiskView() {
                     {s.behaviour}
                   </span>
                 </td>
+                <td className="whitespace-nowrap px-3 py-3.5 text-right text-white-60">
+                  {governingThreshold(s.governedBy)}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
         <p className="border-t hairline-dark px-5 py-3 font-mono text-[10px] uppercase leading-[1.7] tracking-[0.06em] text-white-60/70">
           No stress model has been run against this deployment, so no buffer-draw or loss figure is
-          published here. The rows describe mechanisms, not outcomes.
+          published here. The rows describe mechanisms, not outcomes. The thresholds are read from
+          the contracts that enforce them — the oracle for staleness, deviation and basis, the
+          registry for attestation age, the vault's cfg() for the instant cap — so a reader can
+          check each one against the chain rather than against this page.
         </p>
       </Panel>
 
