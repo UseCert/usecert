@@ -614,6 +614,13 @@ export interface VaultConfigView {
   instantCap18: bigint;
   settleBandBps: bigint;
   targetMarginBps: bigint;
+  /**
+   * `vault.keeperHedging()`. On Robinhood Chain Lighter an order sent through the L1 contract
+   * is reduce-only, so a keeper-mode vault cannot open its own hedge: every mint is
+   * `requestMint`, the keeper opens the hedge off chain and settles it, and `mintInstant`
+   * reverts. The router has to know which kind of vault it is talking to.
+   */
+  keeperHedging: boolean;
 }
 
 /* ─────────────────────────────────────────────── multicall plumbing (type-safe edges) */
@@ -1221,7 +1228,10 @@ export function useVaultConfigs(): {
   isError: boolean;
 } {
   const contracts = useMemo<ContractCall[]>(
-    () => MIRRORS.map((m) => call(m.vault, CertVaultABI, "cfg")),
+    () => MIRRORS.flatMap((m) => [
+      call(m.vault, CertVaultABI, "cfg"),
+      call(m.vault, CertVaultABI, "keeperHedging"),
+    ]),
     [],
   );
 
@@ -1235,7 +1245,8 @@ export function useVaultConfigs(): {
   const configs = useMemo<Partial<Record<ChainVaultId, VaultConfigView>>>(() => {
     const out: Partial<Record<ChainVaultId, VaultConfigView>> = {};
     MIRRORS.forEach((mirror, i) => {
-      const entry = results[i];
+      const entry = results[i * 2];
+      const keeper = results[i * 2 + 1];
       if (!entry || entry.status !== "success") return;
       const t = entry.result as readonly unknown[] | undefined;
       if (!Array.isArray(t) || t.length < 10) return;
@@ -1251,6 +1262,7 @@ export function useVaultConfigs(): {
         instantCap18: t[7] as bigint,
         settleBandBps: t[8] as bigint,
         targetMarginBps: t[9] as bigint,
+        keeperHedging: keeper?.status === "success" && keeper.result === true,
       };
     });
     return out;
