@@ -1356,9 +1356,24 @@ contract DeployTestnet is Script {
     ///      arbitrary commands during a run that handles three private keys. Not worth it for a
     ///      string. The deploy command in `docs/TESTNET-RUNBOOK.md` sets it:
     ///          COMMIT=$(git rev-parse HEAD) forge script ...
-    ///      Falls back to a loud marker rather than reverting the deployment.
+    ///      Falls back to a loud marker rather than reverting the deployment - EXCEPT on mainnet.
+    ///      Stack 4 on 4663 went out with COMMIT unset and its book said UNKNOWN until it was
+    ///      recorded by hand (ROADMAP 6.22). On 4663 an unset or malformed COMMIT now reverts.
+    ///      The book is written during forge's simulation pass, before anything is broadcast,
+    ///      so this refuses the whole run rather than stranding a deployed stack without a book.
     function _commit() internal view returns (string memory) {
-        return vm.envOr("COMMIT", string("UNKNOWN - COMMIT env unset; record it by hand before publishing"));
+        string memory c = vm.envOr("COMMIT", string(""));
+        if (block.chainid == 4663) {
+            bytes memory b = bytes(c);
+            bool ok = b.length == 40;
+            for (uint256 i = 0; ok && i < 40; i++) {
+                bytes1 x = b[i];
+                ok = (x >= "0" && x <= "9") || (x >= "a" && x <= "f");
+            }
+            require(ok, "COMMIT must be a 40-char lowercase hash on mainnet: COMMIT=$(git rev-parse HEAD)");
+            return c;
+        }
+        return bytes(c).length == 0 ? "UNKNOWN - COMMIT env unset; record it by hand before publishing" : c;
     }
 
     // --------------------------------------------------------------------------------- helpers

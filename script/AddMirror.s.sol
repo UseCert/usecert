@@ -1431,7 +1431,19 @@ contract AddMirror is Script {
     ///      arbitrary commands during a run that handles three private keys. Not worth it for a
     ///      string.
     function _commit() internal view returns (string memory) {
-        return vm.envOr("COMMIT", string("UNKNOWN - COMMIT env unset; record it by hand before publishing"));
+        // Mainnet refuses an unset or malformed COMMIT, as DeployTestnet._commit does (ROADMAP 6.22).
+        string memory c = vm.envOr("COMMIT", string(""));
+        if (block.chainid == 4663) {
+            bytes memory h = bytes(c);
+            bool ok = h.length == 40;
+            for (uint256 i = 0; ok && i < 40; i++) {
+                bytes1 x = h[i];
+                ok = (x >= "0" && x <= "9") || (x >= "a" && x <= "f");
+            }
+            require(ok, "COMMIT must be a 40-char lowercase hash on mainnet: COMMIT=$(git rev-parse HEAD)");
+            return c;
+        }
+        return bytes(c).length == 0 ? "UNKNOWN - COMMIT env unset; record it by hand before publishing" : c;
     }
 
     // --------------------------------------------------------------------------------- helpers
