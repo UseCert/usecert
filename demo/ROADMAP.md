@@ -924,7 +924,7 @@ Deploying answered the engineering questions. It answered none of the governance
 
 | | |
 |---|---|
-| 🔴 | **Governance and attester are single EOAs.** No multisig, no threshold custody, no rotation drill. Both audits call this a mainnet blocker and they are right. |
+| 🟡 | ~~Governance and attester are single EOAs.~~ **Governance closed 2026-09-26 (6.15):** every governance-bearing contract of stack 4 answers to a 2-of-3 Safe. **The attester is still a single hot key**, and no rotation drill has been run. |
 | ✅ | ~~No trade has been placed.~~ **Closed 2026-09-26 (6.11, 6.14):** seven full mint → hedge → redeem cycles on the live venue, one per vault. |
 | 🟡 | ~~No keepers are running on mainnet.~~ **Partly closed (6.14):** one hedge keeper per vault and the mainnet signer run in France. Alerting still does not exist. |
 | 🟡 | ~~The front end still points at testnet.~~ **Built and served for mainnet from France (6.14)**; live once use-cert.com's DNS points there. |
@@ -1251,11 +1251,207 @@ and the testnet stack.
 
 * The payout drift of 6.12.
 * Alerting.
-* Governance custody (6.6).
+* Governance custody (6.6). *Closed for governance by 6.15: a 2-of-3 Safe. The attester is still one key.*
 
 *Corrected:* an earlier version of this list said the site's activity feed was blocked by a bot
 challenge on the explorer's API. That was inferred from a curl, not measured in a browser. In a
 browser the feed loads and lists every mint, settle, redemption and claim of the cycles above.
+
+### 6.15 Governance moved to a 2-of-3 Safe, on a new stack 4 — ✅ 2026-09-26
+
+**Why a new stack.** The external "Final Mainnet Checkup — 26 September 2026" found that governance
+and the attester were single EOAs, and rated it critical. Governance is immutable in every UseCert
+contract: it is set in the constructor. The live stack could therefore never be handed to a
+multisig, and a new stack was required.
+
+**The Safe.** `0x848c91323f720DEf985adbCC85FA40E3405B70DF`, Safe 1.4.1 (SafeL2 `0x29fcB43b…C762`,
+proxy factory `0x4e1DCf7A…ec67`), threshold 2 of 3. Creation tx
+`0xddf4fe3a10b48f91e33db31aad0e6803ed808997880a348864d1c05b29d3e808`.
+
+| owner | note |
+|---|---|
+| `0x37A94ba80bCaBc9aa435068210360d9CD4Ad1ac4` | |
+| `0x0E670BbfFc7ead71e4eb05DFe77016729B6b7C0E` | signed batches 1 and 2 |
+| `0x5Ef5a5300803C2e0b45d504b6Bd68c7dce26b62b` | an EIP-7702 smart-account-delegated EOA; signed batches 1 and 2 |
+
+* The Safe web app and the Transaction Service support the chain (network `robinhood`).
+* The deployer `0x6381…8e92` is registered as a **proposer only**. It can queue a transaction,
+  not sign one.
+
+**Stack 3 retired first.** All six stack-3 vaults were empty. Each was retired with `retire()` and
+`sweepRetired`, the first real use of 6.13. **12.379248 USDG** came back in full to the old
+governance EOA. The stack-3 keepers were stopped. Minting on the site was paused from retirement
+until stack 4 went live.
+
+**Batch 1: the Safe creates the registry and the oracles.** No contract source changed.
+`SolvencyRegistry` and `CertOracle` set `governance = msg.sender`, and their constructor arity is
+frozen because the auditor's AttackSuite depends on it. So the Safe itself had to create them.
+
+* **Shape.** One Safe transaction: a delegatecall to MultiSend 1.4.1, whose 7 entries delegatecall
+  CreateCall 1.4.1. Each CREATE therefore runs in the Safe's context.
+* **Simulated first** on a mainnet fork (anvil, pinned pre-Cancun because Robinhood Chain is
+  Arbitrum Orbit): `ExecutionSuccess`, 10.8M gas, all 7 contracts at their predicted addresses,
+  each with `governance` equal to the Safe.
+* **The Safe web app could not display or sign it.** The transaction is 57 KB of nested
+  delegatecall, and the app answered "something went wrong". The owners signed the EIP-712 SafeTx
+  on a private signing page instead. The page's typed-data hash was checked independently against
+  the Safe's own `getTransactionHash` (`0x37feb7c9…`). They are equal.
+* **Signed and executed.** Owners `0x5Ef5…` and `0x0E67…` signed. The signatures were verified on
+  chain with `checkNSignatures`, and the deployer executed: tx
+  `0x720c49acdb18cca5e98f52e1cd41b7664f8d51f772d78e20ddd498c59154a4a2`, `ExecutionSuccess`.
+
+The registry is `0xAe6ae0939f2885fC0Ecf8b8af0082fa729a8bbB7`. The oracles are in the table below.
+
+**The deploy script gained a Safe mode.** New seams in DeployTestnet, off by default. Testnet
+deploys are unchanged, and the 41 deploy-script tests pass. In Safe mode:
+
+* governance is the Safe;
+* the Safe-created registry and oracles are adopted and verified, not deployed;
+* phase 4 is left for the Safe.
+
+One more check depends on phase 4, the mint gate's `maxNotional18`, and it had to be guarded too.
+The first broadcast attempt stopped in local simulation. Nothing was sent.
+
+**Stack 4.**
+
+| mirror | oracle (created by the Safe) | vault |
+|---|---|---|
+| uTSLA | `0xdb1eF0e62F0954E8dC5dd1Bcc8126FbD30978121` | `0x6330B3C6612DBbf5D81A6BafB6319F39D46Df4B0` |
+| uSPY | `0x94e58cBB9920dCBDF676132774fCd5248e455A85` | `0x4C1E083E1c0c726C6305ec684D9218dc83033dcd` |
+| uQQQ | `0x013Dd75efD3F5485f2939aD5b6a986Fa815fe541` | `0x09777bfEB5a37cD5F642861fb166e7a9D2A4e615` |
+| uNVDA | `0x9990de261434F2e7356b3C957f7ED4B9Fb86322F` | `0x2cA05803C37807bdB07075f6dA231C8B998e0bF3` |
+| uAAPL | `0x2172701e2fd9C4c15A3297091Bd04045B015f05f` | `0x1386cdA161593379B820542D347C75b43458f6ed` |
+| uMSFT | `0x325fc656A411EF1bc2f3621b2d045e2b42CC5450` | `0xD9ccc6edD94779dB28C8743088b70560B728489C` |
+
+* All 15 governance-bearing contracts report `governance` = the Safe, checked on chain.
+* Venue accounts: uTSLA 33556, uSPY 33557, uQQQ 33558, uNVDA 33559, uAAPL 33560, uMSFT 33561.
+* Cost: 0.00125 ETH of gas and 6 USDG of seed.
+
+**Batch 2: the Safe wires the vaults.** MultiSendCallOnly 1.4.1, 36 plain calls, six per vault:
+`registerVault`, `setAbsoluteCap`, `setBufferThresholds`, `setVenueApiKey`, `setVenueMinimums`,
+and `enableKeeperHedging` last.
+
+* **A fork could not validate it.** The venue's `changePubKey` runs Lighter's Stylus WASM, which
+  anvil cannot execute.
+* **Validated against the real chain instead,** with a state-override `eth_call` as the Safe: all
+  36 calls succeed. The negative control, the same calls from an address that is not the Safe,
+  reverts.
+* **Signed and executed.** The same two owners signed it on a second signing page. Tx
+  `0x41687077f4df59f69928160808980db7017ce2d3f2ee18ae0324a3dcfca4e8a1`, `ExecutionSuccess`,
+  1.86M gas.
+
+**Live.** Keepers `s4-<SYM>` were started in France, with API keys generated there. The venue
+accepted all six. The signer was switched to the stack-4 book.
+
+* **uTSLA smoke cycle on stack 4:** settled in 21 s, recall covered in 455 s, claim paid
+  12.441074 USDG.
+* The site was then switched to stack 4 (front end `f065770`), and **minting reopened**.
+* The other five ran afterwards, one after another, with nothing touched by hand. All six
+  passed:
+
+  | mirror | hedged and issued | collateral back | claim paid |
+  |---|---|---|---|
+  | uTSLA | 21 s | 455 s | 12.441074 USDG |
+  | uSPY | 42 s | 424 s | 12.422046 USDG |
+  | uQQQ | 31 s | 484 s | 12.435059 USDG |
+  | uNVDA | 21 s | 421 s | 12.466529 USDG |
+  | uAAPL | 31 s | 422 s | 12.450578 USDG |
+  | uMSFT | 31 s | 421 s | 12.442986 USDG |
+
+  Each was a 12.5 USDG mint followed by a full redemption.
+
+**Sourcify.** The verify tool verified the 20 contracts the script created. The 7 contracts the
+Safe created were submitted directly. All 7 are an exact runtime match. When checked, 4 were also
+an exact creation match and 3 were still processing. **27 of 27** are runtime-verified.
+
+**Still open: the attester is a single hot key.** It signs every few seconds, which a multisig
+cannot do. Separating the signer and settlement duties is a future contract change. **OPEN.**
+
+Commits: contracts `d5ee46c`, `aaffb74`, `3c6ebf9`; front end `f065770`.
+
+### 6.16 The site in Simplified Chinese — ✅ 2026-09-26
+
+**What a visitor sees.** A language dropdown (EN / 中文) in the site header and in the dashboard's
+top bar. The choice is stored per browser. A script in the head holds the first paint, so English
+does not flash before the Chinese appears. Switching back to English reloads the page.
+
+**How it works.** English stays the source. Chinese is a dictionary keyed by the exact English
+text, `src/i18n/zh-CN.json`. It is applied in two ways:
+
+* **Reveal components.** LetterReveal and eight page splitters cut sentences into word spans for
+  their animation. They now call `useT()` / `useReveal()`, translate the whole sentence first, and
+  reveal the Chinese character by character.
+* **A runtime pass.** A MutationObserver swaps exact English text nodes, and the `placeholder`,
+  `title`, `aria-label` and `alt` attributes. Numbers and addresses are lifted out as placeholders
+  first, so they are never translated.
+
+A string with no entry stays English rather than being guessed.
+
+**Where the strings came from.** Every page and dashboard state of the live site was crawled:
+1,145 text nodes, plus 14 splitter sentences taken from source. That gave 1,058 entries, 69,410
+characters. The result is 843 exact strings and 179 value templates. Every template was checked to
+use each value exactly once. Product, contract and brand names stay English.
+
+All of it was translated with one glossary:
+
+| English | 中文 |
+|---|---|
+| certificate | 凭证 |
+| vault | 金库 |
+| perp | 永续合约 |
+| hedge | 对冲 |
+| keeper | 执行程序 |
+| attestation | 证明 |
+| solvency | 偿付能力 |
+| buffer | 缓冲金 |
+| margin | 保证金 |
+| notional | 名义价值 |
+| oracle | 预言机 |
+| venue | 交易场所 |
+| funding | 资金费率 |
+| receipt | 回执 |
+
+**Legal pages.** Translated for reading. The binding text is the English one. A note saying so is
+pending, with legal copy the owner approves.
+
+**Found while collecting: English strings that are false on mainnet.** They are being fixed in the
+English source:
+
+* instant-route copy on keeper vaults;
+* the test-faucet panel;
+* "test collateral" and "ReplayAggregator" on `/contracts`;
+* the connect prompt, which says mainnet is not offered;
+* vault pages saying certificates arrive "in the same transaction";
+* uAAPL marked as roadmap.
+
+**Concern recorded.** Lighter's terms list China (CN) among the restricted jurisdictions. A Chinese
+UI can attract mainland users the venue does not allow. The eligibility wording should apply
+equally to the Chinese pages.
+
+Commits: front end `acf0373`, `5f6f97c`.
+
+### 6.17 Commit history replayed onto dated branches — ✅ 2026-09-26
+
+At the owner's request, both histories were replayed with current commit dates onto **new**
+branches:
+
+| original branch | replayed branch | commits |
+|---|---|---|
+| `backend/contracts-c1` | `backend/contracts-c1-2026-09-26` | 63 |
+| `frontend/testnet-wiring` | `frontend/mainnet-2026-09-26` | 41 |
+
+* **Same content.** The final trees are byte-identical to the originals. Only the dates differ.
+* **Nothing rewritten.** The original branches and hashes were not rewritten or force-pushed.
+  Every existing reference, including the external checkup's, still resolves.
+* **Hash map.** `deployments/history/commit-replay-2026-09-26.txt` maps every old hash to its
+  replayed copy, 104 commits.
+* **Update pages.** The unlisted update pages now link the replayed commits: 67 of 67 links are
+  new, and GitHub resolves them. Each commit's rendered image was regenerated from its new commit.
+
+**What the dates mean.** On the dated branches, a commit's date is the replay date, not the date
+the work was done. The originals keep the true dates.
+
+Commit: `c050b3a`.
 
 
 ---
