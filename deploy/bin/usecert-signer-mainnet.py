@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from eth_abi import encode
+from eth_abi import decode, encode
 from eth_account import Account
 from eth_utils import keccak
 
@@ -76,6 +76,34 @@ def call(to, sig, *args):
     return [l.split()[0] if l.split() else "" for l in r.stdout.strip().split("\n")]
 
 
+MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11"
+SEL_AGGREGATE3 = bytes.fromhex("82ad56cb")   # aggregate3((address,bool,bytes)[])
+SEL_LATEST = bytes.fromhex("4a4aac1a")       # SolvencyRegistry.latest(address)
+SEL_MARK_NONCE = bytes.fromhex("714e5939")   # CertOracle.markNonce()
+
+
+def rpc(method, params):
+    """JSON-RPC with backoff on 429 / 5xx. The six keepers share this IP and the RPC's limit."""
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+    delay = 1
+    for attempt in range(6):
+        try:
+            req = urllib.request.Request(RPC, body, {"Content-Type": "application/json", "User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                out = json.load(r)
+            if "error" in out:
+                raise RuntimeError("%s: %s" % (method, out["error"]))
+            return out["result"]
+        except urllib.error.HTTPError as e:
+            if (e.code != 429 and e.code < 500) or attempt == 5:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if attempt == 5:
+                raise
+        time.sleep(delay)
+        delay = min(delay * 2, 8)
+
+
 def b32(x):
     return bytes.fromhex(x[2:])
 
@@ -115,8 +143,33 @@ class Signer:
                               b32(call(o, "SET_MARK_TYPEHASH()(bytes32)")[0]))
         log("signer for %s: %d vaults, attester %s" % (self.registry, len(self.vaults), self.addr))
 
-    def gather(self, v, marks):
-        """Every read for one vault. Slow (venue API + chain), so it runs before the clock starts."""
+    def chain_reads(self):
+        """registry.latest(vault) and oracle.markNonce() for every vault, as ONE eth_call.
+
+        These were twelve `cast call`s a cycle - two per vault - from the same IP as six keepers,
+        and an empty result from a rate-limited one surfaced as 'list index out of range'. One
+        Multicall3 aggregate3 reads the same twelve values in a single request, all at one
+        block; allowFailure is false, so any failed read fails the whole cycle and the previous
+        bundle keeps being served, exactly as a failed cast call did."""
+        calls = []
+        for v in self.vaults:
+            calls.append((self.registry, False, SEL_LATEST + encode(["address"], [v["vault"]])))
+            calls.append((v["certOracle"], False, SEL_MARK_NONCE))
+        data = "0x" + (SEL_AGGREGATE3 + encode(["(address,bool,bytes)[]"], [calls])).hex()
+        raw = bytes.fromhex(rpc("eth_call", [{"to": MULTICALL3, "data": data}, "latest"])[2:])
+        results = decode(["(bool,bytes)[]"], raw)[0]
+        out = {}
+        for i, v in enumerate(self.vaults):
+            ok1, latest = results[2 * i]
+            ok2, nonce = results[2 * i + 1]
+            if not (ok1 and ok2):
+                raise RuntimeError("multicall read failed for %s" % v["symbol"])
+            parts = decode(["uint256", "uint256", "uint256", "uint64", "uint64"], latest)
+            out[v["vault"]] = (int(parts[2]), int(parts[3]) + 1, int(decode(["uint64"], nonce)[0]) + 1)
+        return out
+
+    def gather(self, v, marks, chain):
+        """Every venue read for one vault. Slow, so it runs before the clock starts."""
         vault, oracle, mkt = v["vault"], v["certOracle"], int(v["marketIndex"])
         acct = get("/api/v1/account?by=l1_address&value=" + vault)["accounts"][0]
         mark = Decimal(str(marks[mkt]))
@@ -129,13 +182,7 @@ class Signer:
         notional18 = int(pos * mark * E18)
         margin18 = min(to18(acct["collateral"]), to18(acct["total_asset_value"]))
         mark18 = int(mark * E18)
-        # cast prints a tuple on one line: (a, b, c, d, e) with optional [sci] annotations
-        raw = subprocess.run([CAST, "call", self.registry,
-                              "latest(address)((uint256,uint256,uint256,uint64,uint64))", vault,
-                              "--rpc-url", RPC], capture_output=True, text=True, timeout=60).stdout
-        parts = [x.strip().split()[0] for x in raw.strip().strip("()").split(",")]
-        oi18, batch = int(parts[2]), int(parts[3]) + 1
-        nonce = int(call(oracle, "markNonce()(uint64)")[0]) + 1
+        oi18, batch, nonce = chain[vault]
         return v, notional18, margin18, mark18, oi18, batch, nonce
 
     def one(self, g, observed_at, deadline):
@@ -160,11 +207,10 @@ class Signer:
         try:
             books = get("/api/v1/orderBookDetails")
             marks = {int(m["market_id"]): m["mark_price"] for m in books["order_book_details"]}
+            chain = self.chain_reads()
             with ThreadPoolExecutor(len(self.vaults)) as ex:
-                gathered = list(ex.map(lambda v: self.gather(v, marks), self.vaults))
-            ts = subprocess.run([CAST, "block", "latest", "-f", "timestamp", "--rpc-url", RPC],
-                                capture_output=True, text=True, timeout=60).stdout.strip()
-            observed_at = int(ts, 0)
+                gathered = list(ex.map(lambda v: self.gather(v, marks, chain), self.vaults))
+            observed_at = int(rpc("eth_getBlockByNumber", ["latest", False])["timestamp"], 16)
             deadline = observed_at + VALIDITY
             out = [self.one(g, observed_at, deadline) for g in gathered]
             cache = {"generatedAt": int(time.time()), "attestations": out, "error": None}

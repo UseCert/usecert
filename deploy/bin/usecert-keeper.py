@@ -106,6 +106,10 @@ class Keeper:
             raise RuntimeError("%s: %s" % (method, out["error"]))
         return out["result"]
 
+    def _view(self, selector):
+        """A no-argument uint256 view on the vault, as one eth_call with _http's backoff."""
+        return int(self._rpc("eth_call", [{"to": self.vault, "data": selector}, "latest"]), 16)
+
     def _get(self, path):
         return self._http(urllib.request.Request(self.api + path, headers={"User-Agent": UA}))
 
@@ -304,9 +308,14 @@ class Keeper:
         """
         if not self.auto_recall:
             return
-        def u(sig):
-            return int(self._cast("call", self.vault, sig, "--rpc-url", self.rpc).split()[0])
-        owed, have = u("totalOwedOutstanding()(uint256)"), u("hotBuffer()(uint256)")
+        # This runs on EVERY pass of all six keepers, and almost always finds nothing owed. It
+        # used to be two `cast call`s per pass; it is now one eth_call through _http's backoff,
+        # and the second read only happens when something is owed. Six keepers share one IP
+        # and the RPC answers 429 under load (ROADMAP 6.24).
+        owed = self._view("0xa2900772")                              # totalOwedOutstanding()
+        if owed == 0:
+            return
+        have = self._view("0xf2a2bf59")                              # hotBuffer()
         if owed <= have:
             return
         if time.time() - self.state.get("last_recall", 0) < 600:
