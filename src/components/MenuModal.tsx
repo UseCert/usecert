@@ -14,6 +14,7 @@ const MENU_ITEMS: Item[] = [
   { label: "Compare", hash: "#compare" },
   { label: "Roles", to: "/roles" },
   { label: "Learn", to: "/learn" },
+  { label: "Contracts", to: "/contracts" },
   { label: "Dashboard", to: "/dashboard" },
 ];
 

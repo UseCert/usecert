@@ -15,6 +15,7 @@ const NAV_LINKS = [
   { label: "Vaults", to: "/vaults" },
   { label: "Roles", to: "/roles" },
   { label: "Learn", to: "/learn" },
+  { label: "Contracts", to: "/contracts" },
   { label: "Dashboard", to: "/dashboard" },
 ];
 
