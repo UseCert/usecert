@@ -1450,6 +1450,26 @@ contract CertVault {
     ///      silently inside the rollup, this function is already fail-open, and _sweepPending
     ///      floors its counter application at min(swept, marginPendingRecall) — so a larger
     ///      arrival simply lands in the hot buffer, which is exactly where a gain belongs.
+    /// @notice recallMargin, but never asks the venue for more than `cap`.
+    /// @dev MAINNET, 2026-09-26. The vault sizes a recall from its own books - what it posted -
+    ///      and those books do not see trading P&L. After one round trip the venue account held
+    ///      12.234730 USDG against a booked 12.238750, and Lighter REFUSED the whole withdrawal
+    ///      (`21304 "not enough asset balance"`) rather than paying what was there; recallMargin()
+    ///      assumed the venue pays min(request, balance). A caller that can read the real balance
+    ///      off the venue - the keeper can - passes it here and the request fits. Permissionless,
+    ///      like recallMargin: it can only move the vault's own margin back into the vault, and
+    ///      an understated cap merely recalls less. The margin-excess leg is left to
+    ///      recallMargin() so its semantics are unchanged.
+    function recallMarginUpTo(uint256 cap) external {
+        _sweepPending();
+
+        uint256 have = hotBuffer();
+        uint256 need = totalOwedOutstanding > have ? totalOwedOutstanding - have : 0;
+        uint256 want = need > marginPendingRecall ? need : marginPendingRecall;
+        if (want > cap) want = cap;
+        if (want > 0) _requestWithdraw(want);
+    }
+
     function recallMargin() external {
         _sweepPending();
 

@@ -177,6 +177,37 @@ contract CertVaultKeeperHedgingTest is VaultFixture {
         assertEq(lighter.queuedOrderCount(), before, "refund sent a sell that can cut other holders' hedge");
     }
 
+    /// The venue refuses a withdrawal larger than the account's balance ENTIRELY, and the vault's
+    /// books do not see trading P&L, so its own sizing can over-ask. recallMarginUpTo lets a caller
+    /// who has read the real balance cap the request.
+    function test_recallMarginUpToNeverAsksForMoreThanTheCap() public {
+        _enable();
+        vm.prank(alice);
+        uint256 id = vault.requestMint(50_000e6);
+        vm.prank(attester);
+        vault.settleMint(id, PX);
+        uint256 certs = cert.balanceOf(alice);
+        vm.prank(alice);
+        vault.requestRedeem(certs);
+        // The fixture seeds a 100k buffer, which would pay this redemption outright. Empty it so
+        // the payout genuinely has to come back from the venue.
+        _drainHotBuffer();
+        assertGt(vault.totalOwedOutstanding(), vault.hotBuffer(), "setup: nothing to recall");
+
+        uint256 cap = 1_000e6;
+        bytes32 recallTopic = keccak256("MarginRecallRequested(uint256)");
+        vm.recordLogs();
+        vault.recallMarginUpTo(cap);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool seen;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter != address(vault) || logs[i].topics[0] != recallTopic) continue;
+            seen = true;
+            assertEq(abi.decode(logs[i].data, (uint256)), cap, "recall asked for more than the cap");
+        }
+        assertTrue(seen, "no recall requested at all");
+    }
+
     // ------------------------------------------------------------------------------ the key
 
     function test_setVenueApiKeyIsGovernanceOnlyAndLandsOnTheVaultsOwnAccount() public {
