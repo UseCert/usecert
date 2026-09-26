@@ -925,9 +925,9 @@ Deploying answered the engineering questions. It answered none of the governance
 | | |
 |---|---|
 | 🔴 | **Governance and attester are single EOAs.** No multisig, no threshold custody, no rotation drill. Both audits call this a mainnet blocker and they are right. |
-| 🔴 | **No trade has been placed.** Bootstrap is a registering deposit, not a fill. Nothing has opened, closed, or been liquidated at the real venue. |
-| 🔴 | **No keepers are running on mainnet.** No attester cadence, no batch monitoring, no alerting. |
-| 🔴 | **The front end still points at testnet.** No mainnet bundle has been generated or deployed. |
+| ✅ | ~~No trade has been placed.~~ **Closed 2026-09-26 (6.11, 6.14):** seven full mint → hedge → redeem cycles on the live venue, one per vault. |
+| 🟡 | ~~No keepers are running on mainnet.~~ **Partly closed (6.14):** one hedge keeper per vault and the mainnet signer run in France. Alerting still does not exist. |
+| 🟡 | ~~The front end still points at testnet.~~ **Built and served for mainnet from France (6.14)**; live once use-cert.com's DNS points there. |
 | 🔴 | **USDG is unqualified as collateral** (P2-6) and the C1 attestation trust model is unchanged (P2-5). |
 | 🔴 | **No independent review of the deployed system** (P2-8), no release provenance (3.4 / P3-1), no CI (4.5). |
 
@@ -1174,6 +1174,86 @@ is 20,596 B.
 
 **It cannot help the vaults already deployed**, because they predate it. **The ~33 USDG in the
 earlier stacks is lost.** Every vault from the next deploy onwards can be retired.
+
+### 6.14 All six vaults on the final code, keepers and site moved to France — ✅ 2026-09-26
+
+**What was deployed.** One fresh stack of six keeper-mode vaults, with `recallMarginUpTo` and
+`retire()`. It was built from the exact committed tree, which was compared byte for byte on the
+build host. The old uTSLA vault predates both and stays as it is.
+
+| mirror | vault | venue account | cycle |
+|---|---|---|---|
+| uTSLA | `0x6b47000D6904215163bB6318B72F4268045256f0` | 33398 | settled 21s, claimed |
+| uSPY | `0x006Daf8AF20954a9912e647618e389a3B3F52b3B` | 33399 | settled 31s, claimed |
+| uQQQ | `0xd6D198864C2F55822a935813A103C8B2282DdE52` | 33400 | settled 21s, claimed |
+| uNVDA | `0x7a858eb23dF5299aa8e3E4857E4F1D335BE9Ec9B` | 33401 | settled 21s, claimed |
+| uAAPL | `0x2CD8E6fB3a487ACC7610451232609F0154Fd96B9` | 33403 | settled 21s, claimed |
+| uMSFT | `0xa6f8c0166BbC56730C84d03EF1aFdEba95B5F4b7` | 33404 | settled, claimed |
+
+* **Cost and verification.** 0.0013 ETH of gas and 1 USDG of seed per vault. The source is
+  verified on Sourcify, **27 of 27** contracts, with an exact runtime match.
+* **Run automatically, end to end.** Each cycle was 12.5 USDG. The keeper opened the hedge in
+  France and settled it. The vault closed its own hedge on chain. The keeper then recalled the
+  shortfall on its own (6.12) and the user claimed. Each round trip cost about 0.03–0.08 USDG.
+  Nothing was touched by hand.
+* **Per vault in France.** Each vault has its own keeper instance (`usecert-keeper@<symbol>`),
+  its own API key generated on that host, and its own state. They share nothing but the attester
+  key.
+
+**Found on the way, and fixed:**
+
+* **Recall cap.** The keeper's recall cap was the venue's whole free margin. With the payout drift
+  (6.12), the first small redemption would have withdrawn the free margin behind every other
+  holder's hedge. It is now capped at the shortfall.
+* **Rate limit.** One RPC 429 (six keepers share one IP) while waiting for a fill would have
+  left a placed hedge unsettled, needing a human. The keeper now:
+  * retries 429s and 5xx responses;
+  * never reads "unfilled" into a failed read;
+  * resumes settling a fill it has already journaled.
+* **Signer.** The testnet signer reads a simulator's view functions, and the real venue has none.
+  `usecert-signer-mainnet.py` reads the venue's API, reads every domain and typehash from the
+  contracts, and signs after its reads, so a bundle leaves with 59 of its 60 seconds. All 12
+  signatures were checked against the live contracts by `eth_call`.
+* **Explorer and site.** `explorer.chain.robinhood.com` does not answer, so the site now links to
+  `robinhoodchain.blockscout.com`. The site's CSP named testnet hosts. The front end did not know
+  uAAPL, uMSFT or keeper mode. A keeper vault refuses `mintInstant`, so every mint and redemption
+  is now routed through the receipt.
+* **Shipping to the build host.** Git recorded every deploy tool as non-executable, and an
+  archive from Windows converts every file to CRLF. Both stopped a deploy at preflight before
+  anything was sent.
+
+* **6.5, a second time.** The deploy script still wrote the real venue under `lighterSim` and
+  the faucet as the zero address. The first mainnet build of the site therefore listed a
+  "LighterSim (venue)" and a TestFaucet row, and said the venue was simulated. 6.5 had fixed the
+  stack-1 book by hand, and that fix never reached the writer. It does now:
+  * the venue key comes from `_venueBookKey()`, which is `lighter` on mainnet;
+  * zero-address rows are omitted;
+  * the generator refuses a mainnet book that says `lighterSim`, and treats the zero address as
+    "not deployed".
+
+  The 41 deploy-script tests pass. The stack-3 book was corrected, and its raw copy kept.
+* **Copy that still said testnet.** Hard-coded testnet copy survived into the mainnet build:
+  "on testnet the perp venue is simulated", "Deployed on Robinhood Chain testnet (chain 46630)",
+  "no real-world value", "Reading chain 46630", `tUSDG`, and a market-index note quoting another
+  exchange's ids. All of it now derives from the deployment, and the rest names USDG. Checked on
+  the live site, not by grep: `/`, `/dashboard`, `/contracts`, `/roadmap`, `/vaults`, `/roles`,
+  `/learn`, `/about` and both legal pages contain none of `46630`, `tUSDG`, `testnet`, `faucet`,
+  `simulat*` or "no real-world value".
+
+**The move to France.** The mainnet site, the signer, the nginx policy and the TLS certificate
+run on the France host. `use-cert.com` and `www` point there, on A and AAAA. Resolvers still
+holding the old records reach Montréal, which now forwards to France over verified TLS. So every
+visitor gets the mainnet site, whichever address they resolve. The old site file is kept at
+`/root/use-cert.com.site.before-france`. Montréal keeps the other projects, the shared Supabase
+and the testnet stack.
+
+**Still open:**
+
+* The payout drift of 6.12.
+* Alerting.
+* Governance custody (6.6).
+* The site's activity feed. It reads Blockscout's API, which sits behind a bot challenge on
+  mainnet.
 
 
 ---
