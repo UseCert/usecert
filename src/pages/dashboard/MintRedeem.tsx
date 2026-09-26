@@ -41,6 +41,7 @@ import {
   toCollateral,
 } from "@/chain/units";
 import { cn } from "@/lib/utils";
+import { CHAIN_ID } from "@/chain/deployment";
 
 type Tab = "mint" | "redeem";
 type Busy = "approve" | "submit" | "queue" | "force" | "claim" | "recall" | "faucet" | null;
@@ -300,7 +301,7 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
         setNotice({
           tone: "ok",
           title: successTitle,
-          body: `Submitted as ${truncHash(hash)} on chain 46630. ${explorerTxUrl(hash)}`,
+          body: `Submitted as ${truncHash(hash)} on chain ${CHAIN_ID}. ${explorerTxUrl(hash)}`,
         });
         after();
       } catch (err) {
@@ -543,7 +544,7 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
         <div className="mt-6 border border-warn/40 bg-[#12120d] px-4 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="font-mono text-[11px] uppercase tracking-[0.06em] text-warn">
-              Your wallet is on another network. This app only talks to chain 46630.
+              Your wallet is on another network. This app only talks to chain {CHAIN_ID}.
             </p>
             <button
               type="button"

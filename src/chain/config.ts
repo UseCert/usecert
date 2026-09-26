@@ -87,7 +87,7 @@ function buildConnectors() {
             showQrModal: true,
             metadata: {
               name: "UseCert",
-              description: "Perp-backed certificates on Robinhood Chain testnet",
+              description: `Perp-backed certificates on ${CHAIN.name}`,
               url: "https://use-cert.com",
               icons: ["https://use-cert.com/logo192.png"],
             },

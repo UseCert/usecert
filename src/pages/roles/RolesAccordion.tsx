@@ -19,7 +19,7 @@ const ROWS: RoleRow[] = [
     title: "Holder",
     meta: "The missing primitive",
     body: [
-      "Mint certificates and hold them. That is the whole job. Your uTSLA sits in your wallet, tracks the stock 24/7, and redeems to tUSDG at oracle price whenever you want out — same transaction below the vault’s instant cap, queued and paid by claim above it. No funding tabs, no liquidation price, nothing to manage.",
+      "Mint certificates and hold them. That is the whole job. Your uTSLA sits in your wallet, tracks the stock 24/7, and redeems to USDG at oracle price whenever you want out — same transaction below the vault’s instant cap, queued and paid by claim above it. No funding tabs, no liquidation price, nothing to manage.",
       "Reward: stock exposure that just sits there. The asset Robinhood Chain was missing, finally holdable.",
     ],
     image: "/roles-holder.jpg",
@@ -30,7 +30,7 @@ const ROWS: RoleRow[] = [
     title: "DeFi Builder",
     meta: "Equity-shaped lego",
     body: [
-      "List certificates as collateral on lending markets, build uTSLA/tUSDG pairs, structure products on top of a spot asset that never needed to exist off chain. Certificates are plain tokens: permissionless to integrate, oracle-priced from the same feed the vaults use.",
+      "List certificates as collateral on lending markets, build uTSLA/USDG pairs, structure products on top of a spot asset that never needed to exist off chain. Certificates are plain tokens: permissionless to integrate, oracle-priced from the same feed the vaults use.",
       "Reward: equity-shaped collateral in your protocol - a spot asset, oracle-priced from the same feed the vaults use, permissionless to integrate.",
     ],
     image: "/roles-builder.jpg",

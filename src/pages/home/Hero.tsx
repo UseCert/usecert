@@ -46,7 +46,7 @@ function SlotBars() {
 const PARA_SEGMENTS: { text: string; bold?: boolean }[] = [
   { text: "We mint " },
   { text: "the missing asset", bold: true },
-  { text: " on Robinhood Chain. Deposit tUSDG, the vault opens a fully backed long on the equity perp underneath, and you receive a stock certificate token that tracks the stock, sits in your wallet, and " },
+  { text: " on Robinhood Chain. Deposit USDG, the vault opens a fully backed long on the equity perp underneath, and you receive a stock certificate token that tracks the stock, sits in your wallet, and " },
   { text: "redeems at oracle price any time", bold: true },
   { text: "." },
 ];

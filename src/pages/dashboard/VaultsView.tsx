@@ -18,6 +18,7 @@ import { EM_DASH, fmtCompactUSD, fmtNum, fmtOrDash, fmtUSD } from "./format";
 import { fromBps, fromPrice18 } from "@/chain/units";
 import { MARKET_INDEX_UNVERIFIED_NOTE } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
+import { COLLATERAL_SYMBOL } from "@/chain/deployment";
 
 function MiniStat({
   label,
@@ -395,7 +396,7 @@ export default function VaultsView() {
                             : "chosen, not venue-verified"
                         }`,
                       ],
-                      ["Collateral decimals", "6 (tUSDG)"],
+                      ["Collateral decimals", `6 (${COLLATERAL_SYMBOL})`],
                       [
                         "Max attestation age",
                         `${maxAttestationAgeSec}s · past this, capacity is 0 and minting is off`,

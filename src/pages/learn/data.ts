@@ -51,7 +51,7 @@ export const ARTICLES: Article[] = [
       {
         heading: "A market of positions, not assets",
         paragraphs: [
-          "Every dollar of that exposure is a leveraged perpetual. It tracks the stock beautifully, but it is a position you must manage: funding every eight hours, margin to maintain, a liquidation price that does not care about your thesis. A perp cannot sit in a cold wallet, cannot be LP'd against tUSDG, cannot be posted as collateral on a lending market.",
+          "Every dollar of that exposure is a leveraged perpetual. It tracks the stock beautifully, but it is a position you must manage: funding every eight hours, margin to maintain, a liquidation price that does not care about your thesis. A perp cannot sit in a cold wallet, cannot be LP'd against USDG, cannot be posted as collateral on a lending market.",
           "This is not a complaint about perps. Perps are the engine: the deepest, most liquid, oracle-priced equity book that has ever existed on chain, running 24/7 for TSLA, AAPL, NVDA, AMZN, and a synthetic Nasdaq index. The complaint is that the engine is all there is.",
         ],
       },
@@ -70,13 +70,13 @@ export const ARTICLES: Article[] = [
       {
         heading: "What a certificate changes",
         paragraphs: [
-          "Deposit tUSDG, the vault opens a fully backed long on the equity perp underneath, and uTSLA mints to your wallet at oracle price. Delta target 1.0, proven on-chain at every attestation with the age of the proof published. Burn it and tUSDG comes back at oracle price, never gated. Funding is buffered, then fee'd, never hidden. Holders are senior to stakers, always.",
+          "Deposit USDG, the vault opens a fully backed long on the equity perp underneath, and uTSLA mints to your wallet at oracle price. Delta target 1.0, proven on-chain at every attestation with the age of the proof published. Burn it and USDG comes back at oracle price, never gated. Funding is buffered, then fee'd, never hidden. Holders are senior to stakers, always.",
         ],
       },
       {
         heading: "The honest boundary",
         paragraphs: [
-          "Certificates are synthetic. Backed by perp positions and tUSDG margin, not custody of shares. No dividends, no shareholder rights. The solvency dashboard is public and the stress parameters are published, because the point of putting it on chain is that you should never have to take our word for it.",
+          "Certificates are synthetic. Backed by perp positions and USDG margin, not custody of shares. No dividends, no shareholder rights. The solvency dashboard is public and the stress parameters are published, because the point of putting it on chain is that you should never have to take our word for it.",
         ],
       },
     ],
@@ -94,7 +94,7 @@ export const ARTICLES: Article[] = [
     minimal: true,
     quote: "One certificate, one token's worth of exposure. Nothing else.",
     intro: [
-      "Every certificate is backed by exactly one token's worth of equity perp exposure plus tUSDG margin. Not a fraction, not a promise: a position you can inspect on chain, block by block.",
+      "Every certificate is backed by exactly one token's worth of equity perp exposure plus USDG margin. Not a fraction, not a promise: a position you can inspect on chain, block by block.",
       "You do not need the Greeks to understand delta backing. You need one number, and it is 1.0.",
     ],
     sections: [
@@ -108,7 +108,7 @@ export const ARTICLES: Article[] = [
       {
         heading: "The vault's two legs",
         paragraphs: [
-          "The first leg is the long position on the equity perp, opened at oracle price the moment you deposit tUSDG. The second leg is the tUSDG margin that collateralizes that position. Together they are the backing of your certificate: the position tracks the stock, the margin keeps the position alive.",
+          "The first leg is the long position on the equity perp, opened at oracle price the moment you deposit USDG. The second leg is the USDG margin that collateralizes that position. Together they are the backing of your certificate: the position tracks the stock, the margin keeps the position alive.",
         ],
       },
       {
