@@ -1,0 +1,23 @@
+{
+  "_what": "CertStaking on chain 4663: stake CERT for a share of the buyback fund (owner decision 2026-09-26, option 2). Deployed with cast send --create from the init code built at the commit below.",
+  "chainId": 4663,
+  "contract": "CertStaking",
+  "address": "0x6491f2a764F65982641F3C63AeB6895cC33ba0Ae",
+  "transactionHash": "0x09737bf904b173adaf14658f494dd02cebcac8df3adeec836641a96d91e13c7f",
+  "blockNumber": 73206833,
+  "commit": "7f305c7c1eeb5815b49f1b70c776dd3fcea70588",
+  "deployer": "0x6381577a72266E6b89eE9E96dF604CC3cd3f8e92",
+  "constructor": {
+    "stakingToken": "0xb01356a005403c38c0fb01bd0aafe51e81ab9b07",
+    "rewardToken": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "rewardsDuration": 604800,
+    "stakeCap": "10000000000000000000000000"
+  },
+  "sourcify": "exact_match (creation and runtime)",
+  "audited": false,
+  "firstFunding": {
+    "tx": "0x9ee7acef9012821a32fb5dc5035b5b454722cd136c7cac8c2078e20c1e842cf1",
+    "amount": "1000000",
+    "note": "1 USDG test reward from the deployer, streamed over 7 days"
+  }
+}

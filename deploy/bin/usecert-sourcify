@@ -14,6 +14,7 @@ reader can re-fetch and compare. "exact" requires creationMatch AND runtimeMatch
 exact_match; anything else is reported as what it is. A failed lookup is "unavailable" for that
 address, never the previous run's answer.
 """
+import glob
 import hashlib
 import json
 import os
@@ -80,18 +81,20 @@ def lookup(addr):
             "responseSha256": hashlib.sha256(raw).hexdigest()}
 
 
-EXTRA = "/opt/usecert-history/4663.insurance.json"     # contracts deployed outside the stack book
+# Contracts deployed outside the stack book, one record each: 4663.insurance.json, 4663.certstaking.json.
+EXTRAS = sorted(glob.glob("/opt/usecert-history/4663.*.json"))
 
 
 def main():
     book = json.load(open(BOOK))
     rows = []
     listed = contracts(book)
-    try:
-        x = json.load(open(EXTRA))
-        listed.append({"group": "insurance", "name": x["contract"], "address": x["address"], "external": False})
-    except (OSError, ValueError, KeyError):
-        pass
+    for path in EXTRAS:
+        try:
+            x = json.load(open(path))
+            listed.append({"group": "standalone", "name": x["contract"], "address": x["address"], "external": False})
+        except (OSError, ValueError, KeyError):
+            pass
     for c in listed:
         res = lookup(c["address"])
         rows.append(dict(c, **res, checkedAt=int(time.time())))
