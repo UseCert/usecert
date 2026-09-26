@@ -64,6 +64,7 @@ class Keeper:
         self.fill_timeout = int(c.get("fill_timeout_sec", 180))
         # Only for vaults deployed with recallMarginUpTo (2026-09-26 and later).
         self.auto_recall = bool(c.get("auto_recall", False))
+        self.settle_window = None                       # read from the vault on first use
         with open(c["api_key_file"]) as f:
             self.key = json.load(f)
         self.attester_pk = c["attester_pk"] if "attester_pk" in c else os.environ["KEEPER_ATTESTER_PK"]
@@ -326,12 +327,86 @@ class Keeper:
         log("recall: owed %d, vault holds %d, venue available %d -> recallMarginUpTo(%d) sent (%s)"
             % (owed, have, avail, cap, "ok" if any(l.split()[:2] == ["status", "1"] for l in out.splitlines()) else "REVERTED"))
 
+    def maybe_refund(self):
+        """Give back the escrow of a mint whose hedge never filled, without the holder asking.
+
+        stageRefund and refundMint are permissionless and refundMint pays r.user, never the
+        caller, so running them here costs the keeper gas and cannot redirect a unit. Only
+        receipts this keeper itself saw fill ZERO on the venue are touched
+        (unfilled_left_for_refund); a partial or unconfirmed fill stays for a human, because
+        refunding it would leave a hedge open with nothing behind it. The contract enforces the
+        settle window; this waits for it rather than spending gas on a certain revert.
+
+        requestMint posted part of the escrow to the venue, so refundMint can revert
+        RefundAwaitingSettlement until that share is home. stageRefund moves it into
+        marginPendingRecall; this then asks for the shortfall with recallMarginUpTo, capped at what
+        the venue holds, on the same 600 s spacing as maybe_recall, and retries the refund later.
+        """
+        todo = [(k, r) for k, r in self.state["receipts"].items()
+                if r.get("status") in ("unfilled_left_for_refund", "refund_staged")
+                and time.time() - r.get("refund_try", 0) >= 120]
+        if not todo:
+            return
+        if self.settle_window is None:
+            self.settle_window = int(self._cast("call", self.vault, "settleWindow()(uint256)", "--rpc-url", self.rpc).split()[0])
+        def send(*args):
+            # _cast raises when cast exits non-zero, which a reverted send does. Here a revert is
+            # an expected "not yet" (window, funding), so it is reported as a failed send.
+            try:
+                return self._cast("send", self.vault, *args, "--gas-limit", "1500000",
+                                  "--private-key", self.attester_pk, "--rpc-url", self.rpc)
+            except RuntimeError as e:
+                log("send %s failed: %s" % (args[0], str(e)[:200]))
+                return ""
+        ok = lambda out: any(l.split()[:2] == ["status", "1"] for l in out.splitlines())
+        for key, rec in todo:
+            rid = int(key)
+            out = self._cast("call", self.vault,
+                             "mintReceipts(uint256)(address,uint256,bool,uint256,uint64,bool,uint256)",
+                             str(rid), "--rpc-url", self.rpc).split("\n")
+            escrow, settled = int(out[1].split()[0]), out[2].strip() == "true"
+            requested_at, staged = int(out[4].split()[0]), out[5].strip() == "true"
+            if settled:
+                rec.update(status="refunded")        # by the holder, or by an earlier run of this
+                self._save()
+                continue
+            if time.time() <= requested_at + self.settle_window + 30:
+                continue
+            rec["refund_try"] = time.time()
+            if not staged:
+                o = send("stageRefund(uint256)", str(rid))
+                rec.update(status="refund_staged" if ok(o) else rec["status"])
+                self._save()
+                log("receipt %d: stageRefund %s" % (rid, "ok" if ok(o) else "REVERTED"))
+                if not ok(o):
+                    continue
+            def u(sig):
+                return int(self._cast("call", self.vault, sig, "--rpc-url", self.rpc).split()[0])
+            have, owed = u("hotBuffer()(uint256)"), u("totalOwedOutstanding()(uint256)")
+            if have < escrow + owed:
+                if time.time() - self.state.get("last_recall", 0) >= 600:
+                    a = self._get("/api/v1/account?by=l1_address&value=" + self.vault)["accounts"][0]
+                    cap = min(int(float(a.get("available_balance") or 0) * 10 ** 6), escrow + owed - have)
+                    if cap > 0:
+                        o = send("recallMarginUpTo(uint256)", str(cap))
+                        self.state["last_recall"] = time.time()
+                        log("receipt %d: refund of %d needs %d more at the vault -> recallMarginUpTo(%d) %s"
+                            % (rid, escrow, escrow + owed - have, cap, "ok" if ok(o) else "REVERTED"))
+                self._save()
+                continue
+            o = send("refundMint(uint256)", str(rid))
+            if ok(o):
+                rec.update(status="refunded")
+            self._save()
+            log("receipt %d: refundMint(%d to the holder) %s" % (rid, escrow, "ok" if ok(o) else "REVERTED, retrying later"))
+
     def run_once(self):
         reqs = self.new_requests()
         self._save()
         for rid, base, side, limit_px18, _tx in reqs:
             self.handle(rid, base, side, limit_px18)
         self.maybe_recall()
+        self.maybe_refund()
 
 
 def main():
