@@ -42,6 +42,18 @@ export const FLOW_META: Record<
     img: "/cert-plate-unvda.jpg",
     imgPlaceholder: false,
   },
+  uaapl: {
+    name: "uAAPL",
+    full: "Apple Certificate",
+    img: "/cert-plate-uaapl.jpg",
+    imgPlaceholder: false,
+  },
+  umsft: {
+    name: "uMSFT",
+    full: "Microsoft Certificate",
+    img: "/logo.png",
+    imgPlaceholder: true,
+  },
 };
 
 /* `flowVaultLabel(flow)` is gone with the `Flow` shape it took. It mapped a

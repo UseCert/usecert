@@ -192,6 +192,21 @@ const MIRROR_META: Record<Mirror["symbol"], MirrorMeta> = {
     img: "/cert-plate-unvda.jpg",
     imgPlaceholder: false,
   },
+  uAAPL: {
+    id: "uaapl",
+    name: "uAAPL",
+    full: "Apple Certificate",
+    img: "/cert-plate-uaapl.jpg",
+    imgPlaceholder: false,
+  },
+  // No uMSFT plate exists, and it must not borrow another certificate's: neutral mark, as uSPY.
+  uMSFT: {
+    id: "umsft",
+    name: "uMSFT",
+    full: "Microsoft Certificate",
+    img: "/logo.png",
+    imgPlaceholder: true,
+  },
 };
 
 /**
@@ -236,11 +251,16 @@ const MIRROR_META: Record<Mirror["symbol"], MirrorMeta> = {
  * Nothing misbehaves on testnet, where LighterSim's setMarkPrice() creates any index
  * implicitly. Against the real venue index 16 is not TSLA.
  */
+// MAINNET (4663), 2026-09-26: every index below was READ from Robinhood Chain Lighter's own
+// market list (api.rh.lighter.xyz) by usecert-mainnet-preflight, which refuses to deploy a vault
+// whose market the venue does not list. TSLA 16, SPY 26, QQQ 25, NVDA 15, AAPL 10, MSFT 14.
 const MARKET_INDEX_VERIFIED: Record<Mirror["symbol"], boolean> = {
-  uTSLA: false,
-  uSPY: false,
-  uQQQ: false,
-  uNVDA: false,
+  uTSLA: true,
+  uSPY: true,
+  uQQQ: true,
+  uNVDA: true,
+  uAAPL: true,
+  uMSFT: true,
 };
 
 /**
