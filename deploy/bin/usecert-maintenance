@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Put a site into maintenance, or take it out.
+#
+# Implemented in nginx rather than in the apps: it must work when an app is BROKEN,
+# which is most of the reason to reach for it. A flag file plus `try_files` means
+# flipping it is instant, needs no rebuild, no restart, and no reload - nginx stats
+# the file per request.
+#
+# 503 with Retry-After, never 200: a maintenance page served as success gets cached
+# by intermediaries and indexed by crawlers as the site's real content.
+#
+# The operator is let through by IP so the thing being fixed can be tested from the
+# same browser that is looking at the maintenance page.
+set -uo pipefail
+
+FLAGDIR=/etc/nginx/maintenance
+# use-cert only. qwilon and orion-safe are separate products with their own
+# deploys; one switch covering all three would take down two unrelated sites.
+SITES=(use-cert.com)
+
+usage() {
+  cat <<USAGE
+usage: usecert-maintenance on  [site ...]   put sites into maintenance
+       usecert-maintenance off [site ...]   take them out
+       usecert-maintenance status           what is on right now
+       usecert-maintenance allow <ip>       let an address through while it is on
+       usecert-maintenance deny  <ip>       stop letting it through
+
+sites: ${SITES[*]}   (no site named = all of them)
+USAGE
+}
+
+on_flag()  { echo "$FLAGDIR/$1.on"; }
+
+status() {
+  printf "  %-18s %-14s %s\n" SITE STATE LIVE
+  for s in "${SITES[@]}"; do
+    local state live
+    [ -f "$(on_flag "$s")" ] && state="MAINTENANCE" || state="live"
+    live=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "https://$s/" 2>/dev/null)
+    printf "  %-18s %-14s HTTP %s\n" "$s" "$state" "$live"
+  done
+  echo
+  echo "  allowed through:"
+  if [ -s "$FLAGDIR/allow.conf" ]; then sed 's/^/    /' "$FLAGDIR/allow.conf"; else echo "    (nobody)"; fi
+}
+
+case "${1:-}" in
+  on|off)
+    action=$1; shift
+    targets=("$@"); [ ${#targets[@]} -eq 0 ] && targets=("${SITES[@]}")
+    mkdir -p "$FLAGDIR"
+    for s in "${targets[@]}"; do
+      case " ${SITES[*]} " in *" $s "*) ;; *) echo "unknown site: $s"; exit 1;; esac
+      if [ "$action" = on ]; then : > "$(on_flag "$s")"; echo "  $s -> MAINTENANCE"
+      else rm -f "$(on_flag "$s")"; echo "  $s -> live"; fi
+    done
+    # No reload needed - nginx stats the flag per request - but prove the change took.
+    sleep 1
+    for s in "${targets[@]}"; do
+      printf "  %-18s HTTP %s\n" "$s" "$(curl -s -o /dev/null -w '%{http_code}' -m 10 "https://$s/")"
+    done
+    ;;
+  allow|deny)
+    ip="${2:?an IP is required}"
+    mkdir -p "$FLAGDIR"; touch "$FLAGDIR/allow.conf"
+    if [ "$1" = allow ]; then
+      # BARE, not quoted: nginx's geo treats "1.2.3.4" as a literal string that can
+      # never match $remote_addr, so a quoted entry silently grants nobody anything.
+      grep -qx "$ip 1;" "$FLAGDIR/allow.conf" 2>/dev/null || echo "$ip 1;" >> "$FLAGDIR/allow.conf"
+      echo "  $ip may now bypass maintenance"
+    else
+      # No `&& mv`: removing the only entry leaves grep with nothing to print, which
+      # is exit 1, which would skip the move and silently leave the address allowed -
+      # a revoke that reports success and revokes nothing.
+      grep -vxF "$ip 1;" "$FLAGDIR/allow.conf" > "$FLAGDIR/allow.tmp" || true
+      mv "$FLAGDIR/allow.tmp" "$FLAGDIR/allow.conf"
+      echo "  $ip no longer bypasses"
+    fi
+    nginx -t >/dev/null 2>&1 && systemctl reload nginx && echo "  nginx reloaded" || echo "  !! nginx config rejected - not reloaded"
+    ;;
+  status|"") status ;;
+  *) usage; exit 1 ;;
+esac
