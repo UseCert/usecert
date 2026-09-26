@@ -113,7 +113,7 @@ export default function Footer() {
           </div>
           <div className="md:text-right">
             <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-white-60">Deployed on</p>
-            <p className="mt-4 whitespace-nowrap text-[12px] uppercase text-white">
+            <p className="mt-4 lg:whitespace-nowrap text-[12px] uppercase text-white">
               Robinhood Chain · 24/7 oracle-priced markets · Solvency proven every attestation, age published
             </p>
             <div className="mt-5 flex gap-4 md:justify-end">

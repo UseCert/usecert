@@ -12,7 +12,7 @@ export default function WhyUseCert() {
     <section id="why-usecert" className="bg-paper text-ink">
       <div className="mx-auto max-w-[1440px] px-4 py-16 md:px-6 md:py-24 lg:px-12 lg:py-32">
         <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-60">Why UseCert?</p>
-        <h2 className="mt-4 whitespace-nowrap text-[44px] font-semibold uppercase leading-[0.85] tracking-[-0.05em] md:text-[60px] lg:text-[78px]">
+        <h2 className="mt-4 lg:whitespace-nowrap text-[44px] font-semibold uppercase leading-[0.85] tracking-[-0.05em] md:text-[60px] lg:text-[78px]">
           <LetterReveal text="Backed, and proven" byWord stagger={0.05} />
         </h2>
 
