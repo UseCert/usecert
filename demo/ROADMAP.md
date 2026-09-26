@@ -265,12 +265,68 @@ dashboard.
 audit "reported open criticals". Nothing ships to mainnet before those are closed and the
 result is published.
 
-### 3.2 Real collateral and a real venue — **L**
+### 3.2 Real collateral and a real venue — **L** — 🟡 mainnet targets now measured (2026-09-25)
 
 Mainnet uses USDG, not `tUSDG`, and the `testFaucet` path disappears. `lighterSim`
 (`0x563f…1c39`) is a simulator — on testnet `setMarkPrice()` creates any index implicitly,
 which is why `basisBpsChecked()` returns `known == false`. Against a real venue that boolean
 starts meaning something, and the UI needs to be correct when it flips.
+
+**The venue is NOT missing on mainnet, and an earlier reading of this item said it was.**
+`LighterSim`'s NatSpec records `cast code` returning `0x` on the candidate `ZkLighter`
+addresses — that was measured on **testnet 46630**, and was generalised to mainnet without
+being checked. Measured on **mainnet 4663** on 2026-09-25, everything the protocol needs is
+already deployed:
+
+| what | address | state |
+|---|---|---|
+| ZkLighter proxy | `0x94bab9693ba2f6358507effcbd372b0660afff9d` | 1,367 B |
+| ZkLighter implementation | `0x82DE5B1161C93afDFE21bA0D5343f01Cd7401d90` | 23,168 B |
+| USDG | `0x5fc5360d0400a0fd4f2af552add042d716f1d168` | symbol `USDG`, 6 decimals |
+| Robinhood deposit router | `0x8062df5b3220ad1f528365650a3eb3e8c7b0dad1` | 1,367 B |
+
+All four return `0x` on testnet, which is exactly why the simulator exists. USDG's 6 decimals
+match what `CertVault` reads at construction.
+
+**`ILighter` is correct against the real contract.** All seven selectors UseCert calls are
+present in the deployed implementation — `addressToAccountIndex`, `deposit`, `createOrder`,
+`withdraw`, `cancelAllOrders`, `getPendingBalance`, `withdrawPendingBalance` — and live view
+calls against the proxy decode rather than revert. The ABI is not the risk.
+
+**What remains is behaviour, not shape.** `LighterCore` is this project's *model* of Lighter's
+semantics: asynchronous settlement, partial fills, order rejection, margin accounting. Matching
+selectors say nothing about any of that, and the model has never met the real engine. It is
+testable with one small real deposit, which is the cheapest way to find out and should come
+before anything else in this item.
+
+### 3.2b Every market index is wrong — **S, and blocking** — 🔴 found 2026-09-25
+
+Read from Lighter's live market list on mainnet
+(`mainnet.zklighter.elliot.ai/api/v1/orderBookDetails`, 235 active markets):
+
+| mirror | deployed `marketIndex` | real `market_id` | had been recorded as |
+|---|---|---|---|
+| uTSLA | 16 | **112** | venue-verified |
+| uSPY | 26 | **128** | chosen |
+| uQQQ | 27 | **129** | chosen |
+| uNVDA | 15 | **110** | venue-verified |
+
+**All four are wrong, including the two this repo called verified.** TSLA 16 and NVDA 15 were
+read from the venue's list on 2026-09-07; against the live venue they are not those markets.
+The earlier reading has gone stale or came from a different instance. Nothing misbehaves on
+testnet, where `setMarkPrice()` creates any index implicitly — which is precisely what let a
+wrong index deploy clean and stay unnoticed.
+
+`marketIndex` is immutable on `CertVault`, so correcting it is a redeploy per mirror, not a
+setter. That work belongs to the mainnet deployment, where the real ids above are now known.
+
+Also worth recording: **SPX exists on the real venue as market 42**, and `uSPX` was retired
+from this project on the stated grounds that the venue had no SPX perp. That premise was true
+of the simulator, not of Lighter.
+
+Front end corrected the same day: `MARKET_INDEX_VERIFIED` is now `false` for all four and the
+dashboard reads "venue market index verified 0/4" instead of 2/4, with the real ids published
+in the caveat note.
 
 ### 3.3 Attester key custody and rotation — **L**
 
