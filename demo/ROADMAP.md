@@ -346,7 +346,7 @@ instead of asserting "every critical finding is closed", which is true and tells
 nothing they can weigh. `Overview.tsx` also still described the audit as having open criticals
 in the present tense; that is now dated.
 
-### 3.2 Real collateral and a real venue — **L** — 🟡 mainnet targets now measured (2026-09-25)
+### 3.2 Real collateral and a real venue — **L** — 🟡 deployed against both; the engine is still unreached (see 6.7)
 
 Mainnet uses USDG, not `tUSDG`, and the `testFaucet` path disappears. `lighterSim`
 (`0x563f…1c39`) is a simulator — on testnet `setMarkPrice()` creates any index implicitly,
@@ -380,7 +380,7 @@ selectors say nothing about any of that, and the model has never met the real en
 testable with one small real deposit, which is the cheapest way to find out and should come
 before anything else in this item.
 
-### 3.2b Every market index is wrong — **S, and blocking** — 🔴 found 2026-09-25
+### 3.2b Every market index is wrong — **S** — ✅ closed on mainnet 2026-09-25
 
 Read from Lighter's live market list on mainnet
 (`mainnet.zklighter.elliot.ai/api/v1/orderBookDetails`, 235 active markets):
@@ -877,8 +877,13 @@ venue      0x94bAB9693Ba2f6358507eFfcbd372b0660AFfF9d  (real Lighter proxy)
 | uMSFT | `0x0F1B97efb2387cBa900D1cC3784dbB8250c5E069` | 32994 |
 
 Cost: **0.0042 ETH** of gas and **6 USDG** of seed (1 per vault), from 0.01 ETH and 50 USDG sent.
-Each vault posted 1 USDG of margin at the venue. **This is the first time this protocol has
-touched the real Lighter engine**, and it is the single thing every audit said was untested.
+
+> **Corrected the same evening.** This section said *"the first time this protocol has touched
+> the real Lighter engine"*, and that claim was too strong. What is proven is that the vault
+> called Lighter's **L1 contract** and the contract responded: it assigned each vault an account
+> index and emitted events carrying that index, the vault address and asset index 3. What is
+> **not** proven is that anything reached Lighter's matching engine — see 6.7, which is the
+> finding that matters more than the deployment.
 
 **Mint capacity is currently zero, by arithmetic.** `bootstrap()` consumes exactly
 `10 ** decimals` as registering dust, so a 1 USDG seed leaves the ERC-20 buffer at 0 and
@@ -936,6 +941,47 @@ wrong thing to describe as a launch.
 mainnet front-end bundle. Governance custody before any of it carries value.
 
 
+### 6.7 The venue's sequencer does not know our accounts — **BLOCKING** — found 2026-09-25
+
+The deployment works. The integration is one step short, and it took minting on mainnet to find
+out.
+
+**What was run.** 3 USDG seeded into each buffer (capacity 300 USDG a mirror, `mintAllowed` true
+on all six, basis 11–45 bps inside a 500 bps band), attestations refreshed, then **8 USDG minted
+on uTSLA** — sized above Lighter's `minBaseAmount` of 0.0150 TSLA so the hedge could not be
+refused for size. It produced 0.0214 uTSLA. `redeemInstant` then reverted
+`CertVault_UseQueuedRedeem`, correctly: instant payout needs free collateral the vault does not
+have while its margin sits at the venue. `requestRedeem` succeeded, burned the certificates, and
+took the vault's ledger flat.
+
+**Then the round trip stopped.** `claimRedeem(1)` reverts `CertVault_AwaitingSettlement`.
+`recallMargin()` succeeds three times in a row and moves nothing. 7.947432 USDG is owed on
+receipt #1, the vault holds 3.8072, and the difference has not come back from the venue.
+
+**Why.** Lighter's API returns `account not found` for every vault address, while the venue's own
+L1 contract maps each vault to an account index (32989–32994) and emitted events carrying them.
+Both are true: an L1 deposit **assigns an index in the contract's registry**, and that is not the
+same as the account existing in the **sequencer's** state, where matching and balances live. So
+the deposits, the order submission and the withdrawal request all reached the contract; none of
+them reached the engine.
+
+**The measurement error worth recording.** The first write-up of the mint said *"the venue took a
+real position"*, on the strength of `venuePositionBase` moving 0 → 214 and `postedMargin` moving
+1 → 8.19. **Both are the vault's own ledger** — `int256 public venuePositionBase` is a state
+variable, and its own NatSpec calls it "the vault's own order ledger" and lists four ways it can
+be wrong. Reading our accounting and reporting it as the venue's behaviour is the same mistake
+the first audit made about attestation staleness, made in the opposite direction. The venue's
+**events** are the evidence; the vault's counters are not.
+
+**What is actually needed:** sequencer-side account registration with Lighter — credentials, a
+signed registration, or whatever their onboarding requires. It cannot be derived from the chain,
+so it is the one genuinely external blocker. Until it is done: no mint on mainnet can be exited,
+and **no public interface should be pointed at these contracts.**
+
+**Funds are accounted for, not lost.** 8 USDG left the deployer for the vault and the venue
+contract; 18 USDG remain in the wallet; 3.8072 sit in the uTSLA vault; 7.947432 are owed on an
+unclaimable receipt; 3 USDG each are seeded in the other five buffers.
+
 ---
 
 ## Keeping the public page in sync
@@ -969,10 +1015,12 @@ three, since all three are the same question — what does the project claim, an
 1.5 is now narrower than the other two: 3.6 built the mechanism, so the per-chain claims follow
 the deployment on their own and what remains is the **wording**, not the plumbing.
 
-**Ahead of all of it.** Mainnet is deployed (Phase 6) and the corrective re-audit's P0 items are
-closed (5.1, 5.2, 5.3, 5.5). The next real milestone is **one small trade against the live Lighter
-engine** — P2-1, and the assumption every other Phase 3 item rests on. Nothing about the
-deployment tests it; a registering deposit is not a fill.
+**Ahead of all of it, and blocking everything else: 6.7.** Mainnet is deployed and minting was
+attempted; the exit does not complete because Lighter's sequencer does not recognise the vault
+accounts. That is P2-1 answered — not "the venue behaves as modelled" but "the venue has not been
+reached" — and it needs an external step from Lighter rather than a change here. Every other
+mainnet item is downstream of it, and no public interface should point at these contracts until
+a mint can be exited.
 
 After that: P1 work on the testnet pilot — 5.4 (remaining user-visible states, signer-readiness
 alerting), 5.6 (runtime payload validation), 4.5 (a green enforced baseline) — and governance
