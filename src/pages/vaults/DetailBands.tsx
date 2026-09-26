@@ -6,6 +6,7 @@ import LetterReveal from "@/components/LetterReveal";
 import SwapButton from "@/components/SwapButton";
 import { EASE } from "./DetailSections";
 import type { VaultData } from "./data";
+import { useReveal } from "@/i18n";
 
 /** Section 5: "THE RESULTS" full-bleed deep band: two giant stat callouts + copy. */
 export function Results({ vault }: { vault: VaultData }) {
@@ -62,7 +63,8 @@ export function Results({ vault }: { vault: VaultData }) {
 
 /** Section 7: "HOLDER WORDS." testimonial block (replaces "Client words."). */
 export function HolderWords({ vault }: { vault: VaultData }) {
-  const words = vault.quote.text.split(" ");
+  const R = useReveal();
+  const words = R(vault.quote.text);
 
   return (
     <section className="grain bg-ink text-white">
@@ -95,7 +97,7 @@ export function HolderWords({ vault }: { vault: VaultData }) {
                   variants={{ hidden: { opacity: 0, y: 8 }, show: { opacity: 1, y: 0, transition: { duration: 0.3 } } }}
                 >
                   {w}
-                  {i < words.length - 1 ? " " : ""}
+                  {i < words.length - 1 ? R.sep : ""}
                 </motion.span>
               ))}
               <footer className="mt-6 flex items-center gap-3">

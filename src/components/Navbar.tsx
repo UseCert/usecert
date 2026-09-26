@@ -4,6 +4,7 @@ import { Menu } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { scrollToHash } from "@/lib/scroll";
 import SwapButton from "./SwapButton";
+import { LanguageSwitcher } from "@/i18n";
 
 export const NAV_HEIGHT = "h-16 md:h-20";
 
@@ -87,6 +88,7 @@ export default function Navbar({ onMenuOpen }: { onMenuOpen: () => void }) {
               </li>
             ))}
           </ul>
+          <LanguageSwitcher className="shrink-0" />
           <SwapButton label="Launch App" to="/dashboard" variant="primary" className="[&_span]:px-3.5 [&_span]:py-2.5 [&_span]:text-[11px] sm:[&_span]:px-5 sm:[&_span]:py-3 sm:[&_span]:text-[12px]" />
           <button
             type="button"

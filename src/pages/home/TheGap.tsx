@@ -1,5 +1,6 @@
 import { motion } from "framer-motion";
 import Counter from "@/components/Counter";
+import { useReveal } from "@/i18n";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -11,6 +12,7 @@ const STATS = [
 
 /** §7 "THE GAP" (full-bleed section-deep) - #the-gap */
 export default function TheGap() {
+  const R = useReveal();
   return (
     <section id="the-gap" className="grain section-glow relative bg-section-deep text-white">
       <div className="relative z-[2] mx-auto max-w-[1440px] px-4 py-16 md:px-6 md:py-24 lg:px-12 lg:py-32">
@@ -59,13 +61,13 @@ export default function TheGap() {
               viewport={{ once: true, amount: 0.3 }}
               variants={{ hidden: {}, show: { transition: { staggerChildren: 0.05 } } }}
             >
-              {"Every dollar of stock exposure here is a perp you must manage.".split(" ").map((w, i) => (
+              {R("Every dollar of stock exposure here is a perp you must manage.").map((w, i) => (
                 <motion.span
                   key={i}
                   className="inline-block whitespace-pre"
                   variants={{ hidden: { y: 24, opacity: 0 }, show: { y: 0, opacity: 1, transition: { duration: 0.6, ease: EASE } } }}
                 >
-                  {w}{" "}
+                  {w}{R.sep}
                 </motion.span>
               ))}
             </motion.h2>

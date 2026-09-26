@@ -19,6 +19,7 @@ import Preloader from "@/components/Preloader";
 import FilmGrain from "@/components/FilmGrain";
 import ScrollToTop from "@/components/ScrollToTop";
 import NotFound from "@/pages/NotFound";
+import { I18nRuntime } from "@/i18n";
 
 function NotFoundComponent() {
   return (
@@ -133,6 +134,15 @@ function RootShell({ children }: { children: ReactNode }) {
     <html lang="en">
       <head>
         <HeadContent />
+        {/* Chinese chosen earlier: hold the first paint until the page is translated, so English
+            does not flash. Released by I18nRuntime, or after 1.5 s whatever happens. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "try{if(localStorage.getItem('usecert.lang')==='zh'){var d=document.documentElement;d.setAttribute('data-i18n-pending','');d.lang='zh-CN';setTimeout(function(){d.removeAttribute('data-i18n-pending')},1500)}}catch(e){}",
+          }}
+        />
+        <style>{"html[data-i18n-pending] body{visibility:hidden}"}</style>
       </head>
       <body>
         {children}
@@ -171,6 +181,7 @@ function RootComponent() {
         </AnimatePresence>
         <FilmGrain />
         <ScrollToTop />
+        <I18nRuntime />
         {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
         <Outlet />
       </QueryClientProvider>

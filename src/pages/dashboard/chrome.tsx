@@ -8,6 +8,7 @@ import type { ViewId } from "./store";
 import { PulseDot } from "./ui";
 import { WalletButton } from "./modals";
 import { CommandTrigger } from "./CommandPalette";
+import { LanguageSwitcher } from "@/i18n";
 
 /* Staking and Keepers were removed with the views behind them: no insurance-staking
  * contract and no keeper-rewards mechanism is deployed on chain 46630, and both screens
@@ -132,6 +133,7 @@ export function TopBar() {
 
         {/* Right: search + block ticker + wallet */}
         <div className="flex shrink-0 items-center gap-2 md:gap-4">
+          <LanguageSwitcher className="shrink-0" />
           <CommandTrigger className="hidden sm:flex" />
           <span className="hidden font-mono text-[11px] uppercase tracking-[0.06em] text-silver md:block">
             BLOCK{" "}

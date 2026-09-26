@@ -1,10 +1,12 @@
 import { motion } from "framer-motion";
 import Scribble from "@/components/Scribble";
+import { useReveal } from "@/i18n";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
 /** §9 "HONEST BOUNDARIES" (black) - #boundaries */
 export default function Boundaries() {
+  const R = useReveal();
   return (
     <section id="boundaries" className="grain bg-ink text-white">
       <div className="relative z-[2] mx-auto max-w-[1440px] px-4 py-16 md:px-6 md:py-24 lg:px-12 lg:py-32">
@@ -39,15 +41,14 @@ export default function Boundaries() {
               viewport={{ once: true, amount: 0.4 }}
               variants={{ hidden: {}, show: { transition: { staggerChildren: 0.02 } } }}
             >
-              {"Certificates are synthetic, and we say that first. Backed by perp positions and USDG margin, not custody of shares. No dividends, no shareholder rights. The solvency dashboard is public and the stress parameters are published, because trust here should never require trusting us."
-                .split(" ")
+              {R("Certificates are synthetic, and we say that first. Backed by perp positions and USDG margin, not custody of shares. No dividends, no shareholder rights. The solvency dashboard is public and the stress parameters are published, because trust here should never require trusting us.")
                 .map((w, i) => (
                   <motion.span
                     key={i}
                     className="inline-block whitespace-pre"
                     variants={{ hidden: { opacity: 0, y: 12 }, show: { opacity: 1, y: 0, transition: { duration: 0.4 } } }}
                   >
-                    {w}{" "}
+                    {w}{R.sep}
                   </motion.span>
                 ))}
             </motion.blockquote>

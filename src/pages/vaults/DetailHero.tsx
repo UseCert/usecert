@@ -4,11 +4,13 @@ import { motion, useScroll, useTransform } from "framer-motion";
 import { ArrowLeft } from "lucide-react";
 import LetterReveal from "@/components/LetterReveal";
 import type { VaultData } from "./data";
+import { useReveal } from "@/i18n";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
 /** Detail section 1: back link + giant title + tagline + framed hero media. */
 export default function DetailHero({ vault }: { vault: VaultData }) {
+  const R = useReveal();
   const mediaRef = useRef<HTMLDivElement>(null);
   const { scrollYProgress } = useScroll({ target: mediaRef, offset: ["start end", "end start"] });
   const imgY = useTransform(scrollYProgress, [0, 1], [0, -30]);
@@ -40,14 +42,14 @@ export default function DetailHero({ vault }: { vault: VaultData }) {
           animate="show"
           variants={{ hidden: {}, show: { transition: { staggerChildren: 0.03, delayChildren: 0.4 } } }}
         >
-          {vault.tagline.split(" ").map((w, i, arr) => (
+          {R(vault.tagline).map((w, i, arr) => (
             <motion.span
               key={`${w}-${i}`}
               className="inline-block whitespace-pre"
               variants={{ hidden: { opacity: 0, y: 10 }, show: { opacity: 1, y: 0, transition: { duration: 0.4 } } }}
             >
               {w}
-              {i < arr.length - 1 ? " " : ""}
+              {i < arr.length - 1 ? R.sep : ""}
             </motion.span>
           ))}
         </motion.p>

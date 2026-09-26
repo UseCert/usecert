@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import LetterReveal from "@/components/LetterReveal";
 import SwapButton from "@/components/SwapButton";
+import { useLang, useT } from "@/i18n";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -14,8 +15,13 @@ const COPY_SEGMENTS: { text: string; bold?: boolean }[] = [
 
 /** Sub-copy with word-fade stagger (0.03s) and bold spans, uppercase render. */
 function RevealCopy() {
+  const lang = useLang();
+  const t = useT();
   const words: { word: string; bold?: boolean }[] = [];
-  COPY_SEGMENTS.forEach((seg) => {
+  // Chinese: the segments joined into one sentence and translated whole; the bold emphasis is an
+  // English word-level device and is not carried over.
+  if (lang === "zh") Array.from(t(COPY_SEGMENTS.map((sg) => sg.text).join(""))).forEach((c) => words.push({ word: c }));
+  else COPY_SEGMENTS.forEach((seg) => {
     seg.text.split(" ").forEach((w, i, arr) => {
       if (w) words.push({ word: w + (i < arr.length - 1 ? " " : ""), bold: seg.bold });
       else if (i < arr.length - 1) words.push({ word: " " });

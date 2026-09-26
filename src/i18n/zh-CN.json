@@ -1,0 +1,5 @@
+{
+ "_what": "Simplified Chinese for use-cert.com, keyed by the exact English text. exact: whole strings. tpl: strings whose values (numbers, addresses) are lifted out as {#} in the key and put back as {0}, {1} in the value. Missing entries stay English.",
+ "exact": {},
+ "tpl": {}
+}
