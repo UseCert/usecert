@@ -310,11 +310,41 @@ points a reader at the contracts instead of asking to be trusted.
 
 ## Phase 3 — mainnet prerequisites
 
-### 3.1 Close the C1 audit criticals — **L**
+### 3.1 Close the C1 audit criticals — **L** — ✅ closed and published 2026-09-25
 
-`src/pages/dashboard/Overview.tsx:200` records that C1 is an audit identifier and that the
-audit "reported open criticals". Nothing ships to mainnet before those are closed and the
-result is published.
+Two halves: close them, and publish the result. Both are done, and the publishing half was
+the one still outstanding.
+
+**Measured this pass**, not remembered — the suite was re-run to confirm the `DeployTestnet`
+virtual seams added the same day changed nothing:
+
+| suite | result |
+|---|---|
+| everything except the auditor's | **456 of 456 pass** |
+| `AttackSuite` | **17 of 17 pass** |
+| `AuditPoC` | **5 of 8 pass** — and all eight were written to FAIL |
+
+The reported Critical (the overflow in `_queueExit`) is fixed. So is the EIP-170 blocker the
+audit escalated, which would have left `CertFactory` undeployable on any chain — closed by
+making it a registry rather than a deployer.
+
+**The three failures are not equivalent, and the site no longer lets them read as if they
+were.** `test_A1` and `test_A3` fail by REVERTING during setup — `CertVault_AtCapacity` and
+`CertVault_MintPaused` — which is the guard stopping the exploit before the assertion is
+reached. The audit recorded both as left untouched by instruction.
+
+`test_A5` is different and worth stating plainly: it fails on its own property,
+`margin must be recallable without a queued receipt: 0 <= 0`. The audit's fix report claims it
+passes, and it did — until the venue became **asynchronous** the day after. A single
+permissionless `recallMargin()` cannot get the money home when the withdrawal is requested and
+arrives later. **The margin is recoverable**, in two steps, and `test_recallMarginSubmitsAndSweeps`
+in `CertVaultRecall.t.sol` proves it. What is lost is the one-call property, and with it the
+absence of a keeper dependency the fix existed to remove.
+
+Published on `/roadmap`: the milestone now carries the numbers and names the A5 distinction
+instead of asserting "every critical finding is closed", which is true and tells a reader
+nothing they can weigh. `Overview.tsx` also still described the audit as having open criticals
+in the present tense; that is now dated.
 
 ### 3.2 Real collateral and a real venue — **L** — 🟡 mainnet targets now measured (2026-09-25)
 
