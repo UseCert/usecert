@@ -75,7 +75,28 @@ else
     MA=$(timeout 20 cast call "$O" 'mintAllowed()(bool)' --rpc-url "$RPC" </dev/null 2>/dev/null)
     # mintAllowed is the ORACLE gate and is independent of attestation age. False here
     # means the price feed itself is unhealthy, which no relay can fix.
-    [ "$MA" = "false" ] && P+=("<b>$SYM mintAllowed() is false</b> - the oracle is unhealthy; a relay cannot fix this")
+    #
+    # Say WHICH guard failed. mintAllowed() folds three of them - feed staleness, deviation
+    # and basis - into one boolean, and on 2026-09-23 that boolean cost about twenty minutes
+    # of digging to learn it meant "the uNVDA feed is 1091s old against a 900s limit". The
+    # feed age is one call away and is almost always the answer, so the alert carries it.
+    if [ "$MA" = "false" ]; then
+      FA=""
+      AGG=$(python3 -c "import json;d=json.load(open('$BOOK'));print(next((v['replayAggregator'] for v in d['vaults'] if v['symbol']=='$SYM'),''))" 2>/dev/null)
+      if [ -n "$AGG" ]; then
+        UP=$(timeout 20 cast call "$AGG" 'latestRoundData()(uint80,int256,uint256,uint256,uint80)' --rpc-url "$RPC" </dev/null 2>/dev/null | sed -n '4p' | sed 's/ .*//')
+        NOWB=$(timeout 20 cast block latest --field timestamp --rpc-url "$RPC" </dev/null 2>/dev/null | sed 's/ .*//')
+        if [ -n "$UP" ] && [ -n "$NOWB" ]; then
+          AGE_F=$(( NOWB - UP ))
+          if [ "$AGE_F" -ge "${STALENESS_SECONDS:-900}" ]; then
+            FA=" - the price feed is ${AGE_F}s old, past the ${STALENESS_SECONDS:-900}s limit, so px() reverts CertOracle_StalePrice. The FEED keeper is behind, not the attester."
+          else
+            FA=" - the price feed is fresh (${AGE_F}s), so this is the deviation or basis guard, not staleness."
+          fi
+        fi
+      fi
+      P+=("<b>$SYM mintAllowed() is false</b> - the oracle is unhealthy; a relay cannot fix this${FA}")
+    fi
   done < <(python3 -c "
 import json;d=json.load(open('$BOOK'))
 [print(v['symbol'], v['vault'], v['certOracle']) for v in d['vaults']]" 2>/dev/null)

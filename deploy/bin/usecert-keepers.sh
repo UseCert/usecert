@@ -69,9 +69,23 @@ while :; do
   if [ $((i % FEED_EVERY)) -eq 0 ]; then
     while read -r AGG SEEDPX; do
       [ -n "$AGG" ] || continue
-      REPLAY_AGGREGATOR="$AGG" FEED_PRICE="$SEEDPX" \
-        forge script script/FeedKeeper.s.sol --rpc-url "$RPC_URL" --broadcast >/dev/null 2>&1 \
-        || echo "[$i] feed PUSH FAIL $AGG"
+      # RETRY ONCE. The feed push has no margin to lose: measured 2026-09-23, the feed
+      # leg cycles every ~567s of wall clock (nominal FEED_EVERY*TICK is 480s; four forge
+      # scripts plus the batch advancer add the rest) against a 900s staleness limit. One
+      # dropped push leaves a ~1130s gap, px() reverts CertOracle_StalePrice and
+      # mintAllowed() goes false on that mirror - exactly what happened to uNVDA, from a
+      # single transient broadcast failure the simulation could not reproduce.
+      #
+      # Free when it is not needed, one extra transaction when it is. It does NOT cover a
+      # sustained outage; FEED_EVERY carries that margin (see 40-feed.conf).
+      if ! REPLAY_AGGREGATOR="$AGG" FEED_PRICE="$SEEDPX" \
+           forge script script/FeedKeeper.s.sol --rpc-url "$RPC_URL" --broadcast >/dev/null 2>&1; then
+        echo "[$i] feed push failed, retrying once: $AGG"
+        sleep 5
+        REPLAY_AGGREGATOR="$AGG" FEED_PRICE="$SEEDPX" \
+          forge script script/FeedKeeper.s.sol --rpc-url "$RPC_URL" --broadcast >/dev/null 2>&1 \
+          || echo "[$i] feed PUSH FAIL $AGG (retry also failed)"
+      fi
     done <<< "$PAIRS"
   fi
   [ $((i % 40)) -eq 0 ] && echo "[$i] healthy"
