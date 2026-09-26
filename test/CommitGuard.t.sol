@@ -11,39 +11,33 @@ contract CommitHarness is DeployTestnet {
     }
 }
 
+/// ONE test on purpose. vm.setEnv writes the process environment, which forge's parallel test
+/// threads share: split across functions, one case's COMMIT overwrote another's mid-run and the
+/// suite failed one run in a few. Sequential cases in a single function cannot race.
 contract CommitGuardTest is Test {
-    CommitHarness h;
+    bytes constant REASON = bytes("COMMIT must be a 40-char lowercase hash on mainnet: COMMIT=$(git rev-parse HEAD)");
 
-    function setUp() public {
-        h = new CommitHarness();
-    }
+    function test_commit_guard() public {
+        CommitHarness h = new CommitHarness();
 
-    function test_mainnet_unset_reverts() public {
         vm.chainId(4663);
         vm.setEnv("COMMIT", "");
-        vm.expectRevert(bytes("COMMIT must be a 40-char lowercase hash on mainnet: COMMIT=$(git rev-parse HEAD)"));
-        h.commit();
-    }
+        vm.expectRevert(REASON);
+        h.commit(); // unset
 
-    function test_mainnet_malformed_reverts() public {
-        vm.chainId(4663);
         vm.setEnv("COMMIT", "signed-attestation");
-        vm.expectRevert(bytes("COMMIT must be a 40-char lowercase hash on mainnet: COMMIT=$(git rev-parse HEAD)"));
-        h.commit();
-        vm.setEnv("COMMIT", "91F7F2DF0654C1535411CD583DDE84B573B46A37"); // uppercase: not what rev-parse prints
-        vm.expectRevert(bytes("COMMIT must be a 40-char lowercase hash on mainnet: COMMIT=$(git rev-parse HEAD)"));
-        h.commit();
-    }
+        vm.expectRevert(REASON);
+        h.commit(); // not a hash
 
-    function test_mainnet_hash_passes() public {
-        vm.chainId(4663);
+        vm.setEnv("COMMIT", "91F7F2DF0654C1535411CD583DDE84B573B46A37");
+        vm.expectRevert(REASON);
+        h.commit(); // uppercase: not what rev-parse prints
+
         vm.setEnv("COMMIT", "91f7f2df0654c1535411cd583dde84b573b46a37");
-        assertEq(h.commit(), "91f7f2df0654c1535411cd583dde84b573b46a37");
-    }
+        assertEq(h.commit(), "91f7f2df0654c1535411cd583dde84b573b46a37"); // a real hash passes
 
-    function test_testnet_keeps_marker() public {
         vm.chainId(46630);
         vm.setEnv("COMMIT", "");
-        assertEq(h.commit(), "UNKNOWN - COMMIT env unset; record it by hand before publishing");
+        assertEq(h.commit(), "UNKNOWN - COMMIT env unset; record it by hand before publishing"); // testnet unchanged
     }
 }

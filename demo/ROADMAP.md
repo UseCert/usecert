@@ -1571,7 +1571,7 @@ Every address differed from the site's.
 **Closed the same day (`b62f316`).** On 4663, `_commit()` in both DeployTestnet and AddMirror
 reverts unless `COMMIT` is a 40-character lowercase hash. The book is written in forge's
 simulation pass, before anything is broadcast, so the whole run is refused. `CommitGuardTest`
-covers unset, malformed and uppercase values, a real hash, and testnet unchanged: 4 of 4 pass.
+covers unset, malformed and uppercase values, a real hash, and testnet unchanged. It was first written as four tests and failed one run in a few, because `vm.setEnv` is process-wide and forge runs tests in parallel threads. It is now one sequential test, and it passed 5 of 5 runs.
 
 **Still open.** The France deploy should commit the book it writes, so the tracked file cannot
 lag the host.
