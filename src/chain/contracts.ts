@@ -2,8 +2,8 @@
 // Regenerate:  forge build && python scripts/gen-frontend-abi.py
 //
 // UseCert - Robinhood Chain (chain 4663)
-// Deployment:   block 26058070
-// Address book: deployments/4663.json, sha256 294350c7444a (first 12)
+// Deployment:   block 26058969
+// Address book: deployments/4663.json, sha256 dd4e2be6f90f (first 12)
 // Deployed at:  unrecorded (address book carries 'UNKNOWN - COMMIT env unset; record it by hand before publishing', which is not a commit hash)
 // Generated at: commit unavailable (not a git checkout)
 //
@@ -32,64 +32,64 @@ export const DECIMALS = {
 
 export const SHARED = {
   collateral: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168' as const,
-  solvencyRegistry: '0x22a4a08c7951a7F8c2ff218d7DC6abbE6195D7F4' as const,
-  capacityOracle: '0x3B9b13FBa877201635aeA0e1f2894fCDDdf73186' as const,
-  certFactory: '0x864Ed1F419C5Dd716aadaA389a17A8620e8B7675' as const,
+  solvencyRegistry: '0xAe6ae0939f2885fC0Ecf8b8af0082fa729a8bbB7' as const,
+  capacityOracle: '0xB6Ce5cD62c62c99c7312c76A4da169C95E5B0d1a' as const,
+  certFactory: '0x08117b198FCCeEC01427B13A4c9df908a3edd71E' as const,
 } as const;
 
 export const MIRRORS = [
   {
     symbol: 'uTSLA' as const,
     marketIndex: 16,
-    vault: '0x6b47000D6904215163bB6318B72F4268045256f0' as const,
-    certificate: '0xd45a902f74e7eFC0F9E7b334839C409c2f8E0e76' as const,
-    certOracle: '0x9730219F7C63d74fD834a020bCB512d8E22Eb01b' as const,
-    bufferBook: '0x10f9caDfD0e47FFf2AA0483d653f82e0CF261fd8' as const,
+    vault: '0x6330B3C6612DBbf5D81A6BafB6319F39D46Df4B0' as const,
+    certificate: '0x6195e1b053E905f0Cb5B6Fb7fE7E71D9191d25d5' as const,
+    certOracle: '0xdb1eF0e62F0954E8dC5dd1Bcc8126FbD30978121' as const,
+    bufferBook: '0xd23F54EA91d6A78CCA95941778Ec7ED14B17dF64' as const,
     replayAggregator: '0x4A1166a659A55625345e9515b32adECea5547C38' as const,
   },
   {
     symbol: 'uSPY' as const,
     marketIndex: 26,
-    vault: '0x006Daf8AF20954a9912e647618e389a3B3F52b3B' as const,
-    certificate: '0x2B2Fc7cE8d8702AA8460581F1e655ef84A469b94' as const,
-    certOracle: '0x12228eEe232F56C2d8174C9a3933f5e494231F18' as const,
-    bufferBook: '0x15057b1E45a4fD9aa81C79da393C56AB82D79887' as const,
+    vault: '0x4C1E083E1c0c726C6305ec684D9218dc83033dcd' as const,
+    certificate: '0x0A9959243E65B9dc4C5B270b95Ce2B14cb0b4c85' as const,
+    certOracle: '0x94e58cBB9920dCBDF676132774fCd5248e455A85' as const,
+    bufferBook: '0x0BF0a43Fdfb07983C00e7ddCA4FaeeC95Bc64422' as const,
     replayAggregator: '0x319724394D3A0e3669269846abE664Cd621f9f6A' as const,
   },
   {
     symbol: 'uQQQ' as const,
     marketIndex: 25,
-    vault: '0xd6D198864C2F55822a935813A103C8B2282DdE52' as const,
-    certificate: '0x8729a5afa6d5Bd060C9A99b4780a3288cfF9d989' as const,
-    certOracle: '0xd20EceEAd50cD6588994026Bba0622C5533Ba0d5' as const,
-    bufferBook: '0x955737d5Fb41C7d2d6558716EF9f9eDd3746b856' as const,
+    vault: '0x09777bfEB5a37cD5F642861fb166e7a9D2A4e615' as const,
+    certificate: '0x1f773C4a8EBB1b32C56B87fcB4Dfdf15B76Dcf7b' as const,
+    certOracle: '0x013Dd75efD3F5485f2939aD5b6a986Fa815fe541' as const,
+    bufferBook: '0x8d7045526e9770CEB057146436aea7DFEB599e86' as const,
     replayAggregator: '0x80901d846d5D7B030F26B480776EE3b29374C2ae' as const,
   },
   {
     symbol: 'uNVDA' as const,
     marketIndex: 15,
-    vault: '0x7a858eb23dF5299aa8e3E4857E4F1D335BE9Ec9B' as const,
-    certificate: '0x38d762a1635e74253DE5e2Eb560C27532E08dEC0' as const,
-    certOracle: '0x3958693aeE338Fb8e331DC85826c09D17a37226f' as const,
-    bufferBook: '0xE1B48D9c82A66A9Cd29a9f599588879157D37C61' as const,
+    vault: '0x2cA05803C37807bdB07075f6dA231C8B998e0bF3' as const,
+    certificate: '0xB0ce8b0e84b5216cf64f9f45B597D013266D0fAf' as const,
+    certOracle: '0x9990de261434F2e7356b3C957f7ED4B9Fb86322F' as const,
+    bufferBook: '0xC61C68a78C3042335f36bC560c1B701e5aF98a1a' as const,
     replayAggregator: '0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15' as const,
   },
   {
     symbol: 'uAAPL' as const,
     marketIndex: 10,
-    vault: '0x2CD8E6fB3a487ACC7610451232609F0154Fd96B9' as const,
-    certificate: '0x564F8F56c9D9DE11476272E602e1E4160417Fd19' as const,
-    certOracle: '0x97d1A0c0a85c4760250279DaAa0Cc13A8612e33a' as const,
-    bufferBook: '0x1100F5382A434DeB24F8830cE4c0Be7b0B1A59e1' as const,
+    vault: '0x1386cdA161593379B820542D347C75b43458f6ed' as const,
+    certificate: '0x8fd48622a79Ef0B5b085A6BA01CB9b342Dc6c37f' as const,
+    certOracle: '0x2172701e2fd9C4c15A3297091Bd04045B015f05f' as const,
+    bufferBook: '0xdaD9aE68Fc466FCF9f53c485E697544EDD1498C0' as const,
     replayAggregator: '0x6B22A786bAa607d76728168703a39Ea9C99f2cD0' as const,
   },
   {
     symbol: 'uMSFT' as const,
     marketIndex: 14,
-    vault: '0xa6f8c0166BbC56730C84d03EF1aFdEba95B5F4b7' as const,
-    certificate: '0x99925c5A3A069DcFd49a4fB93620511C30656223' as const,
-    certOracle: '0x282914106002F44feEDFfEA4780515E40C7F2009' as const,
-    bufferBook: '0xC44445e1A845f710C113d2EA85649F54E76f8f50' as const,
+    vault: '0xD9ccc6edD94779dB28C8743088b70560B728489C' as const,
+    certificate: '0xd44818cb6348e6f42992F695525Ff103075d066B' as const,
+    certOracle: '0x325fc656A411EF1bc2f3621b2d045e2b42CC5450' as const,
+    bufferBook: '0xBF0068E3F2c683595fcb07F35F68F76236CfB23B' as const,
     replayAggregator: '0x45C3C877C15E6BA2EBB19eA114Ea508d14C1Af2E' as const,
   },
 ] as const;
