@@ -115,12 +115,15 @@ export function SolvencyChart({
     const ih = h - PAD.t - PAD.b;
     let min = Infinity;
     let max = -Infinity;
+    // Both series on both bounds: obligation can exceed backing (that is the point of the
+    // chart), and the old min-of-obligation / max-of-backing clipped whichever crossed.
     for (const p of points) {
-      min = Math.min(min, p.obligation);
-      max = Math.max(max, p.backing);
+      min = Math.min(min, p.obligation, p.backing);
+      max = Math.max(max, p.obligation, p.backing);
     }
     const pad = (max - min) * 0.15 || 1;
-    min -= pad;
+    // Dollars never go below zero here, so neither does the axis.
+    min = Math.max(0, min - pad);
     max += pad;
     const X = (i: number) => PAD.l + (i / (points.length - 1)) * iw;
     const Y = (v: number) => PAD.t + ih - ((v - min) / (max - min)) * ih;
@@ -267,7 +270,7 @@ export function FundingChart({ bars, height = 260 }: { bars: FundingBar[]; heigh
   const [hoverHour, setHoverHour] = useState("");
   const { progress, run } = useDrawOn(1000);
 
-  const PAD = { l: 8, r: 8, t: 14, b: 24 };
+  const PAD = { l: 8, r: 76, t: 14, b: 24 };
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -286,9 +289,13 @@ export function FundingChart({ bars, height = 260 }: { bars: FundingBar[]; heigh
 
     const iw = w - PAD.l - PAD.r;
     const ih = h - PAD.t - PAD.b;
-    const maxAbs = Math.max(...bars.map((b) => Math.abs(b.rate))) || 1;
-    const zeroY = PAD.t + ih * 0.62;
-    const scale = (ih * 0.55) / maxAbs;
+    // Fit both signs inside the plot. The old fixed zero at 62% with a 55% reach ran negative
+    // bars through the hour labels, and a series that is all one sign wasted half the height.
+    const up = Math.max(0, ...bars.map((b) => b.rate));
+    const down = Math.max(0, ...bars.map((b) => -b.rate));
+    const range = up + down || 1;
+    const zeroY = PAD.t + ih * 0.04 + ih * 0.92 * (up / range);
+    const scale = (ih * 0.92) / range;
     const slot = iw / bars.length;
     const bw = Math.max(2, slot * 0.55);
 
@@ -302,7 +309,9 @@ export function FundingChart({ bars, height = 260 }: { bars: FundingBar[]; heigh
 
     // bars (staggered grow)
     for (let i = 0; i < bars.length; i++) {
-      const local = Math.max(0, Math.min((progress.current - i * 0.012) / 0.6, 1));
+      // The stagger is spread over 40% of the animation so the LAST bar still reaches full
+      // height by progress 1. A fixed 0.012 per bar left the last ~12 of 48 short, for good.
+      const local = Math.max(0, Math.min((progress.current - (i * 0.4) / bars.length) / 0.6, 1));
       if (local <= 0) continue;
       const b = bars[i];
       const bh = Math.abs(b.rate) * scale * local;
@@ -311,6 +320,14 @@ export function FundingChart({ bars, height = 260 }: { bars: FundingBar[]; heigh
       if (b.rate >= 0) ctx.fillRect(x, zeroY - bh, bw, bh);
       else ctx.fillRect(x, zeroY, bw, bh);
     }
+
+    // The scale, since bar height alone says nothing when every hour is the same rate.
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    ctx.font = "10px 'Geist Mono', monospace";
+    ctx.textAlign = "right";
+    if (up > 0) ctx.fillText(`+${up.toFixed(4)}%/h`, w - 4, PAD.t + 10);
+    if (down > 0) ctx.fillText(`−${down.toFixed(4)}%/h`, w - 4, PAD.t + ih - 2);
+    ctx.fillText("0", w - 4, zeroY + 3);
 
     // x labels (every 12th)
     ctx.fillStyle = "rgba(255,255,255,0.6)";
