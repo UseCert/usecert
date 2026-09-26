@@ -60,6 +60,7 @@ import {
   TestUSDGABI,
   type Mirror,
 } from "./contracts";
+import { FAUCET_ADDRESS, HAS_FAUCET } from "./deployment";
 import {
   BPS_ONE,
   ONE_18,
@@ -1292,9 +1293,15 @@ export function useUserBalances(address: `0x${string}` | undefined): UserBalance
     return [
       call(SHARED.collateral, TestUSDGABI, "balanceOf", [address]),
       ...MIRRORS.map((m) => call(m.certificate, CertificateABI, "balanceOf", [address])),
-      call(SHARED.testFaucet, TestFaucetABI, "nextAvailableAt", [address]),
-      call(SHARED.collateral, TestUSDGABI, "balanceOf", [SHARED.testFaucet]),
-      call(SHARED.testFaucet, TestFaucetABI, "dripAmount"),
+      // The three faucet reads only exist where a faucet does. On mainnet they are omitted
+      // rather than reverting three times per poll against an address that is not there.
+      ...(FAUCET_ADDRESS
+        ? [
+            call(FAUCET_ADDRESS, TestFaucetABI, "nextAvailableAt", [address]),
+            call(SHARED.collateral, TestUSDGABI, "balanceOf", [FAUCET_ADDRESS]),
+            call(FAUCET_ADDRESS, TestFaucetABI, "dripAmount"),
+          ]
+        : []),
     ];
   }, [address]);
 
@@ -1319,9 +1326,10 @@ export function useUserBalances(address: `0x${string}` | undefined): UserBalance
     return {
       collateral: fromCollateral(collateral6),
       certificates,
-      faucetNextAvailableAt: Number(asBigint(results[tail]) ?? 0n),
-      faucetBalance: fromCollateral(asBigint(results[tail + 1]) ?? 0n),
-      faucetDrip: fromCollateral(asBigint(results[tail + 2]) ?? 0n),
+      // Zero without a faucet, which is exactly what the UI already renders for an empty one.
+      faucetNextAvailableAt: HAS_FAUCET ? Number(asBigint(results[tail]) ?? 0n) : 0,
+      faucetBalance: HAS_FAUCET ? fromCollateral(asBigint(results[tail + 1]) ?? 0n) : 0,
+      faucetDrip: HAS_FAUCET ? fromCollateral(asBigint(results[tail + 2]) ?? 0n) : 0,
       raw: { collateral6, certificates18 },
       isLoading: query.isLoading,
       refetch: () => void query.refetch(),

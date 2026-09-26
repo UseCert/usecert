@@ -105,6 +105,7 @@ import {
   type VaultConfigView,
 } from "@/chain/useVaults";
 import { explainChainFailure } from "@/chain/walletSupport";
+import { COLLATERAL_SYMBOL } from "@/chain/deployment";
 import {
   signerCovers,
   useSignerFreshness,
@@ -832,7 +833,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     setWalletModalOpen,
     disconnect,
     usdc: connected ? balances.collateral : null,
-    collateralSymbol: "tUSDG",
+    // Derived from the chain, so it becomes USDG on mainnet without an edit here.
+    collateralSymbol: COLLATERAL_SYMBOL,
     positions,
     faucet,
     refetchBalances: balances.refetch,

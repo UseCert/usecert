@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Link } from "@/lib/router-compat";
+import { VALUE_DISCLOSURE } from "@/chain/deployment";
 import { cn } from "@/lib/utils";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
@@ -236,12 +237,14 @@ export default function RoadmapPage() {
         {/* The disclosure a reader needs before anything below means what it appears to mean.
             It stays above the pager rather than living on page one, because a paged view is
             one a reader can arrive in the middle of. */}
-        <p className="mt-8 max-w-[62ch] text-[16px] leading-[1.55] text-silver">
-          UseCert runs on Robinhood Chain <strong className="text-white">testnet</strong>. Nothing
-          here holds real-world value, the collateral is a test token, and the perp venue is a
-          simulator this project runs — so every margin and position figure describes a simulated
-          position, not a market.
-        </p>
+        {/* Derived, not typed. On mainnet VALUE_DISCLOSURE is empty and this renders nothing,
+            because the sentence would be false there and a disclosure that is false is worse
+            than none. */}
+        {VALUE_DISCLOSURE && (
+          <p className="mt-8 max-w-[62ch] text-[16px] leading-[1.55] text-silver">
+            {VALUE_DISCLOSURE}
+          </p>
+        )}
         <p className="mt-4 max-w-[62ch] text-[16px] leading-[1.55] text-silver">
           There are no dates on this page. The work below is sized internally in hours and days,
           and publishing that as a calendar would be inventing a confidence nobody has.
