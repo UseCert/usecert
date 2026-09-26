@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import {ISolvencyRegistry} from "./interfaces/ISolvencyRegistry.sol";
+import {ECDSA} from "openzeppelin-contracts/utils/cryptography/ECDSA.sol";
 
 /// @notice Per-batch attested backing for each vault's Lighter account.
 /// @dev C1 (route A): a single attester posts figures reconstructed from Lighter's on-chain
@@ -12,6 +13,13 @@ import {ISolvencyRegistry} from "./interfaces/ISolvencyRegistry.sol";
 contract SolvencyRegistry is ISolvencyRegistry {
     error SolvencyRegistry_OnlyAttester();
     error SolvencyRegistry_StaleBatch();
+    /// @dev The signed-attestation path. Each of these exists because the signature moves WHO pays
+    ///      gas from the attester to the minter, and with it the assumption that observation and
+    ///      settlement happen in the same instant. See attestSigned.
+    error SolvencyRegistry_SignatureExpired();
+    error SolvencyRegistry_BadSignature();
+    error SolvencyRegistry_ObservationInFuture();
+    error SolvencyRegistry_ObservationWentBackwards();
     /// @dev M-5: only the rotation authority bound at deploy may propose a new attester.
     error SolvencyRegistry_OnlyGovernance();
     /// @dev L-3, and M-5's own hard floor: an attester of address(0) is unrecoverable, since
@@ -90,6 +98,46 @@ contract SolvencyRegistry is ISolvencyRegistry {
 
     mapping(address => Attestation) private _latest;
 
+    /// @dev EIP-712 domain, built here rather than inherited from OpenZeppelin's EIP712. That base
+    ///      reaches ShortStrings, which compiles to `mcopy` — a Cancun opcode — and this project
+    ///      targets `shanghai`. Raising evm_version to pull in one helper would change the
+    ///      compilation target of every audited contract in src/, which is not a trade worth making
+    ///      for a domain separator that is ten lines of standard, unchanging code.
+    bytes32 private constant _DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 private constant _NAME_HASH = keccak256("UseCert SolvencyRegistry");
+    bytes32 private constant _VERSION_HASH = keccak256("1");
+
+    /// @notice The EIP-712 domain separator for this contract on this chain.
+    /// @dev Computed per call rather than cached at construction. Caching is the usual gas
+    ///      optimisation and it is wrong here: a cached separator keeps the chainId of the chain the
+    ///      contract was DEPLOYED on, so after a fork every signature stays valid on both sides.
+    ///      Recomputing costs a few hundred gas and makes a signature belong to exactly one chain.
+    function domainSeparator() public view returns (bytes32) {
+        return keccak256(abi.encode(_DOMAIN_TYPEHASH, _NAME_HASH, _VERSION_HASH, block.chainid, address(this)));
+    }
+
+    function _hashTypedData(bytes32 structHash) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked("\x19\x01", domainSeparator(), structHash));
+    }
+
+    /// @notice EIP-712 type of a signed attestation. `observedAt` is part of the signed payload
+    ///         precisely so it cannot be chosen by whoever relays it.
+    bytes32 public constant ATTEST_TYPEHASH = keccak256(
+        "Attest(address asset,uint64 batchId,uint256 notional18,uint256 margin18,uint256 openInterest18,uint64 observedAt,uint64 deadline)"
+    );
+
+    /// @notice The longest a signature may remain usable. Immutable and short by construction.
+    /// @dev This is the whole defence against a relayer HOLDING a signature. The attestation's own
+    ///      age is honest either way (see attestSigned), so a held signature cannot lie about
+    ///      freshness — but it can still be used to burn a batchId with stale figures and briefly
+    ///      push capacity to zero. Bounding the window to a minute bounds that grief to a minute,
+    ///      after which the signature is simply dead and the next one supersedes it.
+    uint256 public constant SIGNATURE_VALIDITY = 60;
+
+    // The constructor ARITY is frozen (see `governance`) - test/AttackSuite.t.sol depends on
+    // `constructor(address _attester)` verbatim and must not be edited. An EIP-712 base constructor
+    // adds no parameter, so the signature is unchanged.
     constructor(address _attester) {
         // L-3: no constructor in src/ validated its dependencies, so a mistyped address deployed
         // silently and failed later at an arbitrary call site.
@@ -141,6 +189,83 @@ contract SolvencyRegistry is ISolvencyRegistry {
             openInterest18: openInterest18,
             batchId: batchId,
             attestedAt: uint64(block.timestamp)
+        });
+
+        emit Attested(asset, batchId, notional18, margin18, openInterest18);
+    }
+
+    /// @notice Post an attestation the attester SIGNED rather than SENT. Anyone may relay it, and
+    ///         the relayer pays the gas.
+    /// @dev WHY THIS EXISTS. attest() requires the attester to be msg.sender, so the attester paid
+    ///      for every write — and because capacity goes to zero once ageSec passes
+    ///      CapacityOracle.maxAttestationAgeSec, it had to keep writing on a timer whether or not
+    ///      anyone was minting. That is a standing gas cost for an idle protocol. Here the attester
+    ///      signs off-chain and the minter submits the signature inside their own transaction, so
+    ///      an idle protocol costs nothing and the person who wants the mint pays for it.
+    ///
+    /// @dev THE TIMESTAMP IS THE WHOLE DESIGN, so it is worth being explicit about what changed.
+    ///      attest() stores block.timestamp, which is honest ONLY because the attester broadcasts
+    ///      the instant it observes. Once a signature can sit in someone's pocket, observation and
+    ///      settlement are no longer the same moment: signing at T0 and relaying at T1 would stamp
+    ///      data that is (T1 - T0) old with a timestamp of T1. ageSec would then report seconds
+    ///      where the truth is minutes, and the capacity gate would admit mints against figures it
+    ///      believes are fresh. That is C-2's shape exactly — a bound that looks like it binds and
+    ///      does not — so `observedAt` is part of the SIGNED payload and is what gets stored. The
+    ///      relayer cannot choose it, and ageSec keeps measuring the age of the DATA rather than
+    ///      the age of the transaction.
+    ///
+    /// @dev Three guards follow from that, and each is load-bearing:
+    ///      - `observedAt` in the FUTURE is rejected. Not defence in depth: ageSec computes
+    ///        `block.timestamp - attestedAt` under checked arithmetic, so a future timestamp makes
+    ///        ageSec REVERT, and every consumer of capacity reverts with it. This is the same
+    ///        failure C-1 found on the feed timestamp.
+    ///      - `observedAt` going BACKWARDS is rejected. Storing an older observation than the one
+    ///        already held would move the recorded age up rather than down, which is a free way to
+    ///        push capacity to zero using a signature the attester really did issue.
+    ///      - `deadline` is capped at SIGNATURE_VALIDITY from the observation, not merely honoured
+    ///        as given, so a signer cannot mint a long-lived credential by mistake or otherwise.
+    ///
+    /// @dev Replay is already handled and needs nothing new: `asset` is inside the digest so a
+    ///      signature cannot be moved between vaults; EIP-712's domain separator binds chainId and
+    ///      this contract so it cannot be moved between deployments or chains; and batchId must
+    ///      strictly increase, so a signature dies the moment a later one lands. Recovery is
+    ///      checked against the CURRENT attester, so a rotated-out key's signatures stop working
+    ///      the instant acceptAttester() runs — rotation keeps the meaning M-5 gave it.
+    function attestSigned(
+        address asset,
+        uint64 batchId,
+        uint256 notional18,
+        uint256 margin18,
+        uint256 openInterest18,
+        uint64 observedAt,
+        uint64 deadline,
+        bytes calldata signature
+    ) external {
+        if (block.timestamp > deadline) revert SolvencyRegistry_SignatureExpired();
+        if (deadline > uint256(observedAt) + SIGNATURE_VALIDITY) revert SolvencyRegistry_SignatureExpired();
+        if (observedAt > block.timestamp) revert SolvencyRegistry_ObservationInFuture();
+        if (observedAt < _latest[asset].attestedAt) revert SolvencyRegistry_ObservationWentBackwards();
+        if (batchId <= _latest[asset].batchId) revert SolvencyRegistry_StaleBatch();
+
+        bytes32 digest = _hashTypedData(
+            keccak256(
+                abi.encode(
+                    ATTEST_TYPEHASH, asset, batchId, notional18, margin18, openInterest18, observedAt, deadline
+                )
+            )
+        );
+        // ECDSA.recover rejects a malleable `s` and a zero recovery, so a forged signature cannot
+        // resolve to address(0) and match an uninitialised attester — which the constructor's
+        // zero-address check already makes unreachable, and this makes unreachable twice.
+        if (ECDSA.recover(digest, signature) != attester) revert SolvencyRegistry_BadSignature();
+
+        _latest[asset] = Attestation({
+            notional18: notional18,
+            margin18: margin18,
+            openInterest18: openInterest18,
+            batchId: batchId,
+            // The observation time, NOT block.timestamp. See the timestamp note above.
+            attestedAt: observedAt
         });
 
         emit Attested(asset, batchId, notional18, margin18, openInterest18);
