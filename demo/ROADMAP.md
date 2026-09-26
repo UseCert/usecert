@@ -1454,6 +1454,73 @@ the work was done. The originals keep the true dates.
 Commit: `c050b3a`.
 
 
+### 6.18 A health check that watches mainnet — ✅ 2026-09-26 (`e04baec`)
+
+The only chain health script read testnet from Montréal. Nothing watched the mainnet signer or
+the six keepers on France.
+
+`usecert-health-mainnet` runs on France every 5 minutes, plus a daily summary at 07:00 UTC. It
+checks only what stops a mint or a redemption:
+
+* **Signer.** 127.0.0.1:8787 answers HEAD 200.
+* **Units.** The signer and all six stack-4 keepers are active.
+* **Scan lag.** Each keeper's scan is within 3,000 blocks of the head.
+* **Receipts.** No receipt is waiting on a human, and none is stuck placing after 15 minutes.
+* **Gas.** The attester and the deployer each hold at least 0.002 ETH.
+* **Site.** The site returns 200.
+
+It alerts when the set of problems changes, not on every run, and backs off on the shared RPC's
+429s. The first run failed on one of those, which is why the backoff exists.
+
+**Verified by breaking it.** A missing signer, a unit that does not exist, a lagging journal, a
+stuck receipt, an unsettled receipt and low gas were each reported. On the live host it says
+all clear.
+
+**Open.** Alerts go to the journal only until `/etc/usecert/telegram.env` holds a bot token and
+chat id. The attester holds 0.0047 ETH and the deployer 0.0034 ETH, both close to the 0.002
+floor.
+
+### 6.19 Unfilled mints refunded automatically — ✅ 2026-09-26 (`b1312f1`)
+
+**Before.** If a keeper-mode mint's hedge filled zero on the venue, the receipt sat in escrow.
+The holder had to find `stageRefund` and `refundMint` and call them.
+
+**Now.** Both functions are permissionless, and `refundMint` pays `r.user`, never the caller.
+The keeper therefore runs them itself once `settleWindow` has passed.
+
+* If the vault is short of cash, the keeper first recalls the posted share with
+  `recallMarginUpTo`. The amount is capped at both the venue balance and the shortfall.
+* Only receipts the keeper itself saw fill **zero** are touched. Partial or unconfirmed fills stay
+  flagged for a human, because refunding one would leave a hedge open with nothing behind it.
+* A revert is logged and retried. It never crashes the keeper's pass.
+
+**Tested.** Nine cases run against a stubbed chain and venue in
+`deploy/tests/test_keeper_refund.py`, since anvil cannot run the venue's Stylus code:
+
+* the window still open;
+* stage, then refund;
+* a cash shortfall;
+* recall capped by the venue;
+* already settled;
+* both reverts;
+* retry spacing;
+* a partial fill left untouched.
+
+**Rolled out one first.** uTSLA was restarted first, then the other five. All six are active on
+the new code.
+
+### 6.20 Chinese: dates and hydration — ✅ 2026-09-26 (front end `f0dd1a5`, `95c1ce6`)
+
+* **Stray comma.** The number pattern swallowed a trailing comma, so dates read "9月26,日". A
+  comma now counts only as a thousands separator, and 13 templates were re-keyed to match. The
+  home page reads 9月26日.
+* **Hydration error.** React error #418 appeared on five Chinese pages. The first translation pass
+  ran about 170 ms before React had hydrated route chunks that arrive after the load event. It now
+  waits until 400 ms pass with no new script, then for an idle callback, capped at 4 s. All seven
+  pages probed are clean in both languages.
+* **Missing strings.** The five strings the coverage crawl found were added: the idle-attestation
+  copy, relative times, and the insufficient-balance message.
+
 ---
 
 ## Keeping the public page in sync
