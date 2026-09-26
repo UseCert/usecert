@@ -33,26 +33,19 @@ awk -F'|' -v cut=$((NOW-604800)) '$1>=cut' "$HIST" > "${HIST}.tmp" && mv "${HIST
 
 # services
 SVC=""
-for s in usecert-keeper usecert-web rwa-web nginx postfix dovecot rspamd postgresql docker netdata fail2ban; do
+# usecert-keeper and usecert-web left this list on 2026-09-26: UseCert runs on the France host
+# now (its own health check, usecert-health-mainnet, watches it) and the Montreal copies are
+# disabled. Listed here they would read "inactive" - a red row for a service that moved.
+for s in rwa-web nginx postfix dovecot rspamd postgresql docker netdata fail2ban; do
   a=$(systemctl is-active "$s" 2>/dev/null)
   SVC="${SVC}${SVC:+,}{\"name\":\"$s\",\"state\":\"$a\"}"
 done
 
-# chain: attestation ages
+# chain: nothing here any more. This read testnet (46630) attestation ages from the Montreal
+# checkout - six RPC calls a minute for a network UseCert no longer runs. Mainnet chain health
+# is watched on the France host by usecert-health-mainnet. CHAIN stays, empty, so the page's
+# JSON shape does not change.
 CHAIN=""
-BOOK=/opt/usecert/deployments/46630.json
-if [ -r "$BOOK" ]; then
-  export PATH="/home/usecert/.foundry/bin:$PATH"
-  REG=$(python3 -c "import json;print(json.load(open('$BOOK'))['shared']['solvencyRegistry'])" 2>/dev/null)
-  while read -r SYM V; do
-    [ -z "$V" ] && continue
-    A=$(timeout 15 cast call "$REG" 'ageSec(address)(uint256)' "$V" --rpc-url https://rpc.testnet.chain.robinhood.com </dev/null 2>/dev/null | awk '{print $1}')
-    CHAIN="${CHAIN}${CHAIN:+,}{\"symbol\":\"$SYM\",\"ageSec\":${A:-null}}"
-  done < <(python3 -c "
-import json
-d=json.load(open('$BOOK'))
-[print(v['symbol'], v['vault']) for v in d['vaults']]" 2>/dev/null)
-fi
 
 # availability percentages from history
 AVAIL=$(awk -F'|' '{tot[$2]++; up[$2]+=$3} END{s=""; for(k in tot){p=100*up[k]/tot[k]; s=s (s?",":"") "{\"name\":\"" k "\",\"pct\":" sprintf("%.3f",p) ",\"samples\":" tot[k] "}"} print s}' "$HIST")
