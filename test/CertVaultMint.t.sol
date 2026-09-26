@@ -29,7 +29,12 @@ contract CertVaultMintTest is VaultFixture {
         assertEq(mkt, MARKET);
         assertEq(isAsk, 0); // buying
         assertEq(orderType, 1); // MarketOrder
-        assertEq(price, 35586);
+        // The oracle tick is 35586. A buy is sent at the oracle price plus HEDGE_PRICE_BAND_BPS
+        // (1%), because a market order's price is its WORST acceptable fill and a buy capped at
+        // the oracle never fills when the venue's ask sits above it - measured on mainnet, where
+        // every such buy was killed. 35586 * 1.01 = 35941.86, floored to the tick.
+        assertEq(price, 35941);
+        assertGt(price, 35586, "a hedge buy must be allowed to pay above the oracle price");
     }
 
     function test_mintPausedWhenOracleUnhealthy() public {
