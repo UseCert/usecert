@@ -25,8 +25,94 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BOOK_PATH = os.path.join(ROOT, "deployments", "46630.json")
-OUT_PATH = os.path.join(ROOT, "frontend", "usecert-contracts.ts")
+
+# Which deployment to generate for. Defaults to the testnet, so every existing invocation
+# behaves exactly as before; `--chain 4663` emits the mainnet bundle instead.
+#
+# The chain is a PARAMETER rather than a constant because there are now two address books
+# and only one of them describes a deployment that exists. Hardcoding either is how a
+# mainnet bundle gets generated from testnet addresses, or the reverse.
+# RPC and explorer live HERE rather than in the address books: they are facts about the
+# chain, not about a deployment, and the books are written by the deploy scripts and must
+# never be hand-edited.
+CHAINS = {
+    "46630": {
+        "book": "46630.json",
+        "out": "usecert-contracts.ts",
+        "label": "Robinhood Chain Testnet",
+        "rpc": "https://rpc.testnet.chain.robinhood.com",
+        "explorer": "https://explorer.testnet.chain.robinhood.com",
+        "testnet": True,
+    },
+    # The mainnet book does NOT exist yet, and that is correct. Deploy scripts write
+    # deployments/<chainId>.json; until script/DeployMainnet.s.sol has run there is nothing
+    # to read. The measured inputs for that run - real USDG, the real venue proxy, the real
+    # market indices and the mainnet parameters - live in deploy/mainnet/4663.plan.json,
+    # which is hand-maintained on purpose because it describes a deployment that has not
+    # happened. The two must never be confused: a plan is not a record.
+    "4663": {
+        "book": "4663.json",
+        "out": "usecert-contracts.mainnet.ts",
+        "label": "Robinhood Chain",
+        "rpc": "https://rpc.mainnet.chain.robinhood.com",
+        "explorer": "https://explorer.chain.robinhood.com",
+        "testnet": False,
+    },
+}
+
+CHAIN = "46630"
+if "--chain" in sys.argv:
+    CHAIN = sys.argv[sys.argv.index("--chain") + 1]
+if CHAIN not in CHAINS:
+    sys.exit("unknown --chain %r; known: %s" % (CHAIN, ", ".join(CHAINS)))
+
+CHAIN_LABEL = CHAINS[CHAIN]["label"]
+BOOK_PATH = os.path.join(ROOT, "deployments", CHAINS[CHAIN]["book"])
+OUT_PATH = os.path.join(ROOT, "frontend", CHAINS[CHAIN]["out"])
+
+# Addresses without which the front end cannot function. `testFaucet` and `lighterSim` are
+# deliberately absent: both are testnet-only, and requiring them would block mainnet.
+REQUIRED_SHARED = ("collateral", "solvencyRegistry", "capacityOracle")
+REQUIRED_VAULT = ("vault", "certificate", "certOracle", "bufferBook")
+
+
+def assert_book_exists():
+    """A missing book is not an error to stack-trace over; it is the normal state of a
+    chain nobody has deployed to yet. Say which file would answer it."""
+    if os.path.exists(BOOK_PATH):
+        return
+    hint = ""
+    if CHAIN == "4663":
+        hint = (
+            " The measured inputs for that deployment - real USDG, the venue proxy, the"
+            " real market indices and mainnet parameters - are in"
+            " deploy/mainnet/4663.plan.json."
+        )
+    sys.exit(
+        "no address book at " + BOOK_PATH + " - nothing has been deployed to chain "
+        + CHAIN + " yet." + hint
+    )
+
+
+def assert_deployed(book):
+    """Refuse to emit a bundle with holes in it.
+
+    A null address means that contract is not deployed. Writing it out anyway produces a
+    module that typechecks, builds, ships, and points a live UI at nothing. The mainnet
+    book starts with every protocol address null on purpose, so this check is what makes
+    that safe to keep in the repository.
+    """
+    missing = [k for k in REQUIRED_SHARED if not book.get("shared", {}).get(k)]
+    for v in book.get("vaults", []):
+        missing += ["%s.%s" % (v.get("symbol"), k) for k in REQUIRED_VAULT if not v.get(k)]
+    if missing:
+        sys.exit(
+            "refusing to generate for chain " + CHAIN + ": " + str(len(missing))
+            + " address(es) are null in " + os.path.basename(BOOK_PATH) + "\n  "
+            + ("\n  ".join(missing))
+            + "\nDeploy first and let the deploy script write them."
+            + " Do not hand-edit the book."
+        )
 
 # The front-end surface, per contract. Anything not listed is deliberately withheld: a UI that
 # can call it either does not need it (operator knobs) or should reach it through another
@@ -177,9 +263,9 @@ def book_digest(path):
 HEADER = """// GENERATED from Foundry artifacts - do not hand-edit.
 // Regenerate:  forge build && python scripts/gen-frontend-abi.py
 //
-// UseCert - Robinhood Chain testnet (chain 46630)
+// UseCert - {label} (chain {chain})
 // Deployment:   block {block}
-// Address book: deployments/46630.json, sha256 {book} (first 12)
+// Address book: deployments/{bookfile}, sha256 {book} (first 12)
 // Deployed at:  {deployed}
 // Generated at: commit {generated}
 //
@@ -188,12 +274,12 @@ HEADER = """// GENERATED from Foundry artifacts - do not hand-edit.
 // NOT enumerable on-chain and the receipts screen can only be built from logs.
 
 export const CHAIN = {{
-  id: 46630,
-  name: 'Robinhood Chain Testnet',
+  id: {chain},
+  name: '{label}',
   nativeCurrency: {{ name: 'Ether', symbol: 'ETH', decimals: 18 }},
-  rpcUrls: {{ default: {{ http: ['https://rpc.testnet.chain.robinhood.com'] }} }},
-  blockExplorers: {{ default: {{ name: 'Blockscout', url: 'https://explorer.testnet.chain.robinhood.com' }} }},
-  testnet: true,
+  rpcUrls: {{ default: {{ http: ['{rpc}'] }} }},
+  blockExplorers: {{ default: {{ name: 'Blockscout', url: '{explorer}' }} }},
+  testnet: {is_testnet},
 }} as const;
 
 /** Decimals differ per value class. Getting this wrong is the single largest hidden cost. */
@@ -209,8 +295,7 @@ export const DECIMALS = {{
 
 
 def main():
-    if not os.path.exists(BOOK_PATH):
-        sys.exit("no address book at %s - deploy first" % BOOK_PATH)
+    assert_book_exists()
     book = json.load(open(BOOK_PATH))
 
     abis = {}
@@ -227,13 +312,20 @@ def main():
     out = io.StringIO()
     out.write(
         HEADER.format(
+            label=CHAIN_LABEL,
+            chain=CHAIN,
+            rpc=CHAINS[CHAIN]["rpc"],
+            explorer=CHAINS[CHAIN]["explorer"],
+            is_testnet="true" if CHAINS[CHAIN]["testnet"] else "false",
             block=book.get("blockNumber"),
+            bookfile=os.path.basename(BOOK_PATH),
             book=book_digest(BOOK_PATH),
             deployed=deployed_at_commit(book),
             generated=generated_at_commit(),
         )
     )
 
+    assert_deployed(book)
     shared = book["shared"]
     out.write("export const SHARED = {\n")
     for key in (
