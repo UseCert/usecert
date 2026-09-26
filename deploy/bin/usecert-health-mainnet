@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Mainnet health for the France host: the things that stop a mint or a redemption, and nothing else.
+
+    usecert-health-mainnet            check, alert on a change of state, exit 1 while anything is wrong
+    usecert-health-mainnet --summary  also send the full state even when nothing changed (daily timer)
+
+WHAT IS CHECKED, and why each one matters to a holder:
+  signer     127.0.0.1:8787/attestations answers HEAD 200. If it stops, no mint can open capacity.
+  units      the signer and every stack-4 keeper are active. A dead keeper leaves mints in escrow.
+  progress   each keeper's scan is within LAG_BLOCKS of the head. A stuck scanner is a dead keeper
+             that systemd still calls "active".
+  receipts   no receipt in a keeper journal sits in a state that needs a human
+             (*_needs_human, order_refused), and none is still "placing"/"placed" after STUCK_SEC.
+  gas        the attester (which sends settleMint and recallMarginUpTo) and the deployer hold at
+             least MIN_ETH. Out of gas, the keeper fills on the venue and cannot settle on chain.
+  site       https://use-cert.com/ returns 200.
+
+What is NOT checked: attestation age. Between mints it is stale and capacity reads zero BY DESIGN
+(the signer signs, the minter relays); alerting on it describes correct behaviour.
+
+Alerts go to Telegram when /etc/usecert/telegram.env sets TG_TOKEN and TG_CHAT, otherwise to the
+journal only. An alert is sent when the set of problems CHANGES (new problem, or all clear), not
+every run, so a standing fault does not turn into noise nobody reads.
+"""
+import glob
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+
+RPC = "https://rpc.mainnet.chain.robinhood.com"
+SIGNER = "http://127.0.0.1:8787/attestations"
+SITE = "https://use-cert.com/"
+BOOK = "/opt/keeper/book-stack4.json"
+STATE_GLOB = "/opt/keeper/state-s4-*.json"
+UNITS = ["usecert-signer-mainnet"] + ["usecert-keeper@s4-%s" % s for s in ("uTSLA", "uSPY", "uQQQ", "uNVDA", "uAAPL", "uMSFT")]
+LAG_BLOCKS = 3000        # the keepers poll every few seconds; this is minutes of silence, not jitter
+STUCK_SEC = 900          # a hedge normally fills in under a minute; fill_timeout_sec is 180
+MIN_ETH = 0.002
+MEMO = "/var/lib/usecert-health/mainnet.json"
+UA = {"User-Agent": "usecert-health/1.0", "Content-Type": "application/json"}
+
+
+def rpc(method, params):
+    # The six keepers share this public RPC and it answers 429 under load. Back off rather than
+    # report the rate limit as a fault; only a failure that survives the retries is one.
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(RPC, body, UA), timeout=20) as r:
+                out = json.load(r)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 502, 503, 504) or attempt == 4:
+                raise
+            time.sleep(2 * 2 ** attempt)
+    if "error" in out:
+        raise RuntimeError(out["error"])
+    return out["result"]
+
+
+def status_of(url, method="GET"):
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, method=method, headers={"User-Agent": UA["User-Agent"]}), timeout=15) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception as e:
+        return "unreachable (%s)" % type(e).__name__
+
+
+def checks():
+    P = []
+    s = status_of(SIGNER, "HEAD")
+    if s != 200:
+        P.append("signer: HEAD %s -> %s (no in-date signatures: mints cannot open capacity)" % (SIGNER, s))
+
+    for u in UNITS:
+        st = subprocess.run(["systemctl", "is-active", u], capture_output=True, text=True).stdout.strip()
+        if st != "active":
+            P.append("unit %s is %s" % (u, st or "unknown"))
+
+    try:
+        head = int(rpc("eth_blockNumber", []), 16)
+    except Exception as e:
+        head = None
+        P.append("rpc: eth_blockNumber failed (%s)" % str(e)[:80])
+
+    now = time.time()
+    states = sorted(glob.glob(STATE_GLOB))
+    if len(states) != 6:
+        P.append("keeper journals: found %d of 6 (%s)" % (len(states), STATE_GLOB))
+    for f in states:
+        sym = os.path.basename(f)[len("state-s4-"):-len(".json")]
+        try:
+            st = json.load(open(f))
+        except Exception as e:
+            P.append("%s: journal unreadable (%s)" % (sym, type(e).__name__))
+            continue
+        if head is not None and head - int(st.get("next_block", 0)) > LAG_BLOCKS:
+            P.append("%s: keeper scan is %d blocks behind the head" % (sym, head - int(st["next_block"])))
+        for rid, rec in st.get("receipts", {}).items():
+            status = rec.get("status", "?")
+            age = now - float(rec.get("at", now))
+            if status.endswith("_needs_human") or status == "order_refused":
+                P.append("%s receipt %s: %s" % (sym, rid, status))
+            elif status in ("placing", "placed") and age > STUCK_SEC:
+                P.append("%s receipt %s: still '%s' after %d min" % (sym, rid, status, age // 60))
+
+    try:
+        senders = json.load(open(BOOK))["senders"]
+        for name in ("attester", "deployer"):
+            wei = int(rpc("eth_getBalance", [senders[name], "latest"]), 16)
+            if wei < MIN_ETH * 1e18:
+                P.append("gas: %s %s holds %.5f ETH (< %s)" % (name, senders[name], wei / 1e18, MIN_ETH))
+    except Exception as e:
+        P.append("gas: balances unreadable (%s)" % str(e)[:80])
+
+    s = status_of(SITE)
+    if s != 200:
+        P.append("site: %s -> %s" % (SITE, s))
+    return P
+
+
+def env():
+    try:
+        return dict(l.strip().split("=", 1) for l in open("/etc/usecert/telegram.env") if "=" in l and not l.startswith("#"))
+    except OSError:
+        return {}
+
+
+def notify(text):
+    print(text)
+    e = env()
+    tok, chat = e.get("TG_TOKEN", "").strip('"'), e.get("TG_CHAT", "").strip('"')
+    if not tok or not chat:
+        return
+    body = json.dumps({"chat_id": chat, "text": text, "disable_web_page_preview": True}).encode()
+    try:
+        urllib.request.urlopen(urllib.request.Request("https://api.telegram.org/bot%s/sendMessage" % tok, body,
+                                                      {"Content-Type": "application/json"}), timeout=20)
+    except Exception as ex:
+        print("telegram send failed: %s" % type(ex).__name__)
+
+
+def main():
+    host = os.uname().nodename
+    P = checks()
+    try:
+        before = json.load(open(MEMO))["problems"]
+    except (OSError, ValueError, KeyError):
+        before = None
+    os.makedirs(os.path.dirname(MEMO), exist_ok=True)
+    json.dump({"at": int(time.time()), "problems": P}, open(MEMO, "w"), indent=1)
+
+    if P and P != before:
+        notify("UseCert mainnet [%s]: %d problem(s)\n- %s" % (host, len(P), "\n- ".join(P)))
+    elif not P and before:
+        notify("UseCert mainnet [%s]: all clear (signer, 6 keepers, journals, gas, site)" % host)
+    elif "--summary" in sys.argv:
+        notify("UseCert mainnet [%s] daily: %s" % (host, "OK - signer, 6 keepers, journals, gas, site" if not P else "- " + "\n- ".join(P)))
+    else:
+        print("ok" if not P else "unchanged: %d problem(s)" % len(P))
+    sys.exit(1 if P else 0)
+
+
+if __name__ == "__main__":
+    main()
