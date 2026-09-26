@@ -60,7 +60,7 @@ export function useLang(): Lang {
 const EXACT = (ZH as { exact: Record<string, string> }).exact;
 const TPL = (ZH as { tpl: Record<string, string> }).tpl;
 /** Values that are never translated: hex addresses (full or shortened) and numbers. */
-const VALUE = /0x[0-9a-fA-F]{4,}(?:…[0-9a-fA-F]+)?|\d[\d,]*(?:\.\d+)?/g;
+const VALUE = /0x[0-9a-fA-F]{4,}(?:…[0-9a-fA-F]+)?|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g;
 
 /** The Chinese for one English string, or null. Whitespace is normalised for the lookup. */
 export function translate(src: string): string | null {
@@ -158,8 +158,11 @@ export function I18nRuntime() {
   const lang = useLang();
   useEffect(() => {
     document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
-    document.documentElement.removeAttribute("data-i18n-pending");
-    if (lang !== "zh") return;
+    const release = () => document.documentElement.removeAttribute("data-i18n-pending");
+    if (lang !== "zh") {
+      release();
+      return;
+    }
     let queued = new Set<Node>();
     let raf = 0;
     const flush = () => {
@@ -170,8 +173,6 @@ export function I18nRuntime() {
       const tt = translate(document.title);
       if (tt) document.title = tt;
     };
-    pass(document.body);
-    flush();
     const mo = new MutationObserver((ms) => {
       for (const m of ms) {
         if (m.type === "characterData") queued.add(m.target);
@@ -180,8 +181,29 @@ export function I18nRuntime() {
       }
       if (!raf) raf = requestAnimationFrame(flush);
     });
-    mo.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: [...ATTRS] });
+    // Route chunks hydrate after this effect runs. Rewriting their text before React has
+    // hydrated them is a hydration mismatch (#418), so the first pass waits for the page to
+    // finish loading and for React to commit what it loaded; the paint is held until then.
+    let started = false;
+    let dead = false;
+    const start = () => {
+      if (started) return;
+      started = true;
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          if (dead) return;
+          pass(document.body);
+          flush();
+          mo.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: [...ATTRS] });
+          release();
+        }),
+      );
+    };
+    if (document.readyState === "complete") start();
+    else window.addEventListener("load", start, { once: true });
     return () => {
+      started = dead = true;
+      window.removeEventListener("load", start);
       mo.disconnect();
       if (raf) cancelAnimationFrame(raf);
     };

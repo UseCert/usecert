@@ -873,7 +873,14 @@
   "Deposit USDG and it is held in escrow while the hedge is opened on the venue; uAAPL is issued to your wallet at the fill price once the venue confirms it, usually within a minute. Burn uAAPL and the vault closes that hedge on chain in the same transaction; the USDG comes back from the venue within minutes and you claim it. The vault's solvency math is proven on-chain at every attestation and published with the age of that proof, so none of this requires trusting us.": "存入 USDG 后，在交易场所开立对冲期间资金处于托管状态；交易场所确认成交后，uAAPL 按成交价格发行到你的钱包，通常在一分钟内完成。销毁 uAAPL，金库会在同一笔交易中于链上平掉该对冲；USDG 会在数分钟内从交易场所返还，然后由你领取。金库的偿付能力计算在每次证明时都于链上验证，并与该证明的时效一起公布，因此这一切都不需要信任我们。",
   "No. Certificates are synthetic: price exposure backed by perp positions and USDG margin on Robinhood Chain, not custody of shares. There are no dividends and no shareholder rights. What you get is the stock’s price, holdable as a plain token, redeemable any time: the vault closes its hedge on chain at once, and the collateral comes back from the venue within minutes, paid by claim.": "不是。凭证是合成资产：由 Robinhood Chain 上的永续合约头寸和 USDG 保证金支撑的价格敞口，而非托管的股票。没有股息，也没有股东权利。你得到的是股票的价格，以普通代币的形式持有，随时可以赎回：金库会立即在链上平掉对冲，抵押品在数分钟内从交易场所返还，并通过领取支付。",
   "Mint certificates and hold them. That is the whole job. Your uTSLA sits in your wallet, tracks the stock 24/7, and redeems to USDG whenever you want out: the hedge closes on chain at once and the collateral comes back from the venue within minutes, paid by claim. No funding tabs, no liquidation price, nothing to manage.": "铸造凭证并持有，这就是全部工作。你的 uTSLA 待在你的钱包里，全天候跟踪股票，想退出时随时赎回为 USDG：对冲会立即在链上平仓，抵押品在数分钟内从交易场所返还，并通过领取支付。没有资金费率账单，没有强平价格，无需任何管理。",
-  "After a queued redemption the receipt id is filled in here from that transaction. Receipt ids are not enumerable on-chain and there is no receiptsOf(user), so an older one comes from your RedeemRequested / ForceExited event until an indexer exists. A receipt that is awaiting settlement is never failed — it stays claimable, and recallMargin is permissionless.": "排队赎回后，回执编号会根据那笔交易自动填入此处。回执编号无法在链上枚举，也没有 receiptsOf(user)，因此在索引器出现之前，较早的编号只能来自你的 RedeemRequested / ForceExited 事件。等待结算的回执永远不会失败——它始终可以领取，而且 recallMargin 无需许可。"
+  "After a queued redemption the receipt id is filled in here from that transaction. Receipt ids are not enumerable on-chain and there is no receiptsOf(user), so an older one comes from your RedeemRequested / ForceExited event until an indexer exists. A receipt that is awaiting settlement is never failed — it stays claimable, and recallMargin is permissionless.": "排队赎回后，回执编号会根据那笔交易自动填入此处。回执编号无法在链上枚举，也没有 receiptsOf(user)，因此在索引器出现之前，较早的编号只能来自你的 RedeemRequested / ForceExited 事件。等待结算的回执永远不会失败——它始终可以领取，而且 recallMargin 无需许可。",
+  "Attestation idle · your mint refreshes it": "证明闲置 · 你的铸造会刷新它",
+  "Insufficient uTSLA balance": "uTSLA 余额不足",
+  "Insufficient uSPY balance": "uSPY 余额不足",
+  "Insufficient uQQQ balance": "uQQQ 余额不足",
+  "Insufficient uNVDA balance": "uNVDA 余额不足",
+  "Insufficient uAAPL balance": "uAAPL 余额不足",
+  "Insufficient uMSFT balance": "uMSFT 余额不足"
  },
  "tpl": {
   "(EST. {#} · VERSION {#}.{#})": "（创立于 {0} · 版本 {1}.{2}）",
@@ -1059,6 +1066,24 @@
   "Chain {#} (Robinhood Chain) only.": "仅限链 {0}（Robinhood Chain）。",
   "CERT is deployed at {#}. Still to come: the staked insurance buffer and the funding-surplus flywheel.": "CERT 已部署于 {0}。尚待推出：质押保险缓冲金与资金费盈余飞轮。",
   "Deposit USDG, the vault opens a fully backed long on the equity perp underneath, and uTSLA is issued to your wallet at the price the hedge filled at. Delta target {#}, proven on-chain at every attestation with the age of the proof published. Burn it and the hedge closes on chain; the USDG comes back from the venue within minutes, never gated. Funding is buffered, then fee'd, never hidden. Holders are senior to stakers, always.": "存入 USDG，金库在底层股票永续合约上开立全额支撑的多头，uTSLA 按对冲的实际成交价格发行到你的钱包。Delta 目标为 {0}，在每次证明时于链上验证，并公布该证明的时效。销毁它，对冲在链上平仓；USDG 会在数分钟内从交易场所返还，从不设限。资金费率先入缓冲金，再收费，绝不隐藏。持有人始终优先于质押者。",
-  "The transaction was mined but reverted on chain ({#}). Nothing changed.": "交易已上链，但在链上回退（{0}）。没有任何变化。"
+  "The transaction was mined but reverted on chain ({#}). Nothing changed.": "交易已上链，但在链上回退（{0}）。没有任何变化。",
+  "September {#}, {#}:{#}": "9月{0}日 {1}:{2}",
+  "Of weekly volume was tokenized RWAs the week of July {#}, the first time they out-traded every crypto category": "的周成交量来自代币化 RWA（7月{0}日当周），这是它们首次超越所有加密类别",
+  "Jul {#}, {#}": "{1}年7月{0}日",
+  "Certificates are plain tokens on Robinhood Chain. Hold the stock {#}/{#}, LP uTSLA against USDG, post it as collateral on lending markets, or send it like any token. No funding tabs, no liquidation price, nothing to babysit.": "凭证是 Robinhood Chain 上的普通代币。全天候 {0}/{1} 持有股票，拿 uTSLA 与 USDG 一起提供流动性，在借贷市场用作抵押品，或像任何代币一样转账。没有资金费率账单，没有强平价格，无需时刻盯盘。",
+  "Mint certificates and hold them. That is the whole job. Your uTSLA sits in your wallet, tracks the stock {#}/{#}, and redeems to USDG at oracle price whenever you want out — same transaction below the vault’s instant cap, queued and paid by claim above it. No funding tabs, no liquidation price, nothing to manage.": "铸造凭证并持有，这就是全部工作。你的 uTSLA 待在你的钱包里，全天候 {0}/{1} 跟踪股票，想退出时随时按预言机价格赎回为 USDG——低于金库即时上限时在同一笔交易内完成，高于上限时排队处理并通过领取支付。没有资金费率账单，没有强平价格，无需任何管理。",
+  "The week of July {#}, tokenized assets were {#}% of weekly volume, the first time they out-traded every crypto category. And none of it was holdable.": "7月{0}日当周，代币化资产占周成交量的 {1}%，这是它们首次超越所有加密类别。而其中没有一份是可以持有的。",
+  "JUL {#}, {#}": "{1}年7月{0}日",
+  "Last updated: Jul {#}, {#}": "最后更新：{1}年7月{0}日",
+  "Robinhood Chain settled ${#}B of RWA perp volume in Q{#} {#}, {#}% of everything the chain did. The week of July {#}, tokenized stocks and commodities were {#}% of weekly volume, ahead of every crypto category for the first time ever. Open interest in RWAs hit ${#}B, passing Bitcoin. Twenty-three of the top thirty pairs are tokenized stocks and commodities.": "{2} 年第 {1} 季度，Robinhood Chain 结算了 ${0}B 的 RWA 永续合约成交额，占该链全部成交额的 {3}%。7月{4}日当周，代币化股票和大宗商品占周成交量的 {5}%，有史以来首次领先所有加密类别。RWA 未平仓量达到 ${6}B，超过比特币。前三十大交易对中有二十三个是代币化股票和大宗商品。",
+  "capacityOracle.maxNotional{#} is {#}, so _requireCapacity refuses every mint regardless of the collateral this vault holds. Redemption is unaffected: no redemption path reads capacity, and forceExit is gated on nothing.": "capacityOracle.maxNotional{0} 为 {1}，因此无论该金库持有多少抵押品，_requireCapacity 都会拒绝每一次铸造。赎回不受影响：没有任何赎回路径读取容量，forceExit 不受任何条件限制。",
+  "It is also BufferBook.balance{#} (solvency publishes the ledger as accrual{#}, CertVault.sol:{#}), and at or below zero that halts minting on its own — every mint refused, whatever collateral is held. Redemption is untouched.": "它也是 BufferBook.balance{0}（solvency 把账本作为 accrual{1} 公布，CertVault.sol:{2}），当它等于或低于零时会自行停止铸造——无论持有多少抵押品，所有铸造都会被拒绝。赎回不受影响。",
+  "BufferBook.capacity{#} returns {#}, which zeroes bufferCapacity{#} and maxNotional{#} with it, and EVERY mint is refused regardless of the collateral held — a vault sitting on ${#} of collateral rejects a ${#} mint. Redemption is untouched. This deployment publishes the ledger balance on the vault page so the halt is not silent.": "BufferBook.capacity{0} 返回 {1}，从而使 bufferCapacity{2} 和 maxNotional{3} 一同归零，无论持有多少抵押品，所有铸造都会被拒绝——一个持有 ${4} 抵押品的金库会拒绝一笔 ${5} 的铸造。赎回不受影响。本部署在金库页面公布账本余额，因此停机不会悄无声息。",
+  ") only. Mainnet is not offered because nothing is deployed there — the chain itself is real and verified ({#}, and the venue and USDG are live on it), but UseCert has no contracts on it. See deploy/mainnet/{#}.plan.json.": "）。未提供主网，因为那里没有任何部署——该链本身是真实且已验证的（{0}，交易场所和 USDG 都已在其上运行），但 UseCert 在其上没有合约。参见 deploy/mainnet/{1}.plan.json。",
+  "the attestation is older than {#}s, so CapacityOracle returns a cap of zero": "证明已超过 {0} 秒，因此 CapacityOracle 返回的上限为零",
+  "capacityOracle.maxNotional{#} reads {#} right now because the on-chain attestation has aged out, which is what an idle protocol looks like: nobody pays a keeper to refresh it between mints. Your transaction relays a fresh signed attestation before it mints, so the ceiling is non-zero by the time it is checked. Redemption never reads capacity at all.": "capacityOracle.maxNotional{0} 目前读数为 {1}，因为链上证明已过期，闲置的协议就是这个样子：两次铸造之间没有人付费让执行程序刷新它。你的交易会在铸造前转发一份新的签名证明，因此到检查时上限已不为零。赎回完全不读取容量。",
+  "{#}s ago": "{0} 秒前",
+  "{#}h ago": "{0} 小时前",
+  "{#}d ago": "{0} 天前"
  }
 }
