@@ -880,7 +880,22 @@
   "Insufficient uQQQ balance": "uQQQ 余额不足",
   "Insufficient uNVDA balance": "uNVDA 余额不足",
   "Insufficient uAAPL balance": "uAAPL 余额不足",
-  "Insufficient uMSFT balance": "uMSFT 余额不足"
+  "Insufficient uMSFT balance": "uMSFT 余额不足",
+  "My receipts · this vault": "我的回执 · 本金库",
+  "reading chain…": "正在读取链上数据…",
+  "hedge opening · escrowed": "对冲开立中 · 资金托管中",
+  "refund staged · the keeper pays it back": "退款已登记 · 执行程序会将其返还",
+  "not filled · the keeper refunds it": "未成交 · 执行程序会自动退款",
+  "certificates issued": "凭证已发行",
+  "refunded to your wallet": "已退还到你的钱包",
+  "claimed": "已领取",
+  "ready to claim once the collateral is back": "抵押品返还后即可领取",
+  "Refund now": "立即退款",
+  "reading the index…": "正在读取索引…",
+  "Mint refunded": "铸造已退款",
+  "No mint or redemption receipts for this wallet on this vault in the indexed history.": "在已索引的历史中，该钱包在本金库没有铸造或赎回回执。",
+  "The explorer index could not be read, so your receipts cannot be listed right now. This is not \"no receipts\": enter an id above, or try again shortly.": "无法读取浏览器索引，因此暂时无法列出你的回执。这并不代表“没有回执”：请在上方输入编号，或稍后重试。",
+  "After a queued redemption the receipt id is filled in here from that transaction, and your receipts on this vault are listed below from the explorer index, with their state read from the contract. A receipt that is awaiting settlement is never failed — it stays claimable, and recallMargin is permissionless.": "排队赎回后，回执编号会根据那笔交易自动填入此处；你在本金库的回执会根据浏览器索引列在下方，其状态直接从合约读取。等待结算的回执永远不会失败——它始终可以领取，而且 recallMargin 无需许可。"
  },
  "tpl": {
   "(EST. {#} · VERSION {#}.{#})": "（创立于 {0} · 版本 {1}.{2}）",
@@ -1084,6 +1099,15 @@
   "capacityOracle.maxNotional{#} reads {#} right now because the on-chain attestation has aged out, which is what an idle protocol looks like: nobody pays a keeper to refresh it between mints. Your transaction relays a fresh signed attestation before it mints, so the ceiling is non-zero by the time it is checked. Redemption never reads capacity at all.": "capacityOracle.maxNotional{0} 目前读数为 {1}，因为链上证明已过期，闲置的协议就是这个样子：两次铸造之间没有人付费让执行程序刷新它。你的交易会在铸造前转发一份新的签名证明，因此到检查时上限已不为零。赎回完全不读取容量。",
   "{#}s ago": "{0} 秒前",
   "{#}h ago": "{0} 小时前",
-  "{#}d ago": "{0} 天前"
+  "{#}d ago": "{0} 天前",
+  "{#} USDG in": "存入 {0} USDG",
+  "{#} burned": "已销毁 {0}",
+  "Refund mint receipt {#}": "退款铸造回执 {0}",
+  "Claim receipt {#}": "领取回执 {0}",
+  "Your USDG escrow is back in your wallet. {#}": "你托管的 USDG 已返还到你的钱包。{0}",
+  "{#} settlements in the index could not be tied to a wallet and are not listed.": "索引中有 {0} 笔结算无法对应到钱包，因此未列出。",
+  "{#}m {#}s ago": "{0} 分 {1} 秒前",
+  "{#}h {#}m ago": "{0} 小时 {1} 分前",
+  "{#}d {#}h ago": "{0} 天 {1} 小时前"
  }
 }

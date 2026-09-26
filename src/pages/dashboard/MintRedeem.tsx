@@ -16,6 +16,7 @@ import {
 } from "./ui";
 import { EM_DASH, fmtCountdown, fmtNum, fmtOrDash, fmtUSD, truncHash } from "./format";
 import { FLOW_META } from "./flowMeta";
+import { MyReceipts, type ReceiptAction } from "./MyReceipts";
 import { explorerTxUrl } from "@/chain/config";
 import { CertVaultABI } from "@/chain/contracts";
 import { decodeEventLog } from "viem";
@@ -191,6 +192,7 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
   const [receiptStr, setReceiptStr] = useState("");
   const [errNonce, setErrNonce] = useState(0);
   const [busy, setBusy] = useState<Busy>(null);
+  const [receiptBusy, setReceiptBusy] = useState<bigint | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
 
   const actions = useCertActions(asset);
@@ -437,10 +439,10 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
   const onForceExit = () =>
     run("force", `Force exit ${meta.name}`, () => actions.forceExit(amountStr), "Force exit submitted");
 
-  const onClaim = async () => {
+  const onClaim = async (fromList?: bigint) => {
     let receiptId: bigint;
     try {
-      receiptId = BigInt(receiptStr.trim());
+      receiptId = fromList ?? BigInt(receiptStr.trim());
     } catch {
       setNotice({
         tone: "warn",
@@ -451,7 +453,7 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
     }
     setBusy("claim");
     setNotice(null);
-    const toastId = pushToast({ state: "pending", title: `Claim receipt ${receiptStr}` });
+    const toastId = pushToast({ state: "pending", title: `Claim receipt ${String(receiptId)}` });
     try {
       const result = await actions.claimRedeem(receiptId);
       if (result.status === "awaiting-settlement") {
@@ -473,6 +475,36 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
       setNotice(noticeFor(err));
     } finally {
       setBusy(null);
+    }
+  };
+
+  /** A row of My receipts: claim a redemption, or run the two permissionless refund calls. */
+  const onReceiptAction = async (a: ReceiptAction) => {
+    if (a.kind === "claim") {
+      setReceiptBusy(a.id);
+      try {
+        await onClaim(a.id);
+      } finally {
+        setReceiptBusy(null);
+      }
+      return;
+    }
+    setReceiptBusy(a.id);
+    setBusy("claim");
+    setNotice(null);
+    const toastId = pushToast({ state: "pending", title: `Refund mint receipt ${String(a.id)}` });
+    try {
+      if (!a.staged) await actions.stageRefund(a.id);
+      const hash = await actions.refundMint(a.id);
+      settleToast(toastId, "Mint refunded", truncHash(hash));
+      setNotice({ tone: "ok", title: "Mint refunded", body: `Your USDG escrow is back in your wallet. ${truncHash(hash)}` });
+      after();
+    } catch (err) {
+      dismissToast(toastId);
+      setNotice(noticeFor(err));
+    } finally {
+      setBusy(null);
+      setReceiptBusy(null);
     }
   };
 
@@ -962,12 +994,17 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
                 </button>
               </div>
               <p className="mt-2 font-mono text-[10px] leading-[1.6] uppercase tracking-[0.06em] text-white-60/70">
-                After a queued redemption the receipt id is filled in here from that transaction. Receipt
-                ids are not enumerable on-chain and there is no receiptsOf(user), so an older one comes
-                from your RedeemRequested / ForceExited event until an indexer exists. A receipt that is
-                awaiting settlement is never failed — it stays claimable, and recallMargin is
-                permissionless.
+                After a queued redemption the receipt id is filled in here from that transaction, and
+                your receipts on this vault are listed below from the explorer index, with their state
+                read from the contract. A receipt that is awaiting settlement is never failed — it stays
+                claimable, and recallMargin is permissionless.
               </p>
+              <MyReceipts
+                asset={asset}
+                busy={receiptBusy}
+                disabled={!connected || wrongNetwork || busy !== null}
+                onAction={(a) => void onReceiptAction(a)}
+              />
             </Panel>
           </Stagger>
         </div>

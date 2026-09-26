@@ -484,11 +484,15 @@ function parseLog(raw: RawLog, vaultId: ChainVaultId, vaultSymbol: string): Part
   const logIndex = asInt(raw.index);
   if (txHash === null || blockNumber === null || logIndex === null) return null;
 
-  const receiptRaw = paramBigint(decoded, "receiptId");
+  // The explorer decodes MintRequested from an interface that names the fields `requestId` and
+  // `depositAmount`, not the vault's `receiptId` / `amountIn` (same topic, same positions). Read
+  // either name: without the alias every two-step mint lost its receipt id, so the mint never
+  // reached a wallet's list and its MintSettled could not be joined to anyone.
+  const receiptRaw = paramBigint(decoded, "receiptId") ?? paramBigint(decoded, "requestId");
   const expiresAt = paramBigint(decoded, "expiresAt");
 
   // ── the decimal domains, one converter each. See the file header for the checked figures.
-  const amountIn = paramBigint(decoded, "amountIn");
+  const amountIn = paramBigint(decoded, "amountIn") ?? paramBigint(decoded, "depositAmount");
   const amountOut = paramBigint(decoded, "amountOut");
   const certIn = paramBigint(decoded, "certIn");
   const certOut = paramBigint(decoded, "certOut");
