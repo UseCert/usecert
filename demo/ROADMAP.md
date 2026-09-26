@@ -941,7 +941,12 @@ wrong thing to describe as a launch.
 mainnet front-end bundle. Governance custody before any of it carries value.
 
 
-### 6.7 The venue's sequencer does not know our accounts — **BLOCKING** — found 2026-09-25
+### 6.7 The venue's sequencer does not know our accounts — **SUPERSEDED by 6.8**
+
+> **Wrong premise, kept for the record.** Everything below was measured against
+> `mainnet.zklighter.elliot.ai`, which serves **Lighter** (USDC). Robinhood Chain runs a separate
+> exchange, **Robinhood Chain Lighter** (USDG), at `api.rh.lighter.xyz`. On the right API the
+> accounts had existed all along. See 6.8.
 
 The deployment works. The integration is one step short, and it took minting on mainnet to find
 out.
@@ -982,6 +987,56 @@ and **no public interface should be pointed at these contracts.**
 contract; 18 USDG remain in the wallet; 3.8072 sit in the uTSLA vault; 7.947432 are owed on an
 unclaimable receipt; 3 USDG each are seeded in the other five buffers.
 
+### 6.8 On-chain orders are reduce-only: the vault cannot open a hedge — **BLOCKING, design decision** — found 2026-09-25
+
+The finding every other Phase 6 item was circling, and it came from the venue's own execution
+record rather than from inference.
+
+**How it was reached, in order, including the wrong turns.**
+
+1. *Wrong exchange.* The market indices (112/128/129/110/113/115) and the account lookups came
+   from `mainnet.zklighter.elliot.ai` — Lighter's USDC exchange. Robinhood Chain Lighter is a
+   separate venue at `api.rh.lighter.xyz`, with its own market numbering: TSLA 16, SPY 26, QQQ 25,
+   NVDA 15, AAPL 10, MSFT 14, all 2/4 decimals. **None of the six deployed indices exists there.**
+   3.2b had it backwards: testnet's 16/26/27/15 were nearly right and were "corrected" to wrong.
+   `marketIndex` is immutable, so the stack was redeployed with the right indices, gated by
+   `deploy/bin/usecert-mainnet-preflight`, which refuses any deploy whose markets the venue does
+   not list and was made to fail on the old values before it was trusted.
+2. *Price cap.* Hedges were market orders priced at the oracle exactly. The total-return feed read
+   $371.75 against a best ask of $372.62; a buy capped below every ask cannot fill.
+3. *Order size.* The venue's `min_quote_amount` is $10. The 8 USDG test mint hedged $7.97.
+4. *Silent withdrawals.* The venue calls sit in `try/catch`; at a wallet's estimated gas the call
+   starves and is swallowed. Measured: no withdrawal at 142,503 gas, a withdrawal at 300,000.
+
+Items 2–4 are fixed in `39a4505` (see its message). With all of them fixed, **a correctly priced,
+correctly sized buy from a plain wallet still did not fill**, and Lighter's record of it says:
+
+```
+"ae": {"code":21738, "message":"invalid reduce only direction"}
+```
+
+**Orders sent through the L1 contract are reduce-only.** They are the censorship-resistant exit
+path; they cannot open a position. Opening one requires an order signed off chain with an API key.
+`CertVault` hedges a mint by calling `createOrder` on the L1 contract, so **no mint on this venue
+can ever be hedged as designed.** The testnet simulator accepted anything and hid it.
+
+**What survives.** Exits are reduce-only by nature, so redemption and `forceExit` closing the
+hedge on-chain — the trustless half of the design — is exactly what the venue supports.
+
+**The design change it needs.** The vault registers an API key on its own venue account through
+the L1 `changePubKey`, which resolves the account from `msg.sender` and so is callable by a
+contract; an off-chain keeper holding that key opens hedges after mints; closes stay on-chain.
+That puts a key in the trade path, which the audits already flagged as the central risk, and it is
+unverified whether an API key can move collateral OUT of the account (L2 transfers). Both need
+answering before building it. **Not started; it is a decision about the trust model.**
+
+**Funds.** 50 USDG sent. 16.89 in the wallet, recovered by redeeming the two uTSLA positions and
+withdrawing the wallet's own test deposits. ~33 USDG is stuck across both stacks' buffers and
+venue dust: `CertVault` has no function that releases collateral no certificate claims, which is
+the design's protection against an owner draining it, and the reason it cannot be recovered.
+The cause was seeding twelve vaults before proving that one could hedge.
+
+
 ---
 
 ## Keeping the public page in sync
@@ -1015,12 +1070,10 @@ three, since all three are the same question — what does the project claim, an
 1.5 is now narrower than the other two: 3.6 built the mechanism, so the per-chain claims follow
 the deployment on their own and what remains is the **wording**, not the plumbing.
 
-**Ahead of all of it, and blocking everything else: 6.7.** Mainnet is deployed and minting was
-attempted; the exit does not complete because Lighter's sequencer does not recognise the vault
-accounts. That is P2-1 answered — not "the venue behaves as modelled" but "the venue has not been
-reached" — and it needs an external step from Lighter rather than a change here. Every other
-mainnet item is downstream of it, and no public interface should point at these contracts until
-a mint can be exited.
+**Ahead of all of it, and blocking everything else: 6.8.** On-chain orders on Robinhood Chain
+Lighter are reduce-only, so the vault cannot open a hedge. The fix is a design change — an
+off-chain keeper with an API key opens hedges, closes stay on-chain — and it changes the trust
+model, so it is a decision rather than a task. Nothing else on mainnet moves until it is made.
 
 After that: P1 work on the testnet pilot — 5.4 (remaining user-visible states, signer-readiness
 alerting), 5.6 (runtime payload validation), 4.5 (a green enforced baseline) — and governance
