@@ -58,7 +58,11 @@ while :; do
   i=$((i+1))
   forge script script/keepers/BatchAdvancer.s.sol --rpc-url "$RPC_URL" --broadcast >/dev/null 2>&1 \
     || echo "[$i] batch FAIL"
-  if [ $((i % ATTEST_EVERY)) -eq 0 ]; then
+  # ATTEST_ON_DEMAND=1 stops the keeper broadcasting attestations: they are signed by
+  # usecert-signer and RELAYED by whoever mints, so an idle protocol costs nothing.
+  # Capacity reads zero between mints - correct, not a fault; the front end refreshes
+  # it as part of the mint. Set to 0 to put the keeper back in charge.
+  if [ "${ATTEST_ON_DEMAND:-0}" != "1" ] && [ $((i % ATTEST_EVERY)) -eq 0 ]; then
     forge script script/keepers/Attester.s.sol --rpc-url "$RPC_URL" --broadcast >/dev/null 2>&1 \
       || echo "[$i] attest FAIL"
   fi
