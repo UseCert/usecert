@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Nightly: UseCert's state on the France host, encrypted, pushed to the Montreal host.
+#
+# WHAT. Everything on this host that is not rebuildable from git: the keeper journals (which
+# receipts are in flight and in what state), the vault configs and venue API keys, the
+# attester env, the address book the keepers and signer read, the history samples, the
+# roadmap-page tokens, the Telegram config, and this host's units, nginx snippets and tools.
+# Not the venv, the lighter SDK, the cast binary or the web build: those reinstall.
+#
+# HOW IT IS PROTECTED. openssl CMS (AES-256, key wrapped to an RSA-4096 certificate). This host
+# holds only the CERTIFICATE (/etc/usecert/backup-cert.pem). The private key is on neither
+# server - the owner holds it - so neither host being compromised exposes these secrets, and
+# this host dying does not take the key with it.
+#
+# WHERE. ssh to Montreal with a key that can do exactly one thing: its authorized_keys entry
+# is `restrict,from=<this host>,command="usecert-france-receive"`, which stores stdin as a
+# dated file and keeps the newest 14. No shell, no forwarding, no other command.
+#
+# Success writes /var/lib/usecert-backup/last-ok, which usecert-health-mainnet alerts on when
+# it is older than 36 h.
+set -euo pipefail
+CERT=/etc/usecert/backup-cert.pem
+KEY=/root/.ssh/usecert-backup
+DEST=usecert@148.113.237.230
+STAMP=/var/lib/usecert-backup/last-ok
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+# The keepers rewrite their journals while this runs, and tar exits 1 when a file changed
+# under it. That exit is tolerated - but only because every journal in the archive is then
+# parsed below, so a torn copy fails the backup instead of shipping.
+rc=0
+tar -C / -czf "$TMP/state.tgz" --warning=no-file-changed \
+  --exclude='opt/keeper/venv' --exclude='opt/keeper/lighter-sdk' --exclude='opt/keeper/bin' \
+  --exclude='opt/keeper/.cache' --exclude='__pycache__' --exclude='*.before-*' \
+  opt/keeper etc/usecert etc/usecert-keeper opt/usecert-history var/lib/usecert-history \
+  $(cd / && ls -d etc/systemd/system/usecert-* etc/nginx/snippets/usecert-* usr/local/bin/usecert-* \
+       etc/nginx/sites-available/use-cert.com 2>/dev/null) || rc=$?
+[ "$rc" -le 1 ] || { echo "tar failed ($rc)"; exit 1; }
+mkdir "$TMP/check"
+tar -C "$TMP/check" -xzf "$TMP/state.tgz" --wildcards 'opt/keeper/state-*.json' 'opt/keeper/book-*.json' 'opt/keeper/vaults/*.json'
+n=0
+for j in "$TMP"/check/opt/keeper/state-*.json "$TMP"/check/opt/keeper/book-*.json "$TMP"/check/opt/keeper/vaults/*.json; do
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$j" || { echo "torn or invalid in archive: ${j#$TMP/check/}"; exit 1; }
+  n=$((n+1))
+done
+rm -rf "$TMP/check"
+echo "archive: $n journals, books and vault configs parse"
+
+openssl cms -encrypt -binary -aes256 -in "$TMP/state.tgz" -outform DER -out "$TMP/state.cms" "$CERT"
+size=$(stat -c %s "$TMP/state.cms")
+[ "$size" -gt 1000 ] || { echo "encrypted archive is only $size bytes - refusing to ship it"; exit 1; }
+
+reply=$(ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=yes "$DEST" < "$TMP/state.cms")
+echo "$reply"
+case "$reply" in stored*" $size bytes"*) ;; *) echo "receiver did not confirm $size bytes"; exit 1;; esac
+
+mkdir -p "$(dirname "$STAMP")"
+date -u +%s > "$STAMP"
+echo "ok: $(tar -tzf "$TMP/state.tgz" | wc -l) entries, $size bytes encrypted"

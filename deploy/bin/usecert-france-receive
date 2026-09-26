@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Montreal: the ONLY command the France backup key can run (forced in authorized_keys).
+# Stores stdin as a dated, encrypted archive and keeps the newest 14. It cannot decrypt
+# anything: the private key is on neither host (see usecert-backup-france on France).
+set -euo pipefail
+umask 077
+DIR=/var/backups/usecert-france
+mkdir -p "$DIR"
+f="$DIR/usecert-france-$(date -u +%Y%m%dT%H%M%SZ).cms"
+cat > "$f.part"
+size=$(stat -c %s "$f.part")
+# DER CMS starts with a SEQUENCE tag (0x30). Anything else is not what the sender makes.
+if [ "$size" -lt 1000 ] || [ "$(head -c1 "$f.part" | od -An -tx1 | tr -d ' ')" != "30" ]; then
+  rm -f "$f.part"; echo "rejected: $size bytes, not a CMS archive"; exit 1
+fi
+mv "$f.part" "$f"
+ls -1t "$DIR"/usecert-france-*.cms | tail -n +15 | xargs -r rm -f
+echo "stored $(basename "$f") $size bytes"
