@@ -17,6 +17,9 @@ import {
 import { EM_DASH, fmtCountdown, fmtNum, fmtOrDash, fmtUSD, truncHash } from "./format";
 import { FLOW_META } from "./flowMeta";
 import { explorerTxUrl } from "@/chain/config";
+import { CertVaultABI } from "@/chain/contracts";
+import { decodeEventLog } from "viem";
+import { usePublicClient } from "wagmi";
 import {
   decodeRevert,
   routeMint,
@@ -26,7 +29,7 @@ import {
   type DecodedRevert,
   type SizeRoute,
 } from "@/chain/useActions";
-import { capacityLegsLabel, type ChainVaultId } from "@/chain/useVaults";
+import { capacityLegsLabel, vaultAddresses, type ChainVaultId } from "@/chain/useVaults";
 import {
   ONE_18,
   feeAmount18,
@@ -191,6 +194,7 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
   const [notice, setNotice] = useState<Notice | null>(null);
 
   const actions = useCertActions(asset);
+  const publicClient = usePublicClient({ chainId: CHAIN_ID });
   const faucetActions = useFaucetActions();
 
   const vault = vaults.find((v) => v.id === asset) ?? vaults[0];
@@ -342,7 +346,7 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
           tone: "info",
           title: "Mint requested — escrowed, awaiting the fill",
           body:
-            "Above the instant cap, so requestMint escrowed your collateral and opened a receipt. A keeper calls settleMint once the fill is known — that step is not yours. If the 24-hour settle window passes unsettled, anyone (including you) may stage and claim a full refund of the escrow.",
+            "Your collateral is escrowed and the hedge has been requested. Certificates are issued to your wallet as soon as the venue confirms the fill, at the price it filled at, usually within a minute. Nothing more is needed from you. If it is not settled within the 24-hour window, anyone (including you) may stage and claim a full refund of the escrow.",
         });
       }
       after();
@@ -392,8 +396,27 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
           tone: "info",
           title: "Redemption queued",
           body:
-            "Above the instant cap, so requestRedeem burned the certificates now and pays by claim. Two batch round-trips are expected; the venue's priority expiration is 14 days, which is the real worst case. Claim the receipt below once settled.",
+            "Your certificates are burned and the vault is closing its hedge on chain. Once the collateral is back from the venue, usually within minutes, claim the receipt below. The venue's 14-day priority expiration is the real worst case.",
         });
+        // The receipt id is in this transaction's own RedeemRequested event. Read it from there
+        // and fill the claim field, rather than sending people to an explorer to find it.
+        void publicClient
+          ?.waitForTransactionReceipt({ hash: result.hash })
+          .then((rc) => {
+            for (const log of rc.logs) {
+              if (log.address.toLowerCase() !== vaultAddresses(asset).vault.toLowerCase()) continue;
+              try {
+                const ev = decodeEventLog({ abi: CertVaultABI, data: log.data, topics: log.topics });
+                if (ev.eventName === "RedeemRequested") {
+                  setReceiptStr(String((ev.args as { receiptId: bigint }).receiptId));
+                  return;
+                }
+              } catch {
+                // not one of the vault's events
+              }
+            }
+          })
+          .catch(() => {});
       }
       after();
     } catch (err) {
