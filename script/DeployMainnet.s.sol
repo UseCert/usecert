@@ -118,6 +118,12 @@ contract DeployMainnet is DeployTestnet {
     /// @dev False: see `_phase5_allowlistMarksAndBootstrap` above. Bootstrap is done by
     ///      `deploy/bin/usecert-mainnet-bootstrap` as six direct transactions, because forge
     ///      cannot execute the venue's Stylus deposit in any mode.
+    /// @dev The real Lighter proxy, so the book says `lighter`. Written as `lighterSim` twice, and
+    ///      each time the mainnet site described the real exchange as a simulator (ROADMAP 6.5).
+    function _venueBookKey() internal pure override returns (string memory) {
+        return "lighter";
+    }
+
     function _bootstrapsInScript() internal view override returns (bool) {
         return false;
     }

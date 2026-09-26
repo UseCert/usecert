@@ -1163,6 +1163,11 @@ contract DeployTestnet is Script {
     ///      `string.concat` calls. Not a style choice: a wide `string.concat` blows the legacy
     ///      codegen's stack ("Stack too deep" in the generated assembly) and `via_ir` is off and
     ///      must stay off (Global Constraint 1).
+    /// @dev The address-book key for the venue. Testnet's venue is `LighterSim`; mainnet overrides.
+    function _venueBookKey() internal pure virtual returns (string memory) {
+        return "lighterSim";
+    }
+
     function _writeAddressBook() internal {
         string memory out = "{\n";
         out = string.concat(out, _jStr("  ", "_generatedBy", "script/DeployTestnet.s.sol"));
@@ -1188,30 +1193,38 @@ contract DeployTestnet is Script {
         out = string.concat(out, '  "shared": {\n');
         out = string.concat(out, _jAddr("    ", "collateral", collateral));
         out = string.concat(out, _jNum("    ", "collateralDecimals", COLLATERAL_DECIMALS));
-        out = string.concat(out, _jAddr("    ", "testFaucet", testFaucet));
-        out = string.concat(
-            out,
-            _jStr(
-                "    ",
-                "_testFaucetNote",
-                "Deployed by this script alongside the collateral token (Task 10). Holds an opening float the deployer minted; has no owner and no sweep, so its balance plus its Dripped event stream is a closed account - see TestFaucet's NatSpec"
-            )
-        );
-        out = string.concat(out, _jNum("    ", "faucetDripAmount", FAUCET_DRIP));
-        out = string.concat(out, _jNum("    ", "faucetIntervalSeconds", FAUCET_INTERVAL));
-        out = string.concat(out, _jNum("    ", "faucetOpeningFloat", FAUCET_OPENING_FLOAT));
-        out = string.concat(out, _jAddr("    ", "lighterSim", lighter));
+        // Only where a faucet exists. On mainnet there is none, and a zero-address row reads
+        // to the front end as a faucet that is there (ROADMAP 6.5).
+        if (testFaucet != address(0)) {
+            out = string.concat(out, _jAddr("    ", "testFaucet", testFaucet));
+            out = string.concat(
+                out,
+                _jStr(
+                    "    ",
+                    "_testFaucetNote",
+                    "Deployed by this script alongside the collateral token (Task 10). Holds an opening float the deployer minted; has no owner and no sweep, so its balance plus its Dripped event stream is a closed account - see TestFaucet's NatSpec"
+                )
+            );
+            out = string.concat(out, _jNum("    ", "faucetDripAmount", FAUCET_DRIP));
+            out = string.concat(out, _jNum("    ", "faucetIntervalSeconds", FAUCET_INTERVAL));
+            out = string.concat(out, _jNum("    ", "faucetOpeningFloat", FAUCET_OPENING_FLOAT));
+        }
+        // The key says what the venue IS: `lighterSim` on testnet, `lighter` on mainnet, where
+        // it is the real exchange. The front end reads the key's presence as "simulated".
+        out = string.concat(out, _jAddr("    ", _venueBookKey(), lighter));
         out = string.concat(out, _jAddr("    ", "solvencyRegistry", registry));
         out = string.concat(out, _jAddr("    ", "capacityOracle", capacity));
-        out = string.concat(out, _jAddr("    ", "batchKeeper", batchKeeper));
-        out = string.concat(
-            out,
-            _jStr(
-                "    ",
-                "_batchKeeperNote",
-                "Task 12's BatchAdvancer keeper must sign with this exact address, registered via LighterSim.setKeeper - otherwise every settleBatch reverts LighterSim_OnlyOwnerOrKeeper, indistinguishable from a dead keeper"
-            )
-        );
+        if (batchKeeper != address(0)) {
+            out = string.concat(out, _jAddr("    ", "batchKeeper", batchKeeper));
+            out = string.concat(
+                out,
+                _jStr(
+                    "    ",
+                    "_batchKeeperNote",
+                    "Task 12's BatchAdvancer keeper must sign with this exact address, registered via LighterSim.setKeeper - otherwise every settleBatch reverts LighterSim_OnlyOwnerOrKeeper, indistinguishable from a dead keeper"
+                )
+            );
+        }
         out = string.concat(out, _jAddrLast("    ", "certFactory", factory));
         out = string.concat(out, "  },\n");
 

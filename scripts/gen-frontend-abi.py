@@ -329,6 +329,15 @@ def main():
 
     assert_deployed(book)
     shared = book["shared"]
+    # ROADMAP 6.5, twice. The deploy script used to write the REAL venue under `lighterSim` and
+    # the faucet as the zero address, and 3.6's derivation reads `lighterSim` as "the venue is a
+    # simulator" and a present `testFaucet` as "there is a faucet". So a mainnet bundle built
+    # from such a book tells users the real exchange is a simulation. It happened on stack 1
+    # (fixed by hand) and again on stack 3, because the hand fix never reached the writer.
+    # Refuse the book rather than trust a key name on mainnet.
+    if CHAIN == "4663" and shared.get("lighterSim"):
+        sys.exit("the mainnet book names the real venue 'lighterSim' - rename it 'lighter' "
+                 "(roadmap 6.5); refusing to emit a bundle that calls the venue a simulator")
     out.write("export const SHARED = {\n")
     for key in (
         "collateral",
@@ -343,7 +352,9 @@ def main():
         # 'None' into the bundle - which typechecks, reads like an address, and is one of
         # the more expensive things a front end could be handed. Omitting them instead lets
         # the front end test for ABSENCE and say true things about which chain it is on.
-        if shared.get(key):
+        # The zero address is "not deployed" too. It is a present, non-empty string, so a
+        # truthiness test let a zero-address testFaucet through and switched the faucet UI on.
+        if shared.get(key) and int(str(shared[key]), 16) != 0:
             out.write("  %s: '%s' as const,\n" % (key, shared[key]))
     out.write("} as const;\n\nexport const MIRRORS = [\n")
     for v in book["vaults"]:
