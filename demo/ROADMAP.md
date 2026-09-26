@@ -1086,6 +1086,37 @@ orchestrator (event watching, settlement with the attester key) stays in Montré
 order placement to France, then one keeper-mode vault proves mint → hedge → redeem.
 
 
+### 6.11 The first fully hedged UseCert certificate, minted and redeemed — ✅ 2026-09-26
+
+One keeper-mode vault (uTSLA, `0xD57cb3C6A282583D63F09fdde9E9135a949Bd4D9`, venue account 33202),
+deployed alone with `MAINNET_ONLY=uTSLA`, key generated on the France host, keeper running there.
+
+| step | who | result |
+|---|---|---|
+| `requestMint` 12.5 USDG | user | escrowed, **0 certificates** - correct, no hedge yet |
+| order 335 base, cap 375.46 | **keeper, France** | filled **335 @ 373.00 within 5s** |
+| `settleMint` | keeper (attester key) | **0.0335 uTSLA** issued; vault ledger 335 = venue position 0.0335 |
+| `requestRedeem` | user | vault's own reduce-only close: **flat within 10s**, no key |
+| recall + `claimRedeem` | anyone + user | **+12.441074 USDG** back in the wallet |
+
+Nobody touched the hedge by hand. Cost of the round trip: mint and redeem fees plus the spread,
+~0.06 USDG.
+
+**Three things the cycle found, all fixed or recorded:**
+
+* *Stale build.* The first broadcast died with `type check failed for "offset (usize)"` while
+  forge decoded CertVault's constructor: the artifact on disk predated the last source change, so
+  forge split the deploy data at the old code's length. A clean rebuild fixed it. The failed runs
+  had still written simulated addresses into the address book, which was restored each time.
+* **The recall over-asks, and the venue refuses the whole thing.** The vault requested the margin
+  its books say it posted, 12.238750; the account held 12.234730 after the round trip's spread.
+  Lighter answered `21304 "not enough asset balance"` and paid **nothing** - it does not pay
+  `min(request, balance)`, which `recallMargin` assumed. Earlier recalls only worked because no
+  trading had happened and the books matched exactly. Worked around by depositing 1 USDG to the
+  vault's venue account (0.01 and 0.10 are below Lighter's minimum deposit); fix in 6.12.
+* *Gas.* Every send used an explicit limit; see 5.3's starvation guard.
+
+
 ---
 
 ## Keeping the public page in sync
