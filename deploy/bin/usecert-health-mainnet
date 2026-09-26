@@ -18,6 +18,7 @@ WHAT IS CHECKED, and why each one matters to a holder:
   indexer    all six vault event files were rewritten within 5 min.
   book       every address this host runs on matches the book tracked on GitHub.
   manifest   every deployed file equals its blob on GitHub (usecert-release-manifest).
+  insurance  no draw is pending on the insurance pool (a pending draw pauses stakers' exits).
 
 What is NOT checked: attestation age. Between mints it is stale and capacity reads zero BY DESIGN
 (the signer signs, the minter relays); alerting on it describes correct behaviour.
@@ -48,6 +49,7 @@ BACKUP_STAMP = "/var/lib/usecert-backup/last-ok"
 INDEX_GLOB = "/var/www/usecert-data/logs/*.json"
 TRACKED_BOOK_URL = "https://raw.githubusercontent.com/UseCert/usecert/backend/contracts-c1/deployments/4663.json"
 MANIFEST = "/var/www/usecert-data/manifest.json"
+INSURANCE_BOOK = "/opt/usecert-history/4663.insurance.json"
 HOST_BOOKS = ["/opt/keeper/book-stack4.json", "/opt/usecert-history/4663.json"]
 UA = {"User-Agent": "usecert-health/1.0", "Content-Type": "application/json"}
 
@@ -177,6 +179,19 @@ def checks():
             P.append("manifest: running code differs from GitHub: %s" % ", ".join(bad[:5]))
     except (OSError, ValueError, KeyError) as e:
         P.append("manifest: unreadable (%s)" % type(e).__name__)
+
+    # The insurance pool (K1). A proposed draw is the one event stakers most need to hear about
+    # quickly: exits pause until it executes, is cancelled or expires. Reported while pending.
+    try:
+        pool = json.load(open(INSURANCE_BOOK))["address"]
+        call = lambda sel: rpc("eth_call", [{"to": pool, "data": sel}, "latest"])
+        if int(call("0x6060ffaa"), 16) != 0:
+            P.append("insurance: a draw is PENDING on the pool %s (%d proposed ever, pool holds %.2f USDG) - exits and deposits are paused"
+                     % (pool, int(call("0x08222d58"), 16), int(call("0x01e1d114"), 16) / 1e6))
+    except FileNotFoundError:
+        pass
+    except Exception as e:                                       # noqa: BLE001
+        P.append("insurance: pool unreadable (%s)" % str(e)[:80])
 
     # usecert-backup-france writes this after Montreal confirms the byte count.
     try:

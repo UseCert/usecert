@@ -80,10 +80,19 @@ def lookup(addr):
             "responseSha256": hashlib.sha256(raw).hexdigest()}
 
 
+EXTRA = "/opt/usecert-history/4663.insurance.json"     # contracts deployed outside the stack book
+
+
 def main():
     book = json.load(open(BOOK))
     rows = []
-    for c in contracts(book):
+    listed = contracts(book)
+    try:
+        x = json.load(open(EXTRA))
+        listed.append({"group": "insurance", "name": x["contract"], "address": x["address"], "external": False})
+    except (OSError, ValueError, KeyError):
+        pass
+    for c in listed:
         res = lookup(c["address"])
         rows.append(dict(c, **res, checkedAt=int(time.time())))
         time.sleep(0.3)                                        # polite to a public API
