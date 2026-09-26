@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Sourcify verification evidence for every contract in the LIVE mainnet book, hourly.
+
+    usecert-sourcify        write /var/www/usecert-data/sourcify.json (served at /data/sourcify.json)
+
+The contract list is read from the tracked address book (the same file the keepers, signer and
+recorder run on), never typed here: a hand-kept list is how an evidence panel ends up showing a
+green "exact match" for a retired stack's contracts, which are verified too.
+
+Per address: GET https://sourcify.dev/server/v2/contract/4663/<address> with a fixed field list.
+Only a GET, only chain 4663, only addresses from the book. The response must name the same chain
+and address; each is kept as the selected fields plus the SHA-256 of the raw response body, so a
+reader can re-fetch and compare. "exact" requires creationMatch AND runtimeMatch to be
+exact_match; anything else is reported as what it is. A failed lookup is "unavailable" for that
+address, never the previous run's answer.
+"""
+import hashlib
+import json
+import os
+import time
+import urllib.request
+
+BOOK = "/opt/usecert-history/4663.json"
+OUT = "/var/www/usecert-data/sourcify.json"
+API = "https://sourcify.dev/server/v2/contract/4663/%s?fields=creationMatch,runtimeMatch,verifiedAt,matchId,compilation"
+MAX_BYTES = 256 * 1024
+
+
+# Addresses in the book that are not UseCert code: the collateral token, the venue, and the price
+# feeds the oracles read. Reported, and labelled external, so a missing match there is not read as
+# a gap in UseCert's own verification.
+EXTERNAL = {"collateral", "lighter", "replayAggregator"}
+
+
+def contracts(book):
+    out = []
+    for k, v in book.get("shared", {}).items():
+        if isinstance(v, str) and v.startswith("0x") and len(v) == 42:
+            out.append({"group": "shared", "name": k, "address": v, "external": k in EXTERNAL})
+    for vault in book.get("vaults", []):
+        for k, v in vault.items():
+            if isinstance(v, str) and v.startswith("0x") and len(v) == 42:
+                out.append({"group": vault.get("symbol"), "name": k, "address": v, "external": k in EXTERNAL})
+    return out
+
+
+def lookup(addr):
+    req = urllib.request.Request(API % addr, headers={"User-Agent": "usecert-sourcify/1.0", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = r.read(MAX_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        return {"state": "none" if e.code == 404 else "unavailable", "http": e.code}
+    except Exception as e:                                       # noqa: BLE001
+        return {"state": "unavailable", "error": type(e).__name__}
+    if len(raw) > MAX_BYTES:
+        return {"state": "unavailable", "error": "response too large"}
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        return {"state": "unavailable", "error": "not JSON"}
+    if str(d.get("chainId")) != "4663" or str(d.get("address", "")).lower() != addr.lower():
+        return {"state": "unavailable", "error": "response names a different chain or address"}
+    c, r = d.get("creationMatch"), d.get("runtimeMatch")
+    # Four states, not two. "runtime" = the deployed bytecode is an exact match but Sourcify holds
+    # no creation match - normal for a contract created by another contract (the vault creates
+    # its Certificate; the Safe created the oracles via CreateCall). Calling that "partial" would
+    # undersell it; calling it "exact" would overstate it.
+    if c == "exact_match" and r == "exact_match":
+        state = "exact"
+    elif r == "exact_match":
+        state = "runtime"
+    elif c or r:
+        state = "partial"
+    else:
+        state = "none"
+    comp = d.get("compilation") or {}
+    return {"state": state, "creationMatch": c, "runtimeMatch": r, "verifiedAt": d.get("verifiedAt"),
+            "matchId": d.get("matchId"), "compiler": comp.get("compilerVersion"), "contractName": comp.get("name"),
+            "responseSha256": hashlib.sha256(raw).hexdigest()}
+
+
+def main():
+    book = json.load(open(BOOK))
+    rows = []
+    for c in contracts(book):
+        res = lookup(c["address"])
+        rows.append(dict(c, **res, checkedAt=int(time.time())))
+        time.sleep(0.3)                                        # polite to a public API
+    counts = {"ours": {}, "external": {}}
+    for r in rows:
+        side = counts["external" if r["external"] else "ours"]
+        side[r["state"]] = side.get(r["state"], 0) + 1
+    doc = {"generatedAt": int(time.time()), "chainId": 4663, "source": "https://sourcify.dev/server/v2/contract/4663/{address}",
+           "book": BOOK, "counts": counts, "contracts": rows}
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    json.dump(doc, open(OUT + ".tmp", "w"), indent=1)
+    os.replace(OUT + ".tmp", OUT)
+    print("sourcify: %d contracts %s" % (len(rows), counts))
+
+
+if __name__ == "__main__":
+    main()
