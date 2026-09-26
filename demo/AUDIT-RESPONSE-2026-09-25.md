@@ -45,6 +45,16 @@ redeem   returns collateral, supply back to its opening value
 itself. The script is committed as `deploy/bin/usecert-smoke` so this is repeatable rather than
 a claim.
 
+> **Corrected 2026-09-25, later the same day.** That sentence was too broad, and the corrective
+> re-audit was right to narrow it. What the run above proves is that **the contract path works**.
+> It does not prove that a person could do it, and they could not: `MintRedeem` disabled the Mint
+> button on zero capacity, which is precisely the idle state the mint was supposed to refresh, so
+> the refresh code could never be reached from the browser. The relay in this evidence was sent
+> with `cast`. Reading "minting works" next to a command-line transcript, and not noticing that no
+> user could reproduce it through the UI, is the same error as the audit's — measuring the thing
+> that was convenient to measure rather than the thing being claimed. Both defects are fixed and
+> re-proven below; see §6.
+
 **One honest correction about that run.** The first version passed the *full* certificate
 balance to `redeemInstant`, which redeemed 1.3624 uTSLA that predated the test and took total
 supply to zero. It was minted straight back (`0xd56462ca…`) and supply is again 1.3624. The
@@ -130,3 +140,80 @@ dashboard changes of 2026-09-23 exist because of it.
 
 The audit's closing advice — make the testnet boundaries first-class, publish reproducible
 evidence, let the rigor speak — is the right advice and this file is written to it.
+
+---
+
+## 6. The corrective re-audit, same day
+
+Four further reviews arrived on 2026-09-25, synthesised in *UseCert Corrected Launch-Readiness
+Re-Audit*. They **withdraw** the stale-attestation conclusion rather than soften it, and accept
+the on-demand design: *"continuous on-chain backing attestations are not required by the
+implemented on-demand registry design."* Both of their new High findings are correct, and both
+are fixed.
+
+### 6.1 The Mint button could not be pressed in the state it was meant to clear
+
+`MintRedeem` computed `capacityHalted` as `capIsZero`, full stop, and that disables submit. Zero
+capacity is also the ordinary idle condition: the attestation ages out, `maxNotional18` reads
+zero, and `mint()` relays a fresh signature to clear it. **The control that triggers the refresh
+was disabled by the state the refresh exists to remove.** The panel directly above it read
+"Attestation idle · your mint refreshes it" — the copy was right and the button contradicted it.
+
+No user could ever have minted from the idle state. That is why §1's evidence was a `cast`
+transcript, and it is why that evidence did not show the problem.
+
+The block is now lifted for exactly one case: a stale attestation is the **only** leg holding the
+ceiling at zero, **and** the signer currently has a bundle covering that specific vault. It is
+computed from `bindingLegs` — the same predicate `CapacityNotice` already used to choose between
+"idle" and "halted" — because a control and its caption asking the same question two different
+ways is how they disagreed in the first place. An unknown signer state is not a yes.
+
+### 6.2 Only half of each signed bundle was being relayed
+
+The signer produces **two** signatures per vault from one observation: `attestSig` for
+`SolvencyRegistry.attestSigned`, and `markSig` for `CertOracle.setMarkPriceSigned`. The app
+fetched both — its own type declares `markPx18`, `markNonce` and `markSig` — and relayed only the
+first. The registry relay reopens capacity; the oracle keeps whatever mark it was last given, so
+the basis cross-check runs against a stale price and `mintAllowed()` can close on a divergence
+that is not real.
+
+This was not theoretical. At the time of the fix the oracle held `markNonce` **1** while the
+signer had moved to **2**: the mark had been drifting for as long as the omission existed.
+
+Both halves of one bundle are now relayed and confirmed before the mint, mark first. The mark is
+skipped when the oracle already holds that nonce or newer, because `CertOracle_StaleNonce` would
+refuse it — two mints off one bundle is the ordinary case, not an edge case. Both targets are
+**pinned** to the generated address book, and `attestationFor` now rejects a payload naming a
+different `certOracle`, as it already did for the registry.
+
+### 6.3 Re-proven end to end
+
+`deploy/bin/usecert-smoke` now relays both halves, in the order the app does, and was run against
+the live deployment from the audit's own starting condition (`ageSec` 7,260 > 300, capacity 0):
+
+| step | transaction |
+|---|---|
+| `setMarkPriceSigned` (nonce 1 → 2) | `0x64ef80491a040fb8956f37251738a9066bab73e959e8ec048681917b9982bb50` |
+| `attestSigned` | `0xf104df5076b73b8e3f54f1c38e4fc5bcab7dcaa0e9c99543be7ac90c2fe768f1` |
+| `approve` | `0x5a817bd10de7fdf67beefccf9058e6bc7aa1d973d09e224e1b873c53f5021771` |
+| `mintInstant` | `0x2fd6b2be5f1eee79db42e563684b09c1934ac33686e216f68a04ca70662b0c05` |
+| `redeemInstant` (this run's delta only) | `0x7276446de691d825de752be0cc7a3942b5eb058613166a23d7e994da17288fb9` |
+
+```
+before   age 7,260s   capacity 0            oracle markNonce 1
+mark     relayed      mintAllowed() true    oracle markNonce 2
+attest   age 37s      capacity 90,000e18
+mint     10 tUSDG  ->  0.0272 uTSLA
+redeem   supply back to 1.3624 uTSLA exactly
+```
+
+**What this still does not prove, stated plainly.** It is the contract path, driven by a script.
+No browser journey with a real wallet has been run by us, which is the same boundary the re-audit
+draws around its own evidence, and it is the acceptance criterion for P0-1 that remains open. The
+button's gate and the panel's caption are now computed from one predicate, so the panel rendering
+"Attestation idle" is the gate being open — but that is an inference from shared code, not a
+recorded wallet journey, and it is not offered as one.
+
+The rest of the re-audit's plan — race and expiry handling, versioned signer routing, signer
+readiness alerting, the five user-visible states, CI, and every mainnet gate — is open and
+tracked in `ROADMAP.md`. Its mainnet verdict is NO-GO and is not disputed.

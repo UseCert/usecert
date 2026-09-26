@@ -496,6 +496,41 @@ next verification a one-liner, and is the same provenance gap as 0.3 and 3.4.
 
 ---
 
+### 3.6 Claims that derive from the deployment — **M** — ✅ done 2026-09-25
+
+The word "testnet" appears 64 times in the front end, "tUSDG" 62 and "faucet" 82. Every one was
+typed by someone who knew which chain they were on at the time. Switching to mainnet is a
+one-file change — `contracts.ts` is regenerated and the chain id, RPC, explorer and all 26
+addresses follow — but the **copy did not follow**, so the switch plan was a manual sweep of
+~290 strings. That is not a plan, it is a list of things to forget under pressure.
+
+`src/chain/deployment.ts` reads those facts from the generated bundle instead: which chain,
+whether the venue is a simulator, whether a faucet exists, what the collateral is called,
+whether anything holds real value, and the disclosure that follows from all of it. **Absence is
+the signal** — `testFaucet` and `lighterSim` are null in the mainnet address book, and the
+generator now omits null keys rather than writing the literal string `'None'` into the bundle,
+which would have typechecked, read like an address, and been passed to a contract call.
+
+**What building it both ways caught.** Against a mainnet-shaped bundle the app **failed to
+compile**, with seven errors in four files. `SHARED` is a generated object literal, so
+`SHARED.testFaucet` off-mainnet is not `undefined`, it is a type error — and nothing
+typechecks against a bundle it never sees. So `claim()` now refuses with a named reason instead
+of calling a contract that is not there; the three faucet reads are omitted rather than polling
+a missing address every 20 seconds; and the TestFaucet and LighterSim rows on `/contracts` are
+appended only where those contracts exist.
+
+Verified both ways. Real bundle: unchanged, `tsc` clean, and the live site still reads
+"Testnet 46630", still lists both rows, still carries the simulated-venue disclosure. Mainnet
+shape: `tsc` clean, production build clean, and every derived value flips on its own — tUSDG
+to USDG, the faucet sentence to "collateral you already hold or acquire", the disclosure to
+empty because on mainnet it would be false.
+
+Four surfaces are wired so far (the roadmap page, the connect prompt, the store's collateral
+symbol, the Overview chip). The remaining literals are mechanical and follow separately; the
+mechanism they need now exists, which is what 1.5 was actually blocked on.
+
+---
+
 ## Phase 4 — from the launch-readiness audit, 25 September 2026
 
 Full response in `demo/AUDIT-RESPONSE-2026-09-25.md`. Its verdict — no-go for mainnet,
@@ -554,6 +589,125 @@ mirrors are labelled `LIVE`. Still an editorial call about what the project clai
 `forge fmt --check` red, front-end lint red (1,644 errors), no CI, no release manifest, 97
 Slither findings untriaged.
 
+### 4.6 A deploy that cannot ship a bundle Node will not run — **S** — ✅ done 2026-09-25
+
+Not from the audit — from taking the site down while doing 3.6. `bun run build` on its own
+produces an artifact that **cannot boot, and says nothing**. The vite config carries
+`defaultPreset: "cloudflare-module"`; on a bare host std-env detects no provider and nitro
+emits a Cloudflare Worker module. Node loads it, runs nothing, and **exits zero** — so systemd
+reports "activating" forever, `/var/log/usecert/web.log` stays **empty**, and the site 502s
+with nothing anywhere naming the cause. The only record of it was a comment inside the systemd
+unit, which is not a file anyone opens while running a build.
+
+`deploy/bin/usecert-deploy-web` sets `NITRO_PRESET=node-server` and then **checks** it, because
+setting it is not proof: `.output/nitro.json` records the preset nitro actually used. It also
+verifies the server entry exists, walks the emitted modules to confirm every chunk they import
+is on disk (a half-written `.output` resolves at request time, so the unit comes up "active"
+and then 500s on the first render), restarts only after all of that passes, probes five routes,
+and asserts the served dashboard names the chain that was just built.
+
+**Each guard was made to fire, and two were wrong the first time.**
+
+Refusing to restart is not the same as leaving the host in a good state: a rejected build has
+already overwritten `.output`, so the process serves from memory while the bytes on disk cannot
+boot, and the next reboot takes the site down with no deploy to blame.
+
+Worse, the backup was refreshed unconditionally, on the assumption that whatever is deployed
+must be fine. Running the preset guard **twice** disproved that: the second run saved the
+already-broken `.output` over the last good backup, then "rolled back" onto it and reported
+success. The backup is now only refreshed from a build that passes the same test a new one has
+to pass, and restoring an unrunnable backup is refused out loud rather than reported as a
+recovery.
+
+Verified from a deliberately poisoned host — `.output` and `.output.prev` both holding
+Cloudflare builds — which recovered on the next deploy while warning it had no known-good
+fallback; then a refused build restored a runnable one and the service was **restarted onto it**
+to prove it boots, rather than trusting the file that says which preset it is.
+
+
+---
+
+## Phase 5 — from the corrective re-audit, 25 September 2026
+
+Four further reviews, synthesised in *UseCert Corrected Launch-Readiness Re-Audit*. They
+**withdraw** the stale-attestation finding rather than soften it — *"continuous on-chain backing
+attestations are not required by the implemented on-demand registry design"* — and then land two
+High-severity defects that the earlier round missed and that this repository had not found either.
+Full response in `demo/AUDIT-RESPONSE-2026-09-25.md` §6. Mainnet verdict remains **NO-GO** and is
+not disputed.
+
+### 5.1 The Mint button could not be pressed in the state it was meant to clear — **S** — ✅ done 2026-09-25
+
+`MintRedeem` computed `capacityHalted` as `capIsZero`, full stop, and that disables submit. Zero
+capacity is also the **ordinary idle condition**: the attestation ages out, `maxNotional18` reads
+zero, and `mint()` relays a fresh signature to clear it. The control that triggers the refresh was
+disabled by the state the refresh exists to remove — directly beneath a panel reading "Attestation
+idle · your mint refreshes it". The copy was right and the button contradicted it.
+
+**No user could ever have minted from the idle state.** That is why 4.2's evidence was a `cast`
+transcript, and why that evidence did not show the problem: it proved the contract path and was
+read as proving the product. The claim in `AUDIT-RESPONSE` §1 has been corrected in place rather
+than quietly edited.
+
+The block is lifted for exactly one case — a stale attestation is the **only** binding leg, **and**
+the signer has a bundle covering that specific vault. It reads `bindingLegs`, which is the same
+predicate `CapacityNotice` already used to choose between "idle" and "halted", because a control
+and its own caption asking the same question two different ways is how they disagreed to begin
+with. An unknown signer state is not a yes.
+
+*Still open:* the acceptance criterion is a browser journey with a real wallet from `ageSec > 300`
+through to a confirmed mint. Not run. The panel and the gate now share one predicate, so the panel
+rendering "Attestation idle" **is** the gate being open — but that is an inference from shared
+code, and it is recorded as one.
+
+### 5.2 Only half of each signed bundle was relayed — **S** — ✅ done 2026-09-25
+
+The signer produces **two** signatures per vault from one observation: `attestSig` for
+`SolvencyRegistry.attestSigned` and `markSig` for `CertOracle.setMarkPriceSigned`. The app fetched
+both — its own type declares `markPx18`, `markNonce`, `markSig` — and relayed only the first. The
+registry relay reopens capacity; the oracle keeps whatever mark it was last given, so the basis
+cross-check runs against a stale price and `mintAllowed()` can close on a divergence that is not
+real. Refreshing half a bundle buys freshness for the number an auditor reads and not for the
+number the mint gate uses.
+
+**Not theoretical:** at the time of the fix the oracle held `markNonce` **1** while the signer had
+moved to **2**. The mark had been drifting for as long as the omission existed.
+
+Both halves of one bundle are now relayed and confirmed before the mint, mark first. The mark is
+skipped when the oracle already holds that nonce or newer — `CertOracle_StaleNonce` would refuse
+it, and two mints off one bundle is the ordinary case. Both targets are **pinned** to the generated
+address book, and `attestationFor` now rejects a payload naming a different `certOracle`, as it
+already did for the registry. `deploy/bin/usecert-smoke` relays both and was re-run from the
+audit's own starting condition (`ageSec` 7,260, capacity 0) with every hash recorded.
+
+### 5.3 Race and expiry handling — **S** — open
+
+On `StaleBatch`, `StaleNonce` or near-expiry, refetch state and bundle **once**, with deadline
+headroom, then show a specific message. Do not blindly retry the mint. Today a lost race surfaces
+as a raw revert.
+
+### 5.4 The five user-visible states — **M** — partly done
+
+The dashboard already distinguishes *stale-but-refreshable* from *signer unavailable* (2026-09-23)
+and 5.1 made the button agree with it. Still owed: *mark/oracle unhealthy* as distinct from a true
+capacity constraint, and **submitted vs confirmed** — a transaction hash is not a completed mint.
+The runbook and monitor still carry "MINTING HALTED" language that the on-demand design
+contradicts.
+
+### 5.5 Version and harden the signer path — **M** — open, *and it is 4.3*
+
+`/api/attestations` routing still is not in the repository. The re-audit adds specifics: loopback
+upstream, GET/HEAD/OPTIONS only, bounded per-IP and global rate limits, deterministic 429/503,
+telemetry — and alerting on signer readiness before the 60-second validity budget expires, rather
+than on registry age alone.
+
+### 5.6 Runtime-validate the signer payload — **S** — open
+
+`attestationFor` pins the registry and now the oracle, and `isRelayable` checks the deadline. The
+integers, addresses, signature shapes and ranges are still trusted as typed. A malformed response
+should produce a clean user error, not calldata.
+
+
 ---
 
 ## Keeping the public page in sync
@@ -583,6 +737,15 @@ Phase 0 and Phase 1's small items are done. What remains divides cleanly.
 **Blocked on a decision, not on work.** 1.3 / 1.4 / 1.5 are one editorial session rather than
 three, since all three are the same question — what does the project claim, and in what tense.
 2.3 needs a contracts answer on `bufferPct`. 0.4 needs artwork that does not exist.
+
+1.5 is now narrower than the other two: 3.6 built the mechanism, so the per-chain claims follow
+the deployment on their own and what remains is the **wording**, not the plumbing.
+
+**Ahead of all of it.** The corrective re-audit's remaining P0 items (5.3, 5.5) gate a public
+testnet pilot, not mainnet, and they are small. 5.1's acceptance evidence — one recorded wallet
+journey from an aged-out attestation through to a confirmed mint — is the single cheapest piece of
+evidence this project is missing, and it is the one that would have caught 5.1 before an auditor
+did.
 
 **Blocked on nothing, and next.** `DeployMainnet.s.sol`: the mainnet inputs are measured and
 recorded in `deploy/mainnet/4663.plan.json`, the generator refuses to emit a bundle without a
