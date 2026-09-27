@@ -1,0 +1,99 @@
+{
+  "_what": "Stack 5, the half that needs no price oracle, deployed 2026-09-27 ahead of the vaults (the six CertOracles refuse a stale price and the stock feeds were frozen for the weekend). DeployMainnet reuses every address below via MAINNET_* env and re-checks each (S9).",
+  "chainId": 4663,
+  "stack": 5,
+  "commit": "9e059093976a0a6d332a57432b6faa844c36f9c3",
+  "script": "script/DeployStack5Shared.s.sol",
+  "deployer": "0x6381577a72266E6b89eE9E96dF604CC3cd3f8e92",
+  "audited": false,
+  "_auditNote": "Internal pre-audit fixes (docs/AUDIT-SCOPE-STACK5.md); NOT externally audited.",
+  "solvencyRegistry": {
+    "address": "0x548F20fb28528E89989c6836d4FB2cDDE229F311",
+    "createdBy": "Safe batch 1a (nonce 2)",
+    "tx": "0x1ab2b8dc331f403bd6b880779f745def7f84cb5146a1792a80841e8c2159c059",
+    "block": 74119901,
+    "governance": "0x848c91323f720DEf985adbCC85FA40E3405B70DF",
+    "attester": "0x021EeE925f9a7F0e9de1dBB5211D62466404f681"
+  },
+  "contracts": {
+    "CapacityOracle": {
+      "address": "0x44B47D9ED4Dae02aE04DDfD0fF1F30e0dd84f1CD",
+      "tx": "0x482d5e6961898e3a6c02b816cf4a4367c98d242772b6aff8469d580cd9dc275e",
+      "block": 74120729
+    },
+    "CertFactory": {
+      "address": "0xf4396F080b990D2B6FA4bfA9b4d1ecFbdFE1c0D2",
+      "tx": "0x6296632d30573ee5e7f14613ecaa868401bd03341e7505b377fb59b5859cddcf",
+      "block": 74120750
+    },
+    "InsuranceStaking": {
+      "address": "0xd45bBDeadDdE8D88379C304ee69b6EE46c6B8490",
+      "tx": "0xd5147f04b9eb088e62fb7cd324cba1c710c4d65edc05211d11824e804e6d9087",
+      "block": 74120771
+    },
+    "CertStaking": {
+      "address": "0x618dA28D36b44eE2e48660A9B4136758f9B56308",
+      "tx": "0xfc6cd3ef8dbd568514b53c2015d29476731c369b445655f8c8cc0c24694e3cd0",
+      "block": 74120793
+    },
+    "BuybackForwarder": {
+      "address": "0xA9b8921645d4Ff43d087500fd16e8BAcC5Ced4B1",
+      "tx": "0x8943fc5244747b2b0ecf2c24a1e73858f279540c0cc962692ae777931f780b41",
+      "block": 74120814
+    },
+    "FeeVault": {
+      "address": "0x1Bd024D9aFF3dbBcb6f115fE4D82158b25d93389",
+      "tx": "0xe9dd9c2cf9a9d0b559b2c579d47ea29c2152633feda49728038575bee947656c",
+      "block": 74120835
+    }
+  },
+  "parameters": {
+    "insuranceStaking": {
+      "cooldown": 864000,
+      "withdrawWindow": 518400,
+      "drawDelay": 172800,
+      "maxDrawBps": 3000,
+      "depositCap": "10000000000",
+      "registrationDelay": 1382400,
+      "name": "UseCert Insurance Pool v2",
+      "vestingPeriod": 604800
+    },
+    "certStaking": {
+      "stakingToken": "0xb01356A005403C38c0fb01bd0aAfe51e81Ab9B07",
+      "rewardToken": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "rewardsDuration": 604800,
+      "stakeCap": "10000000000000000000000000",
+      "minNotify": "1000000"
+    },
+    "feeVault": {
+      "recipients": [
+        "0xd45bBDeadDdE8D88379C304ee69b6EE46c6B8490",
+        "0xA9b8921645d4Ff43d087500fd16e8BAcC5Ced4B1",
+        "0x6381577a72266E6b89eE9E96dF604CC3cd3f8e92",
+        "0x848c91323f720DEf985adbCC85FA40E3405B70DF"
+      ],
+      "bps": [
+        7000,
+        2000,
+        500,
+        500
+      ]
+    },
+    "capacityOracle": {
+      "maxAbsoluteCap": "5000000000000000000000000"
+    }
+  },
+  "sourcify": {
+    "exact_match": [
+      "CapacityOracle",
+      "CertFactory",
+      "InsuranceStaking",
+      "CertStaking",
+      "BuybackForwarder",
+      "FeeVault"
+    ],
+    "runtime_match": [
+      "SolvencyRegistry"
+    ]
+  }
+}
