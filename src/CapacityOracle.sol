@@ -39,6 +39,15 @@ contract CapacityOracle is ICapacityOracle {
     ///      governance framework (queue, delay, cancel, executor) that does not exist in C1, and
     ///      bolting a half-one onto this contract would be worse than the ceiling. The timelock
     ///      is recorded as a C2 item; this is the C1-shaped mitigation.
+    /// @dev M-8 / pre-audit 2026-09-27: this ceiling binds only if the DEPLOYER picks a realistic
+    ///      number. The live stacks were deployed with 1e27 ($1bn at 18 decimals, far above any
+    ///      vault's buffer or venue open interest), so it constrains nothing and the attester-fed
+    ///      depth leg is the only effective bound. DEPLOYMENT REQUIREMENT for stack 5 and later:
+    ///      size it per asset to the largest notional the vault could actually hedge.
+    ///      Deliberately NOT enforced by a second, deployer-passed "ceiling on the ceiling": the
+    ///      same deployer would choose both numbers, so it would add an argument, not a bound, and
+    ///      a hard-coded constant cannot know a realistic per-asset size. The constructor arity is
+    ///      also frozen by test/AttackSuite.t.sol.
     uint256 public immutable maxAbsoluteCap;
 
     uint256 public depthBps;

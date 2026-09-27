@@ -40,7 +40,8 @@ import {CertOracle} from "../../src/CertOracle.sol";
 ///         scoped to `deployments/` and widening it is a security property, not a convenience.
 contract AttesterSign is KeeperScript {
     /// @notice How long each signature stays usable. Must not exceed the registry's own
-    ///         SIGNATURE_VALIDITY, or the contract rejects what this script produces.
+    ///         SIGNATURE_VALIDITY nor CertOracle.MARK_SIGNATURE_VALIDITY (both 60), or the contracts
+    ///         reject what this script produces.
     uint64 internal constant VALIDITY = 60;
 
     function _signerKey() internal view virtual override returns (uint256) {
@@ -139,7 +140,9 @@ contract AttesterSign is KeeperScript {
         bytes memory markSig = _sign(
             pk,
             oracle.domainSeparator(),
-            keccak256(abi.encode(oracle.SET_MARK_TYPEHASH(), s.markPx18, s.markNonce, deadline))
+            // H-6: SetMark(px18, nonce, observedAt, deadline), domain version "2". The mark shares the
+            // attestation's observedAt, so both halves of a mint age out together.
+            keccak256(abi.encode(oracle.SET_MARK_TYPEHASH(), s.markPx18, s.markNonce, observedAt, deadline))
         );
 
         // Built in halves and joined. One 20-argument string.concat also exceeds the stack, and

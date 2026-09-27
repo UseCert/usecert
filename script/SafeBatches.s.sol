@@ -61,7 +61,8 @@ contract SafeBatches is DeployMainnet {
                     DEVIATION_BPS,
                     BASIS_BAND_BPS,
                     POKE_CONFIRMATION_SECONDS,
-                    _singleSource()
+                    _singleSource(),
+                    MAX_MARK_AGE
                 )
             );
             packed = _entry(packed, init);

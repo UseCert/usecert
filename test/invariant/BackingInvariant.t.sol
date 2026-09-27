@@ -299,7 +299,7 @@ contract BackingInvariantTest is VaultFixture {
         // And once flat, a truthful attestation puts the vault back in band: it stops, it does
         // not keep selling into a short.
         vm.prank(attester);
-        reg.attest(address(vault), 99, 0, 3_600e18, 1_190_000e18);
+        reg.attest(address(vault), batchId, 0, 3_600e18, 1_190_000e18); // M-11: the next batch, no jump
         assertEq(vault.solvency().deltaBps, 10_000);
         vm.expectRevert(CertVault.CertVault_InBand.selector);
         vault.rebalance();

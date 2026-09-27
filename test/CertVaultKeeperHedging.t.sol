@@ -219,4 +219,44 @@ contract CertVaultKeeperHedgingTest is VaultFixture {
         vault.setVenueApiKey(3, PUBKEY);
         assertEq(lighter.apiKeyOf(vault.lighterAccountIndex(), 3), PUBKEY);
     }
+
+    // ------------------------------------------------------------------------- H-4 kill switch
+
+    /// H-4: the kill switches take every power from the disabled key in the same block, including
+    /// the vault-side ones that read `oracle.attester()` (keeper-mode settleMint, accrueFunding),
+    /// and leave every exit and refund path open (Law 2).
+    function test_H4_disabledAttesterCannotSettleButExitsAndRefundsStayOpen() public {
+        _enable();
+        vm.prank(alice);
+        uint256 held = vault.requestMint(50_000e6);
+        vm.prank(attester);
+        vault.settleMint(held, PX);
+        vm.prank(alice);
+        uint256 pending = vault.requestMint(10_000e6);
+
+        // The fixture deploys both contracts from this test contract, so it is their governance.
+        reg.disableAttester();
+        oracle.disableAttester();
+
+        vm.prank(attester);
+        vm.expectRevert(CertVault.CertVault_OnlyAttester.selector);
+        vault.settleMint(pending, PX);
+
+        vm.prank(attester);
+        vm.expectRevert(CertVault.CertVault_OnlyAttester.selector);
+        vault.accrueFunding(1e18);
+
+        // Exits are untouched: a queued redemption and the forceExit backstop.
+        uint256 certs = cert.balanceOf(alice);
+        vm.prank(alice);
+        vault.requestRedeem(certs / 2);
+        uint256 rest = cert.balanceOf(alice);
+        vm.prank(alice);
+        vault.forceExit(rest);
+        assertEq(cert.balanceOf(alice), 0, "Law 2: every certificate exited");
+
+        // And the unsettled mint can still be refunded once its window lapses.
+        vm.warp(block.timestamp + SETTLE_WINDOW + 1);
+        vault.stageRefund(pending);
+    }
 }
