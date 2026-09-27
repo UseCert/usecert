@@ -509,6 +509,8 @@ contract DeployMainnetStack5Test is Test {
             assertEq(CapacityOracle(capacity).absoluteCap18(d.deploymentOf(i).vault), CAPS[i], "per-asset cap = table");
             assertEq(d.maxAbsoluteCapOf(SYMS[i]), CAPS[i], "reviewed row");
         }
+        // Option A: a keeper-mode round trip on a vault whose token multiplier is not 1.
+        _roundTrip(d, 1);
 
         // A stack-5 vault holding certificates cannot be retired by the wind-down builder.
         _writeStack4ShapedBook(d);
@@ -673,10 +675,12 @@ contract DeployMainnetStack5Test is Test {
         vm.prank(attester);
         SolvencyRegistry(registry).attest(dep.vault, 2, 0, 0, oi);
 
+        // Option A: the venue marks the SHARE, PX / M; the oracle compares mark x M to the feed.
+        uint256 sharePx = PX[i] * 1e18 / MULTS[i];
         uint64 obs = uint64(block.timestamp);
-        bytes memory sig = _sign(o, ATTESTER_PK, PX[i], 1, obs, obs + 60);
+        bytes memory sig = _sign(o, ATTESTER_PK, sharePx, 1, obs, obs + 60);
         vm.prank(makeAddr("relayer"));
-        o.setMarkPriceSigned(PX[i], 1, obs, obs + 60, sig);
+        o.setMarkPriceSigned(sharePx, 1, obs, obs + 60, sig);
         assertEq(o.markAt(), obs, "v2 mark carries its observation time");
         assertTrue(o.mintAllowed(), "mint gate open on a fresh v2 mark");
 
@@ -689,14 +693,18 @@ contract DeployMainnetStack5Test is Test {
 
         vm.prank(attester);
         vm.expectRevert(CertVault.CertVault_OnlySettler.selector);
-        v.settleMint(id, PX[i]);
+        v.settleMint(id, sharePx);
 
+        // The keeper reports the perp fill, a SHARE price.
         vm.prank(settler);
-        v.settleMint(id, PX[i]);
+        v.settleMint(id, sharePx);
         (,,,,,, uint256 indicative) = v.mintReceipts(id);
         assertTrue(indicative > 0, "nothing indicated");
         assertEq(Certificate(dep.certificate).balanceOf(alice), indicative, "settled certificates");
-        assertEq(v.venuePositionBase(), int256(indicative * 1e4 / 1e18), "ledger records the keeper's hedge");
+        assertEq(v.mintMult18(id), MULTS[i], "receipt records the multiplier it was hedged at");
+        assertEq(
+            v.venuePositionBase(), int256(indicative * MULTS[i] * 1e4 / 1e36), "ledger records certs x M shares"
+        );
     }
 
     function _writeStack4ShapedBook(S5Harness d) internal {

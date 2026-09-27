@@ -104,6 +104,9 @@ contract CertVault {
     event VenueApiKeySet(uint8 indexed apiKeyIndex);
     /// @dev The keeper's work order: open `base` venue units on `side`, no worse than
     ///      `limitPx18`, then call settleMint(receiptId, fillPx18).
+    /// @dev Option A: `base` is in SHARE units (certificates x multiplier18()) and `limitPx18` is a
+    ///      SHARE price, exactly what the keeper places; settleMint's fillPx18 is the share fill.
+    ///      receiptId 0 is a rehedge() top-up: fill it, there is nothing to settle.
     event HedgeRequested(uint256 indexed receiptId, uint256 base, uint8 side, uint256 limitPx18);
     event MintRequested(uint256 indexed receiptId, address indexed user, uint256 amountIn);
     event MintSettled(uint256 indexed receiptId, uint256 certOut, uint256 fillPx18);
@@ -322,6 +325,11 @@ contract CertVault {
     ///      A separate mapping because MintReceipt's getter is destructured positionally by the
     ///      auditor's files, so the struct cannot grow.
     mapping(uint256 => uint256) public mintFee;
+    /// @notice Option A: the stock token's multiplier (oracle.multiplier18()) when the receipt was
+    ///         requested - the one its hedge was sized with (base = indicativeCerts x M shares).
+    ///         settleMint books that base and bands the keeper's SHARE fill price against
+    ///         requestPx18 / M; stageRefund closes that base.
+    mapping(uint256 => uint256) public mintMult18;
 
     /// @notice Collateral posted to Lighter as margin, less what has been requested back.
     /// @dev A sizing counter for withdrawals only. It deliberately does NOT track funding, PnL or
@@ -931,7 +939,9 @@ contract CertVault {
         uint256 fee = received * cfg.mintFeeBps / 10_000;
         uint256 net18 = _to18(received - fee);
         // L-9: quantised to the venue's own representable size, so the certificates minted and
-        // the base amount hedged are THE SAME NUMBER rather than merely ordered. This is C-1's
+        // the base amount hedged are THE SAME NUMBER rather than merely ordered. (Option A: at a
+        // multiplier other than 1 the hedge is certOut x M shares, floored to a venue unit, so it
+        // is at most one unit short; rehedge() closes that drift.) This is C-1's
         // fix applied to the path C-1 did not touch: requestMint has quantised before recording
         // and hedging since C-1, which is why the queued path never had this defect, and
         // mintInstant is where it remained.
@@ -964,7 +974,12 @@ contract CertVault {
         // (test_ATK_dustMintCannotCreateUnhedgedSupply). _hedge's own guard would catch it too;
         // this one names the condition at the point the amount is decided.
         if (certOut == 0) revert CertVault_ZeroHedgeAmount();
-        _hedge(certOut, px18, SIDE_BID);
+        // Option A (total return): a certificate tracks ONE stock token, and one token is
+        // multiplier18() shares, so the hedge is certOut x M shares at the share price px / M.
+        {
+            (uint256 base, uint256 sharePx18) = _toShares(certOut, px18, _mult());
+            _hedge(base, sharePx18, SIDE_BID);
+        }
 
         // The escrow now buys a quantised number of certificates, so a remainder is left over:
         // floor-division and size-decimals dust, at most one venue tick of notional ($0.036 at
@@ -997,7 +1012,7 @@ contract CertVault {
         uint256 net18 = _to18(received - fee);
         // C-1: floored to the venue's own representable size BEFORE it is recorded or hedged, so
         // r.indicativeCerts is exactly the exposure the order below asks for rather than a figure
-        // the venue cannot hold. settleMint mints this number and nothing else, so a certificate
+        // the venue cannot hold (Option A: times the multiplier, floored to a unit). settleMint mints this number and nothing else, so a certificate
         // that the hedge cannot cover is not merely discouraged, it is unrepresentable. The
         // remainder is escrow with no certificate against it and is reconciled in settleMint.
         uint256 indicative = _quantiseToVenue(net18 * 1e18 / px18);
@@ -1048,15 +1063,18 @@ contract CertVault {
         mintFee[receiptId] = fee;
 
         escrowAtVenue += _postMargin(received - fee);
+        // Option A: the hedge is indicative x M shares at the share price. The multiplier is
+        // recorded so settleMint books, and stageRefund closes, exactly what was opened here even
+        // if the token's multiplier has moved in between.
+        uint256 m = _mult();
+        mintMult18[receiptId] = m;
+        (uint256 base, uint256 sharePx18) = _toShares(indicative, px18, m);
         if (keeperHedging) {
             // The keeper opens it. Checked here rather than left to the venue, because the venue
             // would reject an undersized order off chain after this escrow had been taken.
-            uint256 base = _baseAmount(indicative);
-            if (base == 0) revert CertVault_ZeroHedgeAmount();
-            if (_belowVenueMinimum(base, px18)) revert CertVault_BelowVenueMinimum();
-            emit HedgeRequested(receiptId, base, SIDE_BID, _limitPx18(px18, SIDE_BID));
+            _workOrder(receiptId, base, sharePx18);
         } else {
-            _hedge(indicative, px18, SIDE_BID);
+            _hedge(base, sharePx18, SIDE_BID);
         }
         emit MintRequested(receiptId, msg.sender, received);
     }
@@ -1156,8 +1174,11 @@ contract CertVault {
         if (fillPx18 == 0) revert CertVault_FillPriceOutOfBand();
 
         uint256 refPx = r.requestPx18;
-        uint256 diff = fillPx18 > refPx ? fillPx18 - refPx : refPx - fillPx18;
-        if (refPx == 0 || diff * 10_000 / refPx > cfg.settleBandBps) revert CertVault_FillPriceOutOfBand();
+        // Option A: the keeper fills the perp, which trades SHARES, so fillPx18 is a share price
+        // and is banded against the share price at request (requestPx18 / M at request).
+        (uint256 base, uint256 shareRefPx) = _toShares(r.indicativeCerts, refPx, mintMult18[receiptId]);
+        uint256 diff = fillPx18 > shareRefPx ? fillPx18 - shareRefPx : shareRefPx - fillPx18;
+        if (shareRefPx == 0 || diff * 10_000 / shareRefPx > cfg.settleBandBps) revert CertVault_FillPriceOutOfBand();
 
         // Keeper mode: settling is the claim that the off-chain hedge FILLED, so it is the
         // settler's to make. H-4 (stack 5): no longer the attester's - see settler.
@@ -1176,7 +1197,7 @@ contract CertVault {
 
         uint256 certOut = r.indicativeCerts;
         // The position enters the vault's ledger when it exists, not when it was asked for.
-        if (keeperHedging) _recordOrder(_baseAmount(certOut), SIDE_BID);
+        if (keeperHedging) _recordOrder(base, SIDE_BID);
         // C-2: the promise this receipt reserved is now outstanding supply, so hand the reservation
         // over rather than counting it twice. Floored for the same reason the stageRefund clamp is
         // (see there): a counter underflow must never be the thing that reverts a mint path.
@@ -1282,7 +1303,7 @@ contract CertVault {
         // refund leaves closing to the keeper, which knows what it opened; the user's escrow is
         // returned either way.
         if (r.indicativeCerts > 0 && !keeperHedging) {
-            placed = _tryHedge(r.indicativeCerts, r.requestPx18, SIDE_ASK);
+            placed = _tryHedge(r.indicativeCerts, r.requestPx18, mintMult18[receiptId], SIDE_ASK);
         }
 
         emit RefundStaged(receiptId, posted, placed);
@@ -1471,10 +1492,14 @@ contract CertVault {
 
         uint256 supplyBefore = _supply(); // capture BEFORE certificate.burn
         certificate.burn(msg.sender, certIn);
-        // L-9's other half: a CLOSE keeps flooring (_baseAmount, via _hedge). Rounding a close up
+        // L-9's other half: a CLOSE keeps flooring (_toShares, then _hedge). Rounding a close up
         // would over-close, leaving the vault short against the supply that remains — the same
-        // defect as an under-sized open, pointing the other way. Round in, floor out.
-        _hedge(certIn, px18, SIDE_ASK);
+        // defect as an under-sized open, pointing the other way. Round in, floor out. Option A:
+        // the close is certIn x M shares at the share price, like every other order.
+        {
+            (uint256 base, uint256 sharePx18) = _toShares(certIn, px18, _mult());
+            _hedge(base, sharePx18, SIDE_ASK);
+        }
         IERC20(cfg.collateral).safeTransfer(msg.sender, amountOut);
 
         // M-4: the venue-side margin behind the position just closed is now backing nothing, and
@@ -1562,7 +1587,7 @@ contract CertVault {
         // Fail-open (Law 2): forceExit is the last-resort backstop and must survive even when the
         // closing order itself cannot be placed. requestRedeem shares this path deliberately —
         // both queued-exit entry points must be equally unstoppable. See _tryHedge.
-        if (!_tryHedge(certIn, px18, SIDE_ASK)) emit CloseOrderNotPlaced(certIn);
+        if (!_tryHedge(certIn, px18, _mult(), SIDE_ASK)) emit CloseOrderNotPlaced(certIn);
 
         // Price-independent by construction: certIn <= supplyBefore always (the burn above would
         // have reverted otherwise), so this holder's share of postedMargin can never exceed what
@@ -1999,8 +2024,10 @@ contract CertVault {
             // purpose — and therefore also bypasses _recordOrder, which sizes off a base amount
             // this order does not carry. The ledger is zeroed explicitly instead: a full-size close
             // on the correct side lands the position at flat.
+            // Option A: the venue quotes the share, so the guard price is the share price.
+            (, uint256 sharePx18) = _toShares(0, px18, _mult());
             lighter.createOrder(
-                lighterAccountIndex(), cfg.marketIndex, 0, oracle.toTickPrice(_limitPx18(px18, side)), side, ORDER_TYPE_MARKET
+                lighterAccountIndex(), cfg.marketIndex, 0, oracle.toTickPrice(_limitPx18(sharePx18, side)), side, ORDER_TYPE_MARKET
             );
             venuePositionBase = 0;
             lastOrderAt = block.timestamp; // H-5: this order bypasses _recordOrder
@@ -2231,6 +2258,27 @@ contract CertVault {
     ///      booked as reaching flat, not as a short that does not exist. No separate closeExcess
     ///      is needed.
     function rebalance() external {
+        _rebalance(true, type(uint256).max);
+    }
+
+    /// @notice Option A: the settler's band-free rebalance, for the gaps the 1% band hides or the
+    ///         permissionless path cannot close in keeper mode - a dividend step (the multiplier
+    ///         rises, so supply x M shares needs a top-up the perp never pays) and a split the
+    ///         venue did not rescale. `maxBase` caps the order in venue units (share units).
+    /// @dev Everything else is rebalance(): a fresh attestation (a new batch, observed after the
+    ///      last order plus REBALANCE_VENUE_LAG), REBALANCE_MIN_INTERVAL, MAX_REBALANCE_NOTIONAL_18
+    ///      and the shared rolling budget, and the same gap: attested notional (venue base x share
+    ///      mark) against (supply + pending) x token price, i.e. supply x M shares. Under-hedged in
+    ///      keeper mode it emits HedgeRequested(0, base, 0, limitPx18) - receipt 0 means "no mint to
+    ///      settle" - and books the base at once, so the next attestation must postdate it; the
+    ///      keeper opens exactly that. Otherwise it places the order on chain as rebalance() does.
+    ///      Settler-only because it opens exposure without a band; never on a redemption path.
+    function rehedge(uint256 maxBase) external {
+        if (msg.sender != settler) revert CertVault_OnlySettler();
+        _rebalance(false, maxBase);
+    }
+
+    function _rebalance(bool banded, uint256 maxBase) internal {
         ISolvencyRegistry.Attestation memory a = _latest();
         if (a.batchId <= lastRebalancedBatch) revert CertVault_AlreadyRebalancedThisBatch();
         if (a.attestedAt <= lastOrderAt + REBALANCE_VENUE_LAG) revert CertVault_AttestationPredatesLastOrder();
@@ -2251,9 +2299,9 @@ contract CertVault {
         // Not a Law 2 concern: rebalance() is not a redemption path, and it is retryable.
         if (px18 == 0) revert CertVault_NoPrice();
 
-        uint256 lo = 10_000 - DELTA_BAND_BPS;
-        uint256 hi = 10_000 + DELTA_BAND_BPS;
-        if (s.deltaBps >= lo && s.deltaBps <= hi) revert CertVault_InBand();
+        if (banded && s.deltaBps >= 10_000 - DELTA_BAND_BPS && s.deltaBps <= 10_000 + DELTA_BAND_BPS) {
+            revert CertVault_InBand();
+        }
 
         // At required == 0 with a non-zero attested notional (CRITICAL A) this is the false
         // branch, so the trim is a SELL of the whole attested notional — bounded by
@@ -2278,15 +2326,23 @@ contract CertVault {
         if (gap18 > room) gap18 = room;
         rebalanceBucket18 = level + gap18;
 
-        uint256 certEquivalent = gap18 * 1e18 / px18;
+        // Option A: the USD gap in certificate terms, then in shares at the live multiplier -
+        // gap / token px x M = gap / share px.
+        (uint256 base, uint256 sharePx18) = _toShares(gap18 * 1e18 / px18, px18, _mult());
+        if (base > maxBase) base = maxBase;
         // Finding 1a (Task 10 review): either this division or the size-decimals conversion
-        // inside _hedge can floor a small-but-real gap to a baseAmount of 0 — Lighter's
+        // can floor a small-but-real gap to a baseAmount of 0 — Lighter's
         // "close the entire position" primitive, not a no-op. That is ordinary during a
         // wind-down (outstanding notional a few cents wide at sizeDecimals = 4). Treat a
         // dust-sized gap as already in-band rather than ever submitting a zero-amount order.
-        if (_baseAmount(certEquivalent) == 0) revert CertVault_InBand();
+        if (base == 0) revert CertVault_InBand();
+        if (underHedged && !banded && keeperHedging) {
+            _workOrder(0, base, sharePx18);
+            _recordOrder(base, SIDE_BID);
+            return;
+        }
         int256 ledgerBefore = venuePositionBase;
-        _hedge(certEquivalent, px18, underHedged ? SIDE_BID : SIDE_ASK);
+        _hedge(base, sharePx18, underHedged ? SIDE_BID : SIDE_ASK);
         // M-10: see above. Only a trim that starts from a recorded long (or flat) and would cross
         // below zero is clamped; a recorded short is left exactly as it was
         // (test_zeroSupplyTrimCannotCloseADanglingShort keeps that gap visible).
@@ -2764,35 +2820,39 @@ contract CertVault {
         return (certAmount18 / step) * step;
     }
 
-    /// @dev Shared size-decimals conversion used by _hedge, _tryHedge and rebalance()'s own
-    ///      pre-check, so all three agree on exactly when an amount would floor to Lighter's
-    ///      baseAmount == 0 close-all primitive (Finding 1, Task 10 review).
-    /// @dev L-2: returns the value UN-NARROWED, and the uint48 narrowing now happens in the two
-    ///      callers that can each handle it correctly. It used to `uint48(...)` here, unchecked,
-    ///      while withdrawals in this same file use SafeCast — but a bare `SafeCast.toUint48`
-    ///      HERE would have been worse than the inconsistency: this helper is the first thing
-    ///      _tryHedge does, outside every try/catch it owns, so a revert in it would propagate
-    ///      out of the deliberately fail-open exit path and revert forceExit — Law 2's backstop —
-    ///      for an overflow. So the split: _hedge (mint/rebalance, revert-capable by design)
-    ///      SafeCasts and reverts loudly rather than silently submitting a truncated order, and
-    ///      _tryHedge treats out-of-range exactly like any other unplaceable close and returns
-    ///      false. The zero-check in both callers still runs on this wide value, so an amount
-    ///      that truncates to zero is caught before any cast, as it was before.
-    /// @dev FINDING 1, third instance and the one that mattered most after _queueExit's own. This
-    ///      was `certAmount18 * (10 ** cfg.sizeDecimals) / 1e18`, a CHECKED multiplication in the
-    ///      first statement _tryHedge executes — outside every try/catch that helper owns, which
-    ///      the NatSpec above already identifies as the reason a revert here propagates out of the
-    ///      fail-open exit path and reverts forceExit. That paragraph was written about the uint48
-    ///      narrowing and missed the multiplication sitting next to it.
-    ///
-    ///      Now total. mulDiv's 512-bit intermediate panics only when the quotient leaves uint256,
-    ///      i.e. `certAmount18 * 10**sizeDecimals >= 1e18 * 2^256`; with sizeDecimals bounded at
-    ///      MAX_VENUE_DECIMALS = 18 in the constructor the multiplier is at most 1e18, so that
-    ///      needs certAmount18 >= 2^256 and is unreachable for a uint256. The constructor bound is
-    ///      the other half of this fix and is not decoration: `10 ** cfg.sizeDecimals` panics on
-    ///      its own past 78.
-    function _baseAmount(uint256 certAmount18) internal view returns (uint256) {
-        return Math.mulDiv(certAmount18, _sizeUnit, 1e18);
+    /// @dev Option A (total return). The oracle's `multiplier18()` is the stock token's ERC-8056
+    ///      uiMultiplier: how many SHARES one token (one certificate) represents, 1e18-scaled. The
+    ///      venue trades shares, so every order the vault sizes goes through `_toShares`. The
+    ///      oracle's multiplier18() never reverts (bounded staticcalls, and a last-good fallback),
+    ///      so reading it on the exit path adds no revert to forceExit (Law 2).
+    function _mult() internal view returns (uint256) {
+        return oracle.multiplier18();
+    }
+
+    /// @dev `certs` at token price `px18` -> the venue order: `base` in venue units of SHARES,
+    ///      floor(certs x m / 1e18 x 10**sizeDecimals / 1e18), and the share price px18 x 1e18 / m.
+    ///      Floors both ways (L-9: round in, floor out). Total for every input the exit path can
+    ///      hand it (FINDING 1): the inputs are clamped exactly as _value18 clamps them, and `m`
+    ///      is inside the oracle's [MIN_MULTIPLIER_18, MAX_MULTIPLIER_18], so `m * _sizeUnit` is at
+    ///      most 1e39 and neither mulDiv quotient can leave uint256. Replaces _baseAmount, which
+    ///      was this with m = 1e18.
+    /// @dev L-2 (kept from _baseAmount): `base` is returned UN-NARROWED. _hedge (mint/rebalance,
+    ///      revert-capable) SafeCasts it to uint48; _tryHedge (the exit path) range-checks it and
+    ///      treats an unrepresentable size as an unplaceable close, so nothing here can revert
+    ///      forceExit.
+    function _toShares(uint256 certs, uint256 px18, uint256 m) internal view returns (uint256 base, uint256 sharePx18) {
+        if (px18 > MAX_VALUATION_PX18) px18 = MAX_VALUATION_PX18;
+        if (certs > MAX_VALUATION_QTY18) certs = MAX_VALUATION_QTY18;
+        base = Math.mulDiv(certs, m * _sizeUnit, 1e36);
+        sharePx18 = Math.mulDiv(px18, 1e18, m);
+    }
+
+    /// @dev Keeper mode: an opening order is emitted for the keeper to place, never sent on chain
+    ///      (the venue's L1 orders are reduce-only). Same checks _hedge makes before sending.
+    function _workOrder(uint256 receiptId, uint256 base, uint256 sharePx18) internal {
+        if (base == 0) revert CertVault_ZeroHedgeAmount();
+        if (_belowVenueMinimum(base, sharePx18)) revert CertVault_BelowVenueMinimum();
+        emit HedgeRequested(receiptId, base, SIDE_BID, _limitPx18(sharePx18, SIDE_BID));
     }
 
     /// @dev Submits the vault's own order through Lighter's priority queue. Market order because
@@ -2803,11 +2863,12 @@ contract CertVault {
     ///      requestMint and rebalance() call this revert-capable path deliberately — an unhedged
     ///      mint must not pass silently (Law 1); closeAll() bypasses this helper entirely to reach
     ///      the primitive on purpose.
-    function _hedge(uint256 certAmount18, uint256 px18, uint8 side) internal {
+    /// @dev Option A: takes the order already in venue terms - `base` in share units and the
+    ///      SHARE price - from _toShares.
+    function _hedge(uint256 base, uint256 px18, uint8 side) internal {
         // The venue's L1 orders are reduce-only; an opening buy sent here would be discarded
         // off chain while the ledger recorded it. See keeperHedging.
         if (keeperHedging && side == SIDE_BID) revert CertVault_OpenRequiresKeeper();
-        uint256 base = _baseAmount(certAmount18);
         if (base == 0) revert CertVault_ZeroHedgeAmount();
         // L-2: zero-checked on the wide value first (so a truncation to exactly zero still
         // reverts CertVault_ZeroHedgeAmount, unchanged), then narrowed with SafeCast rather than
@@ -2871,14 +2932,16 @@ contract CertVault {
     ///      returns false instead of propagating. mintInstant, requestMint and rebalance() deliberately
     ///      keep calling the revert-capable _hedge — minting and rebalancing may be gated, but
     ///      redemption may never be (Laws 2 and 3).
-    function _tryHedge(uint256 certAmount18, uint256 px18, uint8 side) internal returns (bool placed) {
-        uint256 base = _baseAmount(certAmount18);
+    /// @dev Option A: `m` is the multiplier to size with - the live one for an exit, the one
+    ///      recorded at request for a refund - and `px18` is the TOKEN price; _toShares is total.
+    function _tryHedge(uint256 certAmount18, uint256 tokenPx18, uint256 m, uint8 side) internal returns (bool placed) {
+        (uint256 base, uint256 px18) = _toShares(certAmount18, tokenPx18, m);
         // Finding 1b (Task 10 review): baseAmount == 0 is Lighter's "close the entire position"
         // primitive, not a no-op. _queueExit already rejects certIn == 0 up front, but this stays
         // as defence in depth — nothing here may ever forward a zero to createOrder. Treat it the
         // same as any other unplaceable close: report "not placed" rather than submitting it.
         // L-2: an amount above the venue's uint48 base field is handled here rather than by
-        // SafeCast, for the reason given on _baseAmount — this helper must not revert, so an
+        // SafeCast, for the reason given on _toShares — this helper must not revert, so an
         // unrepresentable size is just another unplaceable close.
         if (base == 0 || base > type(uint48).max) return false;
         uint48 baseAmount = uint48(base);
