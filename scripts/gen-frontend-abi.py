@@ -71,7 +71,15 @@ if CHAIN not in CHAINS:
     sys.exit("unknown --chain %r; known: %s" % (CHAIN, ", ".join(CHAINS)))
 
 CHAIN_LABEL = CHAINS[CHAIN]["label"]
-BOOK_PATH = os.path.join(ROOT, "deployments", CHAINS[CHAIN]["book"])
+# Stack 5 is recorded in its own book (deployments/4663.stack5.json) so a dry run can never
+# overwrite the live stack-4 record; --book picks it. The site switches to stack-5 behaviour
+# only through the book's own "stack": 5 marker, written into CHAIN below.
+BOOK_NAME = CHAINS[CHAIN]["book"]
+if "--book" in sys.argv:
+    BOOK_NAME = sys.argv[sys.argv.index("--book") + 1]
+    if os.path.basename(BOOK_NAME) != BOOK_NAME or not BOOK_NAME.startswith(CHAIN + "."):
+        sys.exit("--book must be a file name in deployments/ for chain %s, e.g. %s.stack5.json" % (CHAIN, CHAIN))
+BOOK_PATH = os.path.join(ROOT, "deployments", BOOK_NAME)
 OUT_PATH = os.path.join(ROOT, "frontend", CHAINS[CHAIN]["out"])
 
 # Addresses without which the front end cannot function. `testFaucet` and `lighterSim` are
@@ -284,7 +292,7 @@ export const CHAIN = {{
   nativeCurrency: {{ name: 'Ether', symbol: 'ETH', decimals: 18 }},
   rpcUrls: {{ default: {{ http: ['{rpc}'] }} }},
   blockExplorers: {{ default: {{ name: 'Blockscout', url: '{explorer}' }} }},
-{contracts}  testnet: {is_testnet},
+{contracts}{stack_line}  testnet: {is_testnet},
 }} as const;
 
 /** Decimals differ per value class. Getting this wrong is the single largest hidden cost. */
@@ -325,6 +333,7 @@ def main():
             contracts=("  contracts: {{ multicall3: {{ address: '%s' }} }},\n" % CHAINS[CHAIN]["multicall3"])
             .replace("{{", "{").replace("}}", "}")
             if CHAINS[CHAIN].get("multicall3") else "",
+            stack_line=("  stack: %d,\n" % int(book["stack"])) if book.get("stack") else "",
             block=book.get("blockNumber"),
             bookfile=os.path.basename(BOOK_PATH),
             book=book_digest(BOOK_PATH),
