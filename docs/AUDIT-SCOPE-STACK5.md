@@ -9,8 +9,8 @@ stack 5.
 | Repository | https://github.com/UseCert/usecert, branch **`feat/stack5`** |
 | Chain | Robinhood Chain mainnet, chain id 4663 (not yet deployed) |
 | Tooling | Solidity 0.8.24, Foundry, OpenZeppelin v5.7.0, optimizer 200 runs, `via_ir` off |
-| Tests | 685 in total: 682 pass. 3 fail by design, in `test/AuditPoC.t.sol` from the 2026-09-08 audit. `test/script/DeployMainnetStack5.t.sol` runs the whole stack-5 deploy, the Safe phases A and B, and a first keeper-mode mint |
-| Largest contract | CertVault, 23,458 B runtime (EIP-170 limit 24,576) |
+| Tests | 699 in total: 696 pass. 3 fail by design, in `test/AuditPoC.t.sol` from the 2026-09-08 audit. `test/script/DeployMainnetStack5.t.sol` runs the whole stack-5 deploy, the Safe phases A and B, and a first keeper-mode mint |
+| Largest contract | CertVault, 24,139 B runtime (EIP-170 limit 24,576) |
 | What changed vs stack 4 | 9 source files changed, +1,815 / −211 lines (`git diff a057c8b feat/stack5 -- src/`) |
 
 ## Contracts
@@ -44,6 +44,26 @@ stack 5.
 **Fee split, as it will be deployed:** 70% InsuranceStaking, 20% BuybackForwarder (→ CERT stakers),
 5% the ops wallet, 5% the treasury Safe. That is four distinct recipients, pinned in
 `test_mainnetSplit_order_and_bps`.
+
+## Stock-token multiplier (option A, total return)
+
+Each feed prices ONE Robinhood stock token, and one token is `uiMultiplier()` shares (ERC-8056,
+1e18-scaled; dividends raise it, splits multiply it). A certificate is a synthetic of one token,
+dividends included; the venue perp trades shares, so the hedge target is supply x M shares.
+
+- **CertOracle:** new last constructor argument and immutable `stockToken` (zero only off
+  mainnet: refused on chain 4663). `multiplier18()` (never reverts; falls back to `markMult18`,
+  the multiplier seen with the last mark), `sharePx18()`, `corporateActionWindow()`. Minting
+  closes while the token reports `oraclePaused()`, from `MULTIPLIER_PRE_WINDOW` before a staged
+  change until `MULTIPLIER_POST_WINDOW` after it and the feed has re-published, and when the mark
+  was taken under a multiplier more than `MAX_MULTIPLIER_DRIFT_BPS` away. The basis band compares
+  the feed with mark x M. Redemption reads none of it.
+- **CertVault:** every order is sized `certs x M` shares at the share price `px / M` (mint opens,
+  exits, refunds, rebalance, closeAll's guard price); `HedgeRequested` carries the share base and
+  limit; `mintMult18(receiptId)` records M per mint; settleMint bands the keeper's SHARE fill.
+  New settler-only `rehedge(maxBase)`: rebalance without the 1% band (dividend top-ups, a split
+  the venue did not rescale); in keeper mode it emits `HedgeRequested(0, ...)`.
+- Tests: `test/CertVaultMultiplier.t.sol`.
 
 ## Deploy parameters that differ from stack 4
 
