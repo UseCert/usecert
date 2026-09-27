@@ -1,0 +1,453 @@
+#!/usr/bin/env python3
+"""UseCert funding relay (pre-audit H-8): record on chain the funding each vault's venue account
+actually paid or received, by calling CertVault.accrueFunding(int256 delta18) with the ATTESTER
+key. Until this runs, BufferBook's ledger - the only on-chain signal of a venue loss - stays 0
+and K2's sweepFees can send away the cushion that should absorb it.
+
+One pass per invocation (the systemd timer runs it hourly):
+
+    usecert-funding-relay              relay every vault
+    usecert-funding-relay --dry-run    every read and every check, then print; no send, no state write
+
+WHERE THE FIGURE COMES FROM (api.rh.lighter.xyz):
+  * GET /api/v1/positionFunding?account_index=&market_id=&limit=&cursor=   AUTHENTICATED - for a
+    main account the venue answers {"code":20001,"message":"invalid param : auth required for main
+    accounts"} without a token (recorded 2026-09-27). The token is made with the vault's venue API
+    key, the one its keeper already holds, and sent in the Authorization header (never in a URL,
+    never logged). Response, per the Lighter SDK's PositionFundings model (NOT recorded - it needs
+    the key): {"position_fundings":[{"timestamp","market_id","funding_id","change","rate",
+    "position_size","position_side"}], "next_cursor"}; `change` is USD, 6 decimals.
+  * GET /api/v1/fundings?market_id=&resolution=1h&start_timestamp=&end_timestamp=&count_back=
+    PUBLIC, recorded 2026-09-27 (deploy/tests/fixtures/fundings-16.json): hourly records
+    {"timestamp": seconds, "value": USD per 1 base unit, "rate": PERCENT per hour,
+    "direction": "long"|"short"}. Units evidence: TSLA value 0.00149012 = mark 372.6 x 0.0004 %.
+    `direction` is taken to be the PAYING side (positive rate, mark above index, "long": longs
+    pay, the textbook convention).
+  Every authenticated record is CROSS-CHECKED against the public one for its hour: |change| must
+  equal position_size x value within FUNDING_TOL_BPS, and the sign is the account's - negative
+  when the vault's side is the paying side. The sign convention of `change` itself is not
+  documented; it is inferred from those pairs and must be the same for every record (or equal
+  FUNDING_CHANGE_SIGN if that is set). A negative public rate has not been observed, so its
+  meaning is not assumed: such a record is refused.
+
+NEVER SENDS GARBAGE: any missing field, unknown shape, failed cross-check, mixed sign convention,
+wrong account, delta above FUNDING_MAX_DELTA_USD, or unresolved earlier send -> that vault is
+refused this run, logged, cursor unchanged. Other vaults carry on. Exit status 1 if any refused.
+
+IDEMPOTENT ACROSS RESTARTS. State (FUNDING_RELAY_STATE) holds per vault the last funding
+timestamp relayed and the funding ids at it. Before a send the relay journals {delta18, the
+records' cursor, BufferBook.balance18 before}; after a crash, the next run reads balance18: moved
+by exactly delta -> it landed, commit; unmoved (and older than FUNDING_PENDING_GRACE_SEC) -> it
+did not, recompute; anything else -> needs a human. Only the attester can move that ledger, and
+this relay is the only thing that should.
+
+ENVIRONMENT
+  FUNDING_RELAY_VAULTS     glob of the keepers' per-vault configs (rpc, api, vault,
+                           market_index, api_key_file[, cast, funding_start_ts])
+                           default /opt/keeper/vaults/*.json
+  FUNDING_RELAY_STATE      default /opt/keeper/funding-relay-state.json
+  KEEPER_ATTESTER_PK       the attester key (attester.env), as the signer and stack-4 keeper
+  FUNDING_RELAY_START_TS   first funding timestamp to relay for a vault with no state yet;
+                           required then (or funding_start_ts in its config) - never guessed
+  FUNDING_MAX_DELTA_USD    refuse a single relay larger than this, either sign (default 5000)
+  FUNDING_TOL_BPS          cross-check tolerance (default 200) plus 0.000002 USD absolute
+  FUNDING_CHANGE_SIGN      auto | account | paid (default auto)
+  FUNDING_MAX_RECORDS      hours relayed per vault per run, oldest first (default 168)
+  FUNDING_PENDING_GRACE_SEC  default 900
+  FUNDING_RELAY_HEARTBEAT  1: send accrueFunding(0) when nothing is due (for a sweepFees gated
+                           on relay recency); default 0
+  CAST                     default: the vault config's "cast", else "cast"
+"""
+import asyncio
+import glob
+import inspect
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from decimal import Decimal
+
+UA = "usecert-funding-relay/1.0"
+E18 = Decimal(10) ** 18
+TOL_ABS = Decimal("0.000002")
+MAX_PAGES = 50
+SEL_BUFFER = "0xedaafe20"        # CertVault.buffer()
+SEL_ORACLE = "0x7dc0d1d0"        # CertVault.oracle()
+SEL_ATTESTER = "0x47b0c3b3"      # CertOracle.attester()
+SEL_BALANCE18 = "0xc49b6578"     # BufferBook.balance18(address)
+
+
+def log(*a):
+    print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), *a, flush=True)
+
+
+class Refuse(Exception):
+    """This vault is not relayed this run. Never fatal to the others."""
+
+
+def norm_ts(t):
+    """Venue timestamps come in seconds (fundings), ms or us (account transaction_time)."""
+    t = int(t)
+    if t > 10 ** 14:
+        return t // 10 ** 6
+    if t > 10 ** 11:
+        return t // 1000
+    return t
+
+
+def public_index(fundings):
+    out = {}
+    for f in fundings:
+        try:
+            out[norm_ts(f["timestamp"])] = (Decimal(str(f["value"])), str(f["direction"]).lower(),
+                                            Decimal(str(f["rate"])))
+        except (KeyError, ValueError, ArithmeticError) as e:
+            raise Refuse("public funding record has an unknown shape: %r (%s)" % (f, e))
+    return out
+
+
+def compute_delta(records, public, sign_mode="auto", tol_bps=200):
+    """Sum of the account's funding cash flow over `records`, as signed 1e18 USD (+ received,
+    - paid, BufferBook's sign). Returns (delta18, convention). Raises Refuse on any doubt."""
+    total = Decimal(0)
+    conventions = set()
+    for r in records:
+        try:
+            ts = norm_ts(r["timestamp"])
+            change = Decimal(str(r["change"]))
+            size = abs(Decimal(str(r["position_size"])))
+            side = str(r["position_side"]).lower()
+        except (KeyError, ValueError, ArithmeticError) as e:
+            raise Refuse("position funding record has an unknown shape: %r (%s)" % (r, e))
+        if not (change.is_finite() and size.is_finite()):
+            raise Refuse("non-finite figure in funding %s" % r.get("funding_id"))
+        if side not in ("long", "short"):
+            raise Refuse("funding %s: position_side %r" % (r.get("funding_id"), side))
+        if ts not in public:
+            raise Refuse("funding at %d has no public funding record to check it against" % ts)
+        value, payer, rate = public[ts]
+        if rate < 0 or payer not in ("long", "short"):
+            raise Refuse("public funding at %d: rate %s direction %r - an unobserved shape" % (ts, rate, payer))
+        expected = size * value
+        tol = max(TOL_ABS, expected * tol_bps / 10_000)
+        if abs(abs(change) - expected) > tol:
+            raise Refuse("funding at %d: |change| %s but position %s x %s = %s" % (ts, change, size, value, expected))
+        if change == 0 or expected == 0:
+            continue
+        account_sign = -1 if side == payer else 1
+        conventions.add("account" if (change > 0) == (account_sign > 0) else "paid")
+        total += account_sign * abs(change)
+    if len(conventions) > 1:
+        raise Refuse("the sign of `change` is not consistent across records")
+    conv = next(iter(conventions)) if conventions else None
+    if sign_mode != "auto" and conv is not None and conv != sign_mode:
+        raise Refuse("the venue's `change` reads as '%s', FUNDING_CHANGE_SIGN says '%s'" % (conv, sign_mode))
+    return int(total * E18), conv
+
+
+def select_new(records, cursor_ts, seen_ids, limit):
+    """Records after the cursor, oldest first, at most `limit`."""
+    seen = set(str(i) for i in seen_ids)
+    new = [r for r in records if norm_ts(r["timestamp"]) > cursor_ts
+           or (norm_ts(r["timestamp"]) == cursor_ts and str(r.get("funding_id")) not in seen)]
+    new.sort(key=lambda r: (norm_ts(r["timestamp"]), str(r.get("funding_id"))))
+    return new[:limit]
+
+
+def cursor_after(records, cursor_ts, seen_ids):
+    ts = max(norm_ts(r["timestamp"]) for r in records)
+    ids = [str(r.get("funding_id")) for r in records if norm_ts(r["timestamp"]) == ts]
+    if ts == cursor_ts:
+        ids = sorted(set(ids) | set(str(i) for i in seen_ids))
+    return ts, ids
+
+
+def int256(word_hex):
+    v = int(word_hex, 16)
+    return v - (1 << 256) if v >= 1 << 255 else v
+
+
+class Relay:
+    def __init__(self, env=None, dry_run=False):
+        e = os.environ if env is None else env
+        self.dry = dry_run
+        self.state_path = e.get("FUNDING_RELAY_STATE", "/opt/keeper/funding-relay-state.json")
+        self.configs = sorted(glob.glob(e.get("FUNDING_RELAY_VAULTS", "/opt/keeper/vaults/*.json")))
+        self.pk = e.get("KEEPER_ATTESTER_PK")
+        self.start_ts = e.get("FUNDING_RELAY_START_TS")
+        self.max_delta18 = int(Decimal(e.get("FUNDING_MAX_DELTA_USD", "5000")) * E18)
+        self.tol_bps = int(e.get("FUNDING_TOL_BPS", "200"))
+        self.sign_mode = e.get("FUNDING_CHANGE_SIGN", "auto")
+        if self.sign_mode not in ("auto", "account", "paid"):
+            raise SystemExit("FUNDING_CHANGE_SIGN must be auto, account or paid")
+        self.max_records = int(e.get("FUNDING_MAX_RECORDS", "168"))
+        self.grace = int(e.get("FUNDING_PENDING_GRACE_SEC", "900"))
+        self.heartbeat = e.get("FUNDING_RELAY_HEARTBEAT", "0") == "1"
+        self.cast_override = e.get("CAST")
+        self.state = self._load()
+        self._attester_ok = {}
+
+    # ------------------------------------------------------------------ plumbing
+    def _load(self):
+        if os.path.exists(self.state_path):
+            with open(self.state_path) as f:
+                return json.load(f)
+        return {"vaults": {}}
+
+    def _save(self):
+        if self.dry:
+            return
+        tmp = self.state_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.state, f, indent=1, sort_keys=True)
+        os.replace(tmp, self.state_path)
+
+    @staticmethod
+    def _http(req):
+        delay = 2
+        for attempt in range(6):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    return json.load(r)
+            except urllib.error.HTTPError as e:
+                if e.code != 429 and e.code < 500 or attempt == 5:
+                    raise
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                if attempt == 5:
+                    raise
+            time.sleep(delay)
+            delay = min(delay * 2, 30)
+
+    def get(self, vc, path, auth=None):
+        h = {"User-Agent": UA}
+        if auth:
+            h["Authorization"] = auth
+        return self._http(urllib.request.Request(vc["api"].rstrip("/") + path, headers=h))
+
+    def rpc(self, vc, method, params):
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+        out = self._http(urllib.request.Request(vc["rpc"], body, {"Content-Type": "application/json",
+                                                                  "User-Agent": UA}))
+        if "error" in out:
+            raise RuntimeError("%s: %s" % (method, out["error"]))
+        return out["result"]
+
+    def eth_call(self, vc, to, data):
+        return self.rpc(vc, "eth_call", [{"to": to, "data": data}, "latest"])
+
+    def cast(self, vc, *args):
+        exe = self.cast_override or vc.get("cast", "cast")
+        r = subprocess.run([exe, *args], capture_output=True, text=True, timeout=180)
+        if r.returncode != 0:
+            # args are never echoed: one of them is the key.
+            raise RuntimeError("cast %s: %s" % (args[0], (r.stderr or r.stdout).strip()[:300]))
+        return r.stdout
+
+    def auth_token(self, vc):
+        """A short-lived read token for the vault's venue account, from its keeper's API key."""
+        import lighter
+        with open(vc["api_key_file"]) as f:
+            key = json.load(f)
+
+        async def mk():
+            c = lighter.SignerClient(url=vc["api"].rstrip("/"), account_index=key["account_index"],
+                                     api_private_keys={key["api_key_index"]: key["private"]})
+            try:
+                res = c.create_auth_token_with_expiry()
+                if inspect.isawaitable(res):
+                    res = await res
+                token, err = res if isinstance(res, tuple) else (res, None)
+                if err is not None or not token:
+                    raise RuntimeError("venue auth token refused: %s" % str(err)[:120])
+                return token
+            finally:
+                cl = c.close()
+                if inspect.isawaitable(cl):
+                    await cl
+        return asyncio.run(mk())
+
+    def account_index(self, vc):
+        with open(vc["api_key_file"]) as f:
+            return int(json.load(f)["account_index"])
+
+    # ------------------------------------------------------------------ reads
+    def check_account(self, vc, idx):
+        """The key's account must be the vault's own, looked up BY L1 ADDRESS (the API's index
+        space is not the L1 contract's; usecert-venue-watch)."""
+        a = self.get(vc, "/api/v1/account?by=l1_address&value=" + vc["vault"])["accounts"][0]
+        got = int(a.get("account_index", a.get("index", -1)))
+        if got != idx:
+            raise Refuse("the API key's account %d is not the vault's venue account %d" % (idx, got))
+
+    def position_fundings(self, vc, idx, since_ts):
+        token = self.auth_token(vc)
+        out, cursor = [], None
+        for _ in range(MAX_PAGES):
+            q = {"account_index": idx, "market_id": int(vc["market_index"]), "limit": 100}
+            if cursor:
+                q["cursor"] = cursor
+            d = self.get(vc, "/api/v1/positionFunding?" + urllib.parse.urlencode(q), auth=token)
+            recs = d.get("position_fundings")
+            if not isinstance(recs, list):
+                raise Refuse("positionFunding answered without position_fundings: code %s" % d.get("code"))
+            ts = [norm_ts(r["timestamp"]) for r in recs]
+            if any(ts[i] < ts[i + 1] for i in range(len(ts) - 1)):
+                raise Refuse("positionFunding is not newest-first; paging would skip records")
+            out += recs
+            cursor = d.get("next_cursor")
+            if not recs or not cursor or ts[-1] <= since_ts:
+                return out
+        raise Refuse("more than %d pages of funding since the cursor" % MAX_PAGES)
+
+    def public_fundings(self, vc, lo, hi):
+        start, end = lo - 3600, hi + 3600
+        q = {"market_id": int(vc["market_index"]), "resolution": "1h", "start_timestamp": start,
+             "end_timestamp": end, "count_back": (end - start) // 3600 + 2}
+        d = self.get(vc, "/api/v1/fundings?" + urllib.parse.urlencode(q))
+        if not isinstance(d.get("fundings"), list):
+            raise Refuse("fundings answered without a fundings list: code %s" % d.get("code"))
+        return public_index(d["fundings"])
+
+    def balance18(self, vc):
+        buf = "0x" + self.eth_call(vc, vc["vault"], SEL_BUFFER)[-40:]
+        word = self.eth_call(vc, buf, SEL_BALANCE18 + vc["vault"][2:].lower().rjust(64, "0"))
+        return int256(word)
+
+    def check_attester(self, vc):
+        """accrueFunding reverts unless msg.sender is the oracle's attester: check before sending."""
+        if vc["vault"] in self._attester_ok:
+            return
+        oracle = "0x" + self.eth_call(vc, vc["vault"], SEL_ORACLE)[-40:]
+        want = ("0x" + self.eth_call(vc, oracle, SEL_ATTESTER)[-40:]).lower()
+        have = self.cast(vc, "wallet", "address", "--private-key", self.pk).split()[0].lower()
+        if want != have:
+            raise Refuse("KEEPER_ATTESTER_PK derives %s, the oracle's attester is %s" % (have, want))
+        self._attester_ok[vc["vault"]] = True
+
+    # ------------------------------------------------------------------ the work
+    def send(self, vc, delta18):
+        out = self.cast(vc, "send", "--gas-limit", "300000", "--private-key", self.pk, "--rpc-url", vc["rpc"],
+                        "--", vc["vault"], "accrueFunding(int256)", str(delta18))
+        ok = any(l.split()[:2] == ["status", "1"] for l in out.splitlines())
+        h = next((l.split()[1] for l in out.splitlines() if l.startswith("transactionHash")), "?")
+        return ok, h
+
+    def resolve_pending(self, vc, st):
+        """An earlier run journaled a send and did not record its outcome."""
+        p = st["pending"]
+        before, delta = int(p["balance_before"]), int(p["delta18"])
+        if delta == 0:
+            # A heartbeat: landed or not, nothing was accrued and nothing can be doubled.
+            st.pop("pending")
+            self._save()
+            return
+        bal = self.balance18(vc)
+        if bal == before + delta:
+            st.update(cursor_ts=p["cursor_ts"], seen_ids=p["seen_ids"], last_delta18=str(delta),
+                      last_relay_at=int(time.time()))
+            st.pop("pending")
+            self._save()
+            log("%s: the journaled accrueFunding(%d) landed; cursor -> %d" % (vc["vault"], delta, p["cursor_ts"]))
+        elif bal == before:
+            if time.time() - p["at"] < self.grace:
+                raise Refuse("a send from %ds ago has not landed yet; waiting" % (time.time() - p["at"]))
+            st.pop("pending")
+            self._save()
+            log("%s: the journaled accrueFunding(%d) never landed; recomputing" % (vc["vault"], delta))
+        else:
+            raise Refuse("pending accrueFunding(%d) unresolved: ledger went %d -> %d; needs a human"
+                         % (delta, before, bal))
+
+    def relay_vault(self, vc):
+        vault = vc["vault"]
+        st = self.state["vaults"].setdefault(vault.lower(), {})
+        if "pending" in st:
+            self.resolve_pending(vc, st)
+        if "cursor_ts" not in st:
+            start = vc.get("funding_start_ts", self.start_ts)
+            if start is None:
+                raise Refuse("no relay state and no FUNDING_RELAY_START_TS: refusing to guess where funding starts")
+            st.update(cursor_ts=int(start) - 1, seen_ids=[])
+        cursor_ts, seen = int(st["cursor_ts"]), st.get("seen_ids", [])
+        idx = self.account_index(vc)
+        self.check_account(vc, idx)
+        records = self.position_fundings(vc, idx, cursor_ts)
+        foreign = [r for r in records if int(r.get("market_id", vc["market_index"])) != int(vc["market_index"])]
+        if foreign:
+            raise Refuse("positionFunding returned %d records for other markets" % len(foreign))
+        new = select_new(records, cursor_ts, seen, self.max_records)
+        if not new:
+            if self.heartbeat and not self.dry:
+                self._send_journaled(vc, st, 0, cursor_ts, seen)
+            else:
+                log("%s: no funding since %d" % (vault, cursor_ts))
+            return
+        tss = [norm_ts(r["timestamp"]) for r in new]
+        public = self.public_fundings(vc, min(tss), max(tss))
+        delta18, conv = compute_delta(new, public, self.sign_mode, self.tol_bps)
+        if abs(delta18) > self.max_delta18:
+            raise Refuse("delta %d exceeds FUNDING_MAX_DELTA_USD" % delta18)
+        new_ts, new_ids = cursor_after(new, cursor_ts, seen)
+        log("%s: %d funding records %d..%d, change convention %s -> delta18 %d%s"
+            % (vault, len(new), min(tss), max(tss), conv, delta18, " (dry run: not sent)" if self.dry else ""))
+        if self.dry:
+            return
+        if delta18 == 0:
+            st.update(cursor_ts=new_ts, seen_ids=new_ids)
+            self._save()
+            return
+        self._send_journaled(vc, st, delta18, new_ts, new_ids)
+
+    def _send_journaled(self, vc, st, delta18, new_ts, new_ids):
+        if not self.pk:
+            raise Refuse("KEEPER_ATTESTER_PK is not set")
+        self.check_attester(vc)
+        # WRITE-AHEAD: journal before the transaction leaves, so a crash cannot relay twice.
+        st["pending"] = {"delta18": str(delta18), "cursor_ts": new_ts, "seen_ids": new_ids,
+                         "balance_before": str(self.balance18(vc)), "at": int(time.time())}
+        self._save()
+        try:
+            ok, h = self.send(vc, delta18)
+        except Exception as e:                                       # noqa: BLE001
+            # Outcome unknown (timeout, RPC). The journal stays; the next run reads the ledger.
+            log("%s: accrueFunding(%d) outcome unknown, left journaled: %s" % (vc["vault"], delta18, e))
+            return
+        if ok:
+            st.update(cursor_ts=new_ts, seen_ids=new_ids, last_delta18=str(delta18), last_relay_at=int(time.time()))
+            st.pop("pending", None)
+            log("%s: accrueFunding(%d) %s" % (vc["vault"], delta18, h))
+        else:
+            st.pop("pending", None)
+            log("%s: accrueFunding(%d) REVERTED %s; cursor unchanged" % (vc["vault"], delta18, h))
+        self._save()
+
+    def run(self):
+        if not self.configs:
+            raise SystemExit("no vault configs matched FUNDING_RELAY_VAULTS")
+        refused = 0
+        for path in self.configs:
+            with open(path) as f:
+                vc = json.load(f)
+            try:
+                self.relay_vault(vc)
+            except Refuse as e:
+                refused += 1
+                log("REFUSED %s: %s" % (vc.get("vault", path), e))
+            except Exception as e:                                   # noqa: BLE001
+                refused += 1
+                log("FAILED %s: %s" % (vc.get("vault", path), str(e)[:300]))
+        return refused
+
+
+def main():
+    r = Relay(dry_run="--dry-run" in sys.argv)
+    log("funding relay: %d vaults%s" % (len(r.configs), ", DRY RUN" if r.dry else ""))
+    sys.exit(1 if r.run() else 0)
+
+
+if __name__ == "__main__":
+    main()

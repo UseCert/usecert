@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the UseCert funding relay hourly
+
+[Timer]
+# Lighter settles funding on the hour; :07 leaves the venue time to publish the hour's records.
+OnCalendar=*-*-* *:07:00
+RandomizedDelaySec=60
+Persistent=true
+Unit=usecert-funding-relay.service
+
+[Install]
+WantedBy=timers.target

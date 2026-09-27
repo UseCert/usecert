@@ -1,0 +1,11 @@
+{
+ "_note": "SYNTHETIC. The live endpoint needs an auth token made with the vault's venue API key (see positionFunding-noauth.json, recorded), so this page is shaped after the Lighter SDK's PositionFundings model, newest first, for a 10-share TSLA long over the four hours recorded in fundings-16.json. The sign of `change` here is a guess; the relay does not rely on it.",
+ "code": 200,
+ "position_fundings": [
+  {"timestamp": 1790492400, "market_id": 16, "funding_id": 4004, "change": "-0.014901", "rate": "0.0004", "position_size": "10.0000", "position_side": "long"},
+  {"timestamp": 1790488800, "market_id": 16, "funding_id": 4003, "change": "-0.014900", "rate": "0.0004", "position_size": "10.0000", "position_side": "long"},
+  {"timestamp": 1790485200, "market_id": 16, "funding_id": 4002, "change": "-0.014900", "rate": "0.0004", "position_size": "10.0000", "position_side": "long"},
+  {"timestamp": 1790481600, "market_id": 16, "funding_id": 4001, "change": "-0.014901", "rate": "0.0004", "position_size": "10.0000", "position_side": "long"}
+ ],
+ "next_cursor": ""
+}

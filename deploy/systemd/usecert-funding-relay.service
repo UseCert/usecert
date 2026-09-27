@@ -1,0 +1,33 @@
+[Unit]
+Description=UseCert funding relay (pre-audit H-8): venue funding -> CertVault.accrueFunding, attester key
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# One pass per start; usecert-funding-relay.timer starts it hourly. Not installed by anything:
+# enable it only on a stack whose vaults expect accrueFunding, after a --dry-run has been read by
+# a human and FUNDING_RELAY_START_TS (or each vault config's funding_start_ts) is set.
+Type=oneshot
+User=keeper
+Group=keeper
+# The attester key, read by systemd as root; the file stays root-only. accrueFunding is
+# attester-only on chain, stack 4 and stack 5 alike.
+EnvironmentFile=/etc/usecert-keeper/attester.env
+# FUNDING_RELAY_START_TS and any other knob (see the script's docstring).
+EnvironmentFile=-/etc/usecert-keeper/funding-relay.env
+Environment=FUNDING_RELAY_VAULTS=/opt/keeper/vaults/*.json
+Environment=FUNDING_RELAY_STATE=/opt/keeper/funding-relay-state.json
+ExecStartPre=/opt/keeper/venv/bin/python -c "import ast,sys; ast.parse(open('/opt/keeper/usecert-funding-relay').read())"
+ExecStart=/opt/keeper/venv/bin/python /opt/keeper/usecert-funding-relay
+TimeoutStartSec=900
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/keeper
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LockPersonality=true
+StandardOutput=append:/var/log/usecert-funding-relay.log
+StandardError=append:/var/log/usecert-funding-relay.log

@@ -1,0 +1,31 @@
+{
+ "code": 200,
+ "resolution": "1h",
+ "fundings": [
+  {
+   "timestamp": 1790481600,
+   "value": "0.00149012",
+   "rate": "0.0004",
+   "direction": "long"
+  },
+  {
+   "timestamp": 1790485200,
+   "value": "0.00148996",
+   "rate": "0.0004",
+   "direction": "long"
+  },
+  {
+   "timestamp": 1790488800,
+   "value": "0.00148996",
+   "rate": "0.0004",
+   "direction": "long"
+  },
+  {
+   "timestamp": 1790492400,
+   "value": "0.00149012",
+   "rate": "0.0004",
+   "direction": "long"
+  }
+ ],
+ "_recorded": "GET https://api.rh.lighter.xyz/api/v1/fundings?market_id=16&resolution=1h&start_timestamp=now-4h&end_timestamp=now&count_back=3, 2026-09-27, unchanged"
+}
