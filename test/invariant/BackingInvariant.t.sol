@@ -382,8 +382,11 @@ contract BackingInvariantTest is VaultFixture {
     ///      coverage of the refund branches, and the fuzzed actions are there so the branches
     ///      cannot silently stop being callable.
     function test_refundAwaitingSettlementIsRetryableNotAViolation() public {
-        _drainHotBuffer(); // the vault cannot pay an escrow out of its own balance
+        // the vault cannot pay an escrow out of its own balance. Stack 5, M-5: drained right after
+        // the request, since an empty vault can no longer admit one; the state left is the same.
+        uint256 own = vault.hotBuffer();
         handler.requestMint(20_000e6); // escrow 19_980e6, of which 17_982e6 goes to the venue
+        _drainAmount(own);
         handler.settleBatch(); // the mint's own hedge fills
         vm.warp(block.timestamp + SETTLE_WINDOW + 1);
 
@@ -407,7 +410,8 @@ contract BackingInvariantTest is VaultFixture {
         uint256 before = usdg.balanceOf(address(handler));
         handler.refundMint(0);
         assertEq(handler.refundMintCount(), 1, "the receipt never actually refunded");
-        assertEq(usdg.balanceOf(address(handler)) - before, 19_980e6, "the escrow was not returned in full");
+        // Stack 5, L-10: escrow 19_980e6 plus the 20e6 mint fee, which a refund now returns too.
+        assertEq(usdg.balanceOf(address(handler)) - before, 20_000e6, "the escrow was not returned in full");
         assertEq(handler.lawTwoViolations(), 0);
         assertEq(handler.refundAwaitingSettlementCount(), 1);
         assertEq(cert.totalSupply(), 0);

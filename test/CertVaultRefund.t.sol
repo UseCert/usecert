@@ -33,6 +33,9 @@ contract CertVaultRefundTest is VaultFixture {
     uint256 internal constant POSTED = 44_955e6;
     /// MINT_IN - POSTED — the escrow's retained 10% plus the 50e6 fee, i.e. all the vault keeps.
     uint256 internal constant RETAINED = 5_045e6;
+    /// Stack 5, L-10: what a refund returns - the ESCROW plus the 50e6 mint fee, i.e. MINT_IN. A
+    /// refund used to keep the fee; it is now held with the escrow and handed back.
+    uint256 internal constant REFUND = MINT_IN;
     /// _baseAmount(indicative) at PX = 355.86e18 with sizeDecimals = 4: the hedge requestMint
     /// opens, and the exposure a refund has to close.
     int256 internal constant HEDGE_TICKS = 1_403_641;
@@ -41,11 +44,13 @@ contract CertVaultRefundTest is VaultFixture {
     ///      venue fill the hedge, and warp one second past the settle window. Leaves the vault
     ///      holding RETAINED — far less than the ESCROW a refund owes — with POSTED at the venue.
     function _drainThenRequestPastWindow() internal returns (uint256 id) {
-        _drainHotBuffer();
-        assertEq(vault.hotBuffer(), 0, "buffer was not drained");
+        // Stack 5, M-5: an empty vault can no longer admit a mint, so the vault's own balance is
+        // removed right AFTER the request instead of before it. The state left is identical.
+        uint256 own = vault.hotBuffer();
 
         vm.prank(alice);
         id = vault.requestMint(MINT_IN);
+        _drainAmount(own);
         lighter.settleBatch(); // the BID fills at the venue
 
         assertEq(vault.hotBuffer(), RETAINED);
@@ -99,12 +104,12 @@ contract CertVaultRefundTest is VaultFixture {
         // ---- And the user is paid the escrow, in full, to the last unit.
         vm.prank(stranger);
         uint256 out = vault.refundMint(id);
-        assertEq(out, ESCROW);
-        assertEq(usdg.balanceOf(alice) - aliceBefore, ESCROW, "the user was not made whole");
+        assertEq(out, REFUND);
+        assertEq(usdg.balanceOf(alice) - aliceBefore, REFUND, "the user was not made whole");
         assertEq(usdg.balanceOf(stranger), 0, "the refund paid its caller");
         assertEq(cert.totalSupply(), 0); // refunded, not minted
-        // Only the mint fee is left behind: 50_000 in, 49_950 out, 50 retained.
-        assertEq(vault.hotBuffer(), MINT_IN - ESCROW);
+        // Stack 5, L-10: nothing is left behind, the fee included: 50_000 in, 50_000 out.
+        assertEq(vault.hotBuffer(), MINT_IN - REFUND);
 
         // Settled once and for all.
         vm.expectRevert(CertVault.CertVault_BadReceipt.selector);
@@ -170,9 +175,10 @@ contract CertVaultRefundTest is VaultFixture {
     ///      is what refundMint has always reverted with before the window), so this reuses it
     ///      rather than adding a second, synonymous error every caller would then have to handle.
     function test_stageRefundRevertsBeforeWindow() public {
-        _drainHotBuffer();
+        uint256 own = vault.hotBuffer();
         vm.prank(alice);
         uint256 id = vault.requestMint(MINT_IN);
+        _drainAmount(own); // stack 5, M-5: see _drainThenRequestPastWindow
         lighter.settleBatch();
 
         vm.expectRevert(CertVault.CertVault_SettleWindowNotExpired.selector);
@@ -276,7 +282,7 @@ contract CertVaultRefundTest is VaultFixture {
         vault.recallMargin();
         uint256 before = usdg.balanceOf(alice);
         vault.refundMint(id);
-        assertEq(usdg.balanceOf(alice) - before, ESCROW);
+        assertEq(usdg.balanceOf(alice) - before, REFUND);
     }
 
     // ------------------------------------------------------------------------------------ Step 4
@@ -349,7 +355,7 @@ contract CertVaultRefundTest is VaultFixture {
         vault.recallMargin();
         uint256 before = usdg.balanceOf(alice);
         vault.refundMint(id);
-        assertEq(usdg.balanceOf(alice) - before, ESCROW);
+        assertEq(usdg.balanceOf(alice) - before, REFUND);
         assertEq(lighter.positionBase(MARKET), 0);
     }
 
@@ -366,14 +372,14 @@ contract CertVaultRefundTest is VaultFixture {
 
         // Fund the buffer so the ONLY thing that could refuse the payout is the broken read.
         vault.seedBuffer(50_000e6);
-        assertGe(vault.hotBuffer(), ESCROW);
+        assertGe(vault.hotBuffer(), REFUND);
 
         lighter.setShouldRevertPendingRead(true);
 
         uint256 before = usdg.balanceOf(alice);
         uint256 out = vault.refundMint(id); // must not propagate the venue's error
-        assertEq(out, ESCROW);
-        assertEq(usdg.balanceOf(alice) - before, ESCROW);
+        assertEq(out, REFUND);
+        assertEq(usdg.balanceOf(alice) - before, REFUND);
 
         // The same read is on claimRedeem's and recallMargin's paths; neither may propagate it.
         lighter.setShouldRevertPendingRead(true);
@@ -426,7 +432,7 @@ contract CertVaultRefundTest is VaultFixture {
 
         // The refund is short — of exactly what the drain removed, not of anything the vault
         // failed to ask for — and it says so retryably rather than reverting rawly.
-        assertLt(vault.hotBuffer(), ESCROW);
+        assertLt(vault.hotBuffer(), REFUND);
         vm.expectRevert(CertVault.CertVault_RefundAwaitingSettlement.selector);
         vault.refundMint(id);
 
@@ -434,7 +440,7 @@ contract CertVaultRefundTest is VaultFixture {
         vault.seedBuffer(10_000e6);
         uint256 before = usdg.balanceOf(alice);
         vault.refundMint(id);
-        assertEq(usdg.balanceOf(alice) - before, ESCROW, "the user was not made whole");
+        assertEq(usdg.balanceOf(alice) - before, REFUND, "the user was not made whole");
     }
 
     /// @notice The defect's mechanism, pinned. Unstaged, the escrow's posted share appears in
@@ -506,7 +512,7 @@ contract CertVaultRefundTest is VaultFixture {
         uint256 aliceBefore = usdg.balanceOf(alice);
         vm.prank(stranger);
         vault.refundMint(id);
-        assertEq(usdg.balanceOf(alice) - aliceBefore, ESCROW, "the user was not made whole");
+        assertEq(usdg.balanceOf(alice) - aliceBefore, REFUND, "the user was not made whole");
 
         // Here is the CRITICAL A state: escrow returned, zero supply, full hedge still open.
         assertEq(cert.totalSupply(), 0);

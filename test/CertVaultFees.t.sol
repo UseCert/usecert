@@ -21,10 +21,12 @@ contract FeesMockRegistry is IVaultRegistry {
 /// @notice K2: fee accounting and the permissionless sweep.
 /// @dev Two stacks. The fixture's `vault` carries VaultFixture's 100_000e6 seed, which
 ///      spareCollateral() holds back as bufferCapital, so its numbers show the steady state. The
-///      `bare` vault below has NO seed at all: nothing but the holders' own collateral and the
-///      fees is ever in it, so every payout there after a sweep is paid out of the holders' own
-///      backing. That is the stack the Law 2 proofs run on, because a seed would hide a sweep
-///      that took too much.
+///      `bare` vault below has only a SMALL seed, BARE_SEED: nothing but the holders' own
+///      collateral, the fees and that seed is ever in it. That is the stack the Law 2 proofs run
+///      on. Stack 5 (M-5): it used to have no seed at all, but a vault with no capital of its own
+///      can no longer admit a mint - the capacity leg is measured before the deposit arrives, so a
+///      deposit cannot vouch for itself. So the proofs now end by checking the seed is still there:
+///      a seed that had paid for anything would be a sweep that took too much, hidden.
 contract CertVaultFeesTest is VaultFixture {
     address internal sink = makeAddr("feeSink");
     address internal bob = makeAddr("bob");
@@ -32,6 +34,8 @@ contract CertVaultFeesTest is VaultFixture {
     address internal stranger = makeAddr("stranger");
 
     CertVault internal bare;
+    /// @dev Stack 5, M-5: 5_000 USDG of capital supports 500_000 of notional at the 1% coverage.
+    uint256 internal constant BARE_SEED = 5_000e6;
     Certificate internal bareCert;
     MockLighter internal bareLighter;
 
@@ -92,8 +96,10 @@ contract CertVaultFeesTest is VaultFixture {
         usdg.transfer(address(bare), 1e6);
         bare.bootstrap();
         bareLighter.settleBatch();
-        assertEq(bare.bufferCapital(), 0);
-        assertEq(bare.hotBuffer(), 0);
+        usdg.approve(address(bare), type(uint256).max);
+        bare.seedBuffer(BARE_SEED);
+        assertEq(bare.bufferCapital(), BARE_SEED);
+        assertEq(bare.hotBuffer(), BARE_SEED);
     }
 
     function _setSink(CertVault v) internal {
@@ -163,15 +169,19 @@ contract CertVaultFeesTest is VaultFixture {
         assertEq(vault.sweepableFees(), 1e6);
     }
 
+    /// @dev Stack 5, L-10: the fee is held WITH the escrow until settleMint earns it (a refund
+    ///      returns it), so nothing is accrued at the request.
     function test_requestMintAccruesTheFeeAndEscrowsTheRestUntilSettled() public {
         vm.prank(alice);
         uint256 id = vault.requestMint(50_000e6);
-        assertEq(vault.feesAccrued(), 50e6);
-        assertEq(vault.escrowOutstanding(), 49_950e6);
+        assertEq(vault.feesAccrued(), 0, "the fee is not earned until the mint settles");
+        assertEq(vault.mintFee(id), 50e6);
+        assertEq(vault.escrowOutstanding(), 50_000e6, "escrow and fee are both held for the receipt");
         assertEq(vault.retainedBacking(), 0);
 
         lighter.settleBatch();
         vault.settleMint(id, PX);
+        assertEq(vault.feesAccrued(), 50e6, "settling earns the fee");
         assertEq(vault.escrowOutstanding(), 0, "a settled escrow is no longer owed back");
         assertEq(vault.retainedBacking(), 49_950e6 - 44_955e6, "the escrow's float became backing");
         assertEq(vault.sweepableFees(), 50e6);
@@ -182,11 +192,12 @@ contract CertVaultFeesTest is VaultFixture {
         vault.enableKeeperHedging();
         vm.prank(alice);
         uint256 id = vault.requestMint(1_000e6);
-        assertEq(vault.feesAccrued(), 1e6);
-        assertEq(vault.escrowOutstanding(), 999e6);
+        assertEq(vault.feesAccrued(), 0); // stack 5, L-10: earned at settle
+        assertEq(vault.escrowOutstanding(), 1_000e6);
 
         vm.prank(attester); // in keeper mode settling is the keeper's claim that the hedge filled
         vault.settleMint(id, PX);
+        assertEq(vault.feesAccrued(), 1e6);
         assertEq(vault.escrowOutstanding(), 0);
         assertEq(vault.retainedBacking(), 99.9e6);
         assertEq(vault.sweepableFees(), 1e6);
@@ -206,6 +217,8 @@ contract CertVaultFeesTest is VaultFixture {
         assertEq(vault.retainedBacking(), 0, "the last exit releases all the float");
     }
 
+    /// @dev Stack 5, M-12: the queued fee is RECORDED at the request and ACCRUED at the claim, on
+    ///      an uncapped payment. It used to be accrued at the request, before it was earned.
     function test_queuedExitAccruesTheFeeAtRequestAndOwesTheRest() public {
         vm.prank(alice);
         vault.mintInstant(1_000e6);
@@ -215,9 +228,14 @@ contract CertVaultFeesTest is VaultFixture {
 
         vm.prank(alice);
         uint256 id = vault.forceExit(certs);
-        assertEq(vault.feesAccrued(), 1e6 + fee18 / 1e12);
+        assertEq(vault.feesAccrued(), 1e6, "only the mint fee is earned so far");
+        assertEq(vault.redeemFee(id), fee18 / 1e12);
         assertEq(_owed(vault, id), (gross18 - fee18) / 1e12);
         assertEq(vault.totalOwedOutstanding(), _owed(vault, id));
+
+        vm.prank(alice);
+        vault.claimRedeem(id);
+        assertEq(vault.feesAccrued(), 1e6 + fee18 / 1e12, "an uncapped payment earns the whole fee");
     }
 
     // ================================================================== what a sweep may touch
@@ -246,9 +264,13 @@ contract CertVaultFeesTest is VaultFixture {
     /// seed. The sweep must send nothing at all.
     function test_feesExistButSpareIsZero_sweepSendsNothing() public {
         _setSink(vault);
+        // An earlier instant mint's fee is accrued; the open receipt's fee is held with its escrow
+        // (stack 5, L-10) and is not a fee yet.
+        vm.prank(bob);
+        vault.mintInstant(1_000e6);
         vm.prank(alice);
         uint256 id = vault.requestMint(50_000e6);
-        assertEq(vault.feesAccrued(), 50e6);
+        assertEq(vault.feesAccrued(), 1e6);
         assertLt(vault.hotBuffer(), _reserves(vault), "setup: the escrow is partly at the venue");
         assertEq(vault.spareCollateral(), 0);
 
@@ -256,13 +278,13 @@ contract CertVaultFeesTest is VaultFixture {
         assertEq(vault.sweepFees(), 0);
         assertEq(vault.hotBuffer(), hot);
         assertEq(usdg.balanceOf(sink), 0);
-        assertEq(vault.feesAccrued(), 50e6, "an unswept fee stays accrued");
+        assertEq(vault.feesAccrued(), 1e6, "an unswept fee stays accrued");
 
         // Settling turns the escrow into backing (float here, margin at the venue): now the fee
         // is spare and the same call sends it.
         lighter.settleBatch();
         vault.settleMint(id, PX);
-        assertEq(vault.sweepFees(), 50e6);
+        assertEq(vault.sweepFees(), 51e6);
     }
 
     /// Owed queued redemptions are held back in full: with a claim outstanding the sweep cannot
@@ -306,7 +328,9 @@ contract CertVaultFeesTest is VaultFixture {
         bare.redeemInstant(part);
 
         assertGt(bare.feesAccrued(), 0);
-        assertLt(bare.hotBuffer(), bare.retainedBacking(), "setup: the redemption spent float");
+        // The redemption was paid out of the balance, so the cash left is below the float plus the
+        // capital, both of which a sweep must hold back.
+        assertLt(bare.hotBuffer(), bare.retainedBacking() + BARE_SEED, "setup: the redemption spent float");
         assertEq(bare.sweepFees(), 0, "a sweep took a holder's float");
 
         // The venue returns the freed margin: two permissionless calls around a batch.
@@ -318,7 +342,7 @@ contract CertVaultFeesTest is VaultFixture {
         uint256 fees = bare.feesAccrued();
         assertEq(bare.sweepableFees(), fees, "once home, the fees are spare again");
         assertEq(bare.sweepFees(), fees);
-        assertGe(bare.hotBuffer(), bare.retainedBacking());
+        assertGe(bare.hotBuffer(), bare.retainedBacking() + BARE_SEED);
     }
 
     /// The seed is first-loss capital, not income: with no fee accrued, a donation-free vault's
@@ -413,7 +437,8 @@ contract CertVaultFeesTest is VaultFixture {
         uint256 carolBefore = usdg.balanceOf(carol);
         uint256 forceOwed = _owed(bare, forceId);
         uint256 queuedOwed = _owed(bare, queuedId);
-        uint256 escrow = _escrow(bare, carolMint);
+        // Stack 5, L-10: a refund returns the escrow AND the mint fee held with it.
+        uint256 escrow = _escrow(bare, carolMint) + bare.mintFee(carolMint);
 
         assertEq(bare.claimRedeem(forceId), forceOwed);
         assertEq(bare.claimRedeem(queuedId), queuedOwed);
@@ -429,6 +454,7 @@ contract CertVaultFeesTest is VaultFixture {
         assertEq(bareCert.totalSupply(), 0);
         sweptTotal += bare.sweepFees();
         assertEq(usdg.balanceOf(sink), sweptTotal);
+        assertGe(bare.hotBuffer(), BARE_SEED, "the seed paid for something: a sweep took too much");
     }
 
     // ================================================================== end to end
@@ -556,20 +582,26 @@ contract CertVaultFeesTest is VaultFixture {
         for (uint256 i = 0; i < _redeemIds.length; i++) {
             (address user,,,, bool paid) = bare.redeemReceipts(_redeemIds[i]);
             if (paid) continue;
-            uint256 owed = _owed(bare, _redeemIds[i]);
+            // Stack 5, H-7: a mid-sequence claim may have paid an instalment already, so what is
+            // left is owed less what was paid - and the receipt must close on this claim.
+            uint256 owed = _owed(bare, _redeemIds[i]) - bare.redeemPaid(_redeemIds[i]);
             uint256 before = usdg.balanceOf(user);
             assertEq(bare.claimRedeem(_redeemIds[i]), owed, "a claim was not paid in full");
             assertEq(usdg.balanceOf(user) - before, owed);
+            (,,,, paid) = bare.redeemReceipts(_redeemIds[i]);
+            assertTrue(paid, "the receipt did not close");
         }
         for (uint256 i = 0; i < _mintIds.length; i++) {
             (, uint256 escrow, bool settled,,,,) = bare.mintReceipts(_mintIds[i]);
             if (settled) continue;
-            assertEq(bare.refundMint(_mintIds[i]), escrow, "a refund was not paid in full");
+            // Stack 5, L-10: the refund includes the mint fee.
+            assertEq(bare.refundMint(_mintIds[i]), escrow + bare.mintFee(_mintIds[i]), "a refund was not paid in full");
         }
         assertEq(bare.totalOwedOutstanding(), 0);
         assertEq(bare.escrowOutstanding(), 0);
         assertEq(bare.retainedBacking(), 0);
         assertEq(bareCert.totalSupply(), 0);
+        assertGe(bare.hotBuffer(), BARE_SEED, "the seed paid for something: a sweep took too much");
     }
 
     /// @dev Sweep, and prove on the spot that it took nothing anyone was owed: every unpaid claim
@@ -585,12 +617,13 @@ contract CertVaultFeesTest is VaultFixture {
         for (uint256 i = 0; i < _redeemIds.length; i++) {
             (,,,, bool paid) = bare.redeemReceipts(_redeemIds[i]);
             if (paid) continue;
-            uint256 owed = _owed(bare, _redeemIds[i]);
+            uint256 owed = _owed(bare, _redeemIds[i]) - bare.redeemPaid(_redeemIds[i]); // stack 5, H-7
             if (hotBefore >= owed) assertGe(hotAfter, owed, "a sweep made a payable claim unpayable");
         }
         for (uint256 i = 0; i < _mintIds.length; i++) {
             (, uint256 escrow, bool settled,,,,) = bare.mintReceipts(_mintIds[i]);
             if (settled) continue;
+            escrow += bare.mintFee(_mintIds[i]); // stack 5, L-10
             if (hotBefore >= escrow) assertGe(hotAfter, escrow, "a sweep made a payable refund unpayable");
         }
     }

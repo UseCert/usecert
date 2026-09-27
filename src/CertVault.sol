@@ -296,6 +296,12 @@ contract CertVault {
     uint256 private _nextReceiptId = 1;
     mapping(uint256 => MintReceipt) public mintReceipts;
 
+    /// @notice The mint fee taken on each queued mint receipt, in collateral units.
+    /// @dev L-10 (stack 5): held with the escrow until settleMint earns it, returned by refundMint.
+    ///      A separate mapping because MintReceipt's getter is destructured positionally by the
+    ///      auditor's files, so the struct cannot grow.
+    mapping(uint256 => uint256) public mintFee;
+
     /// @notice Collateral posted to Lighter as margin, less what has been requested back.
     /// @dev A sizing counter for withdrawals only. It deliberately does NOT track funding, PnL or
     ///      liquidation — the authoritative backing figure is SolvencyRegistry's per-batch
@@ -617,10 +623,15 @@ contract CertVault {
     ///      by up to that escrow. It is bounded by settleWindow, and it is the harmless direction:
     ///      the same escrow is at the venue backing that receipt's own hedge, so it is not capital
     ///      standing behind nothing.
+    /// @dev M-5 (stack 5): that residual is closed, together with a larger one. The escrow held in
+    ///      the balance (_escrowHeld) AND the certificates' own float (retainedBacking) are now
+    ///      netted out as well, because neither is loss-absorbing capital: the first is owed back
+    ///      to a depositor or about to back new certificates, the second is the holders' own
+    ///      backing. What remains is the vault's own capital, fees and surplus, which
+    ///      is what the M-1 fix meant by "own capital". The mint paths also measure this BEFORE
+    ///      pulling the minter's deposit (see mintInstant), so a deposit can never vouch for itself.
     function freeCollateral18() public view returns (uint256) {
-        uint256 have = hotBuffer();
-        uint256 owed = totalOwedOutstanding;
-        return have > owed ? _to18(have - owed) : 0;
+        return _to18(_floorSub(hotBuffer(), totalOwedOutstanding + _escrowHeld() + retainedBacking));
     }
 
     /// @notice The third leg of CapacityOracle's min() — what the vault's own capital can absorb.
@@ -777,6 +788,12 @@ contract CertVault {
         if (!oracle.mintAllowed()) revert CertVault_MintPaused();
 
         uint256 px18 = oracle.px();
+        // M-5 (stack 5): the capital leg of admission control is measured BEFORE the deposit
+        // arrives. Measured after it, the minter's own collateral sat in the balance and counted as
+        // the vault's capital, so the "own capital" leg the earlier M-1 fix added never bound. The
+        // exposure side (supply, pending) is still read after the pull, inside _requireCapacity,
+        // so L-8's point about a nested callback mint stays true.
+        uint256 bufCap = bufferCapacity18();
         uint256 received = _pullCollateral(amountIn);
         uint256 fee = received * cfg.mintFeeBps / 10_000;
         uint256 net18 = _to18(received - fee);
@@ -801,7 +818,7 @@ contract CertVault {
         // exactly the reasoning that left _queueExit panicking, so it is not relied on.
         uint256 notional18 = _value18(certOut, px18);
         if (notional18 > cfg.instantCap18) revert CertVault_AboveInstantCap();
-        _requireCapacity(notional18, px18);
+        _requireCapacity(notional18, px18, bufCap);
 
         certificate.mint(msg.sender, certOut);
         // K2: what _postMargin does NOT send to the venue stays here as these certificates' own
@@ -837,6 +854,8 @@ contract CertVault {
         if (!oracle.mintAllowed()) revert CertVault_MintPaused();
 
         uint256 px18 = oracle.px();
+        // M-5: see mintInstant.
+        uint256 bufCap = bufferCapacity18();
         // L-8: as in mintInstant, everything below is sized off what arrived, not off what was
         // asked for. The escrow recorded on the receipt is therefore collateral the vault really
         // holds, which is what refundMint has to be able to hand back.
@@ -855,7 +874,7 @@ contract CertVault {
         // queued and the cap no longer separates anything. Without this, a mint at or below the
         // cap would be refused by both paths: impossible, not merely slow.
         if (!keeperHedging && notional18 <= cfg.instantCap18) revert CertVault_BelowInstantCap();
-        _requireCapacity(notional18, px18);
+        _requireCapacity(notional18, px18, bufCap);
 
         receiptId = _nextReceiptId++;
         mintReceipts[receiptId] = MintReceipt({
@@ -884,12 +903,18 @@ contract CertVault {
         ++openMintReceipts;
         // K2: the whole escrow is owed to this receipt (settle or refund) until one of them runs,
         // so spareCollateral() holds all of it back - including the share about to go to the
-        // venue, which is conservative. The fee is income from this moment: a refund returns the
-        // escrow, never the fee.
-        escrowOutstanding += received - fee;
-        _accrueFee(fee);
+        // venue, which is conservative.
+        // L-10 (stack 5): and so is the FEE. A refund used to keep it, so a keeper that failed to
+        // settle cost the user 0.1% for a service never delivered. The fee is now recorded on the
+        // receipt, held in escrowOutstanding with the rest (so neither an instant exit nor a sweep
+        // can spend it), accrued as income only when settleMint delivers the certificates, and
+        // returned by refundMint. That is stronger than accruing now and reversing on refund: a
+        // fee accrued now could be swept before the refund, and the refund would then be paid out
+        // of other people's cash.
+        escrowOutstanding += received;
+        mintFee[receiptId] = fee;
 
-        _postMargin(received - fee);
+        escrowAtVenue += _postMargin(received - fee);
         if (keeperHedging) {
             // The keeper opens it. Checked here rather than left to the venue, because the venue
             // would reject an undersized order off chain after this escrow had been taken.
@@ -1011,7 +1036,11 @@ contract CertVault {
         --openMintReceipts;
         // K2: the escrow stops being owed back and becomes certificate backing. Its venue share
         // was posted at requestMint (same formula as _postMargin); the rest is float.
-        _releaseEscrow(r.escrow);
+        // L-10: the fee held with it is earned now, and only now.
+        uint256 fee = mintFee[receiptId];
+        _releaseEscrow(r.escrow + fee);
+        _accrueFee(fee);
+        escrowAtVenue = _floorSub(escrowAtVenue, r.escrow * cfg.targetMarginBps / 10_000);
         retainedBacking += r.escrow - r.escrow * cfg.targetMarginBps / 10_000;
 
         uint256 certOut = r.indicativeCerts;
@@ -1074,6 +1103,8 @@ contract CertVault {
         // what was actually deposited and cannot double-count venue headroom (the failure mode
         // that killed three earlier recall designs — see recallMargin's doc comment).
         uint256 posted = r.escrow * cfg.targetMarginBps / 10_000;
+        // The whole escrow is due from the balance from now on (see escrowAtVenue).
+        escrowAtVenue = _floorSub(escrowAtVenue, posted);
         if (posted > postedMargin) posted = postedMargin;
         if (posted > 0) {
             postedMargin -= posted;
@@ -1155,11 +1186,16 @@ contract CertVault {
         // balance one permissionless call away.
         _sweepPending();
 
-        amountOut = r.escrow;
-        if (IERC20(cfg.collateral).balanceOf(address(this)) < amountOut) {
+        // L-10 (stack 5): the fee comes back too; it was never accrued (see requestMint).
+        amountOut = r.escrow + mintFee[receiptId];
+        // H-7 (stack 5): a refund may not spend cash owed to queued redemption receipts. It used
+        // to check the gross balance, so a refund could take money already recalled for a queued
+        // claim and leave that claimant waiting on it.
+        if (_floorSub(hotBuffer(), totalOwedOutstanding) < amountOut) {
             // Retryable, not a dead end: stageRefund has already moved this escrow's posted share
-            // into marginPendingRecall, and recallMargin() and seedBuffer() are both
-            // permissionless. The receipt stays unsettled and staged.
+            // into marginPendingRecall, and recallMargin(), seedBuffer() and the insurance pool
+            // (receiveInsurance, which insuranceShortfall() sizes to count this escrow) can each
+            // fund it. The receipt stays unsettled and staged.
             revert CertVault_RefundAwaitingSettlement();
         }
 
@@ -1196,9 +1232,66 @@ contract CertVault {
     ///      never mutated. A plain SSTORE, so it adds no revert to the exit path.
     mapping(uint256 => uint256) public redeemCertIn;
 
+    /// @notice Collateral already paid out on each queued receipt.
+    /// @dev H-7 (stack 5): claims pay min(what is due, what the vault holds) and keep the rest on
+    ///      the receipt, so a receipt is now paid in instalments. A separate mapping and not a new
+    ///      struct field for the reason redeemCertIn gives: RedeemReceipt's getter is destructured
+    ///      positionally by the auditor's files, and owed18 in it stays the number the receipt was
+    ///      WRITTEN for (test_ATK_reentrancyOnPayoutPaths reads it after the claim).
+    mapping(uint256 => uint256) public redeemPaid;
+
+    /// @notice The redeem fee assessed on each queued receipt at request time, in collateral units.
+    /// @dev M-12 (stack 5): it is only EARNED when the receipt is paid at owed18, so claimRedeem
+    ///      accrues it there, pro rata to what is actually paid, and never on a capped payout.
+    mapping(uint256 => uint256) public redeemFee;
+
+    /// @notice How old the price may be for an instant redemption, in seconds.
+    /// @dev H-1 (stack 5). The Chainlink stock feeds stop after Friday's session while the venue's
+    ///      perp trades all weekend, so a price that "never reverts" is, at the weekend, Friday's
+    ///      price: a holder could redeem instantly at it after the perp fell and keep the
+    ///      certificate if it rose - a free option for the price of the redeem fee. Past this age
+    ///      redeemInstant refuses and points the holder at requestRedeem / forceExit, which stay
+    ///      open whatever the feed does (Law 2). A constant rather than a constructor argument:
+    ///      the constructor's arity is frozen by the auditor's evidence files, which build it.
+    uint256 public constant INSTANT_MAX_PRICE_AGE = 1 hours;
+
+    /// @notice How long a queued claim waits for a price observed after its request before it
+    ///         pays owed18 uncapped.
+    /// @dev H-1 (stack 5). claimRedeem caps a payout at the burned certificates' current value, and
+    ///      that cap is only a protection if the price it uses postdates the request - a Friday
+    ///      price applied to a Saturday request is the same free option the instant path had. So
+    ///      the cap is applied only with a price observed at or after enqueuedAt, and until one
+    ///      exists the claim waits (a retryable CertVault_AwaitingFreshPrice). The wait is BOUNDED:
+    ///      past this timeout the claim pays owed18 uncapped, without needing any price at all, so
+    ///      no feed outage can hold an exit for good (Law 2). Four days covers a long weekend plus
+    ///      a market holiday.
+    uint256 public constant QUEUED_PRICE_TIMEOUT = 4 days;
+
+    /// @notice How long after its request only a receipt's owner may take a CAPPED payout.
+    /// @dev L-11 (stack 5). claimRedeem stays callable by anyone, because a holder must be payable
+    ///      without sending a transaction themselves. But a stranger claiming during a dip locks
+    ///      the lower cap in for the holder. So while the cap bites, and for this long after the
+    ///      request, only the owner may claim. An UNCAPPED payment (owed18 in full, or an
+    ///      instalment of it) cannot hurt the holder and stays open to anyone - which is also what
+    ///      test_ATK_doubleSpendOnReceipts, a non-owner claim, relies on.
+    uint256 public constant REDEEM_OWNER_GRACE = 1 days;
+
+    /// @dev H-1: redeemInstant with a price older than INSTANT_MAX_PRICE_AGE. Use requestRedeem or
+    ///      forceExit, both of which are always open.
+    error CertVault_InstantPriceTooOld();
+    /// @dev H-1: no price observed since this receipt's request yet, and QUEUED_PRICE_TIMEOUT has
+    ///      not passed. Retryable; never permanent (see QUEUED_PRICE_TIMEOUT).
+    error CertVault_AwaitingFreshPrice();
+    /// @dev L-11: a capped payout requested by someone other than the owner inside
+    ///      REDEEM_OWNER_GRACE. The owner can claim now; anyone can after the grace period.
+    error CertVault_OwnerGracePeriod();
+
     event Redeemed(address indexed user, uint256 certIn, uint256 amountOut, uint256 px18);
     event RedeemRequested(uint256 indexed receiptId, address indexed user, uint256 certIn, uint64 expiresAt);
     event RedeemClaimed(uint256 indexed receiptId, uint256 amountOut);
+    /// @dev H-7: this claim was an instalment. `stillDue` is what the receipt is owed at the price
+    ///      this claim used; the receipt stays open and anyone may claim again once cash arrives.
+    event RedeemClaimOutstanding(uint256 indexed receiptId, uint256 stillDue);
     event ForceExited(uint256 indexed receiptId, address indexed user, uint256 certIn);
     /// @dev Law 2: the closing hedge on the exit path is fail-open (see _tryHedge). This records
     ///      that the burn and receipt went through but the venue-side close did not, so it is
@@ -1207,13 +1300,26 @@ contract CertVault {
 
     /// @notice Instant redemption from the vault's own collateral balance (the hot buffer).
     /// @dev Deliberately reads NOTHING about buffer P&L health, capacity, or oracle pause state —
-    ///      only the hot buffer's raw size, purely to route a holder to the path that will
-    ///      actually pay them (Law 2's other paths remain unconditionally open; see
-    ///      requestRedeem/forceExit/claimRedeem). Uses pxUnguarded so a stale feed cannot trap a
-    ///      holder.
+    ///      only the price's age and the free part of the hot buffer, purely to route a holder to
+    ///      the path that will actually pay them (Law 2's other paths remain unconditionally open;
+    ///      see requestRedeem/forceExit/claimRedeem).
+    /// @dev H-1 (stack 5): refuses a price older than INSTANT_MAX_PRICE_AGE. This path used to take
+    ///      pxUnguarded at any age "so a stale feed cannot trap a holder", but a stale feed never
+    ///      trapped anyone here - the queue was always the other door - and paying at a stale price
+    ///      is what made the weekend a free option. The refusal is a routing decision, not a gate.
+    /// @dev H-7 (stack 5): may spend only the float nobody else has a claim on. It used to check the
+    ///      GROSS hot buffer, so an instant exit could spend cash already recalled for a queued
+    ///      receipt or held as a mint receipt's escrow; the queued claimant or the refund then
+    ///      waited on money that had left. Both are ring-fenced now: everything owed, in full
+    ///      (conservative - part of it may still be at the venue), and every escrow's share that is
+    ///      in the balance or due from it (_escrowHeld). The venue share of a receipt still inside
+    ///      its settle window is NOT held back, because it was never in the buffer: holding it back
+    ///      would only freeze other holders' float against it (see escrowAtVenue).
     function redeemInstant(uint256 certIn) external returns (uint256 amountOut) {
         if (certIn == 0) revert CertVault_ZeroAmount();
-        (uint256 px18,) = oracle.pxUnguarded();
+        (uint256 px18, uint256 observedAt) = oracle.pxUnguarded();
+        // pxUnguarded never reports a future time (CertOracle rejects one), so this cannot overflow.
+        if (observedAt + INSTANT_MAX_PRICE_AGE < block.timestamp) revert CertVault_InstantPriceTooOld();
         // FINDING 1: was `certIn * px18 / 1e18`, which panics 0x11 at an extreme feed price. Second
         // of the three redemption-path instances of that product. Not the Law 2 backstop itself
         // (this path routes to the queue when the float is short) but a panic here is still a
@@ -1228,7 +1334,9 @@ contract CertVault {
         uint256 fee18 = Math.mulDiv(gross18, cfg.redeemFeeBps, 10_000);
         amountOut = _from18(gross18 - fee18);
 
-        if (hotBuffer() < amountOut) revert CertVault_UseQueuedRedeem();
+        if (_floorSub(hotBuffer(), totalOwedOutstanding + _escrowHeld()) < amountOut) {
+            revert CertVault_UseQueuedRedeem();
+        }
 
         uint256 supplyBefore = certificate.totalSupply(); // capture BEFORE certificate.burn
         certificate.burn(msg.sender, certIn);
@@ -1347,10 +1455,12 @@ contract CertVault {
         if (fromMargin > 0) {
             marginPendingRecall += fromMargin;
         }
-        // K2 (Law 2): same two total steps as redeemInstant. This is forceExit's body, so neither
-        // may be able to revert. The fee is the one assessed now, at the request price - see
-        // feesAccrued for how claimRedeem's H-2 cap relates to it.
-        _accrueFee(_from18(fee18));
+        // M-12 (stack 5): the fee is RECORDED here and accrued only in claimRedeem, on what is
+        // actually paid at owed18. Accruing it now counted income before it was earned: when the
+        // H-2 cap later paid less than owed18, the difference had never been fee cash, and a sweep
+        // of the overstated counter came out of the remaining holders' backing. Both steps are a
+        // plain store and total arithmetic, so forceExit gains no revert (Law 2).
+        redeemFee[receiptId] = _from18(fee18);
         _releaseBacking(certIn, supplyBefore);
 
         if (isForce) emit ForceExited(receiptId, msg.sender, certIn);
@@ -1438,30 +1548,59 @@ contract CertVault {
     ///      of zero, which is the one way this could have paid a holder nothing. Nothing here
     ///      needs a privileged actor, a fill report, or a second step. forceExit is not touched
     ///      at all.
+    ///
+    /// @dev H-7 (stack 5): PARTIAL PAYMENT. This used to pay all or nothing, so a venue shortfall
+    ///      landed whole on whoever claimed last and that claimant waited indefinitely for money
+    ///      that might never come. It now pays min(what is due, what the vault holds) and keeps the
+    ///      remainder on the receipt (redeemPaid, RedeemClaimOutstanding), retryable by anyone. It
+    ///      reverts CertVault_AwaitingSettlement only when it could pay NOTHING, so the retryable
+    ///      "not yet" of M2 is unchanged. RESIDUAL, stated rather than hidden: this is not a true
+    ///      pro-rata deficit mechanism. A shortfall is still shared in the order claims arrive, but
+    ///      no claim can be trapped by it any more: each takes what is there, and the insurance
+    ///      pool (receiveInsurance, sized by insuranceShortfall) or a seed makes up the rest.
+    /// @dev H-1 (stack 5): the cap uses a price only if it was observed at or after the request;
+    ///      until then the claim waits, for at most QUEUED_PRICE_TIMEOUT. See _payout18.
+    /// @dev M-12 (stack 5): the fee recorded at request is accrued here, pro rata to what is paid,
+    ///      and only on an uncapped payment - that is when it is earned.
+    /// @dev L-11 (stack 5): a CAPPED payout needs the owner inside REDEEM_OWNER_GRACE.
     function claimRedeem(uint256 receiptId) external returns (uint256 amountOut) {
         RedeemReceipt storage r = redeemReceipts[receiptId];
         if (r.user == address(0) || r.paid) revert CertVault_NothingToClaim();
 
         _sweepPending();
 
-        amountOut = _from18(_payout18(receiptId, r.owed18));
-        if (hotBuffer() < amountOut) revert CertVault_AwaitingSettlement();
+        (uint256 target18, bool capped) = _payout18(receiptId, r);
+        if (capped && msg.sender != r.user && block.timestamp < uint256(r.enqueuedAt) + REDEEM_OWNER_GRACE) {
+            revert CertVault_OwnerGracePeriod();
+        }
+
+        uint256 owedCollateral = _from18(r.owed18);
+        uint256 paidBefore = redeemPaid[receiptId];
+        uint256 due = _floorSub(_from18(target18), paidBefore);
+        uint256 have = hotBuffer();
+        amountOut = due < have ? due : have;
+        bool done = amountOut == due;
+        if (!done && amountOut == 0) revert CertVault_AwaitingSettlement();
 
         // C1: retire the obligation before paying it, so recallMargin() stops asking for it.
-        // Floored, never checked-subtracted: r.owed18 is fixed at queue time while
-        // totalOwedOutstanding is a running counter, and an underflow here would revert a
-        // payout — a Law 2 breach in exchange for accounting tidiness.
-        // H-2: retire what _queueExit ADDED (_from18(r.owed18)), not what is being paid. The
-        // counter is the ledger of obligations created, so a re-valued payout must still close
-        // its own entry — otherwise every downward re-valuation would leave a permanent residue
-        // in it and recallMargin() would ask the venue for a shortfall that no longer exists.
-        uint256 owedCollateral = _from18(r.owed18);
-        uint256 applied = owedCollateral < totalOwedOutstanding ? owedCollateral : totalOwedOutstanding;
-        totalOwedOutstanding -= applied;
+        // Floored, never checked-subtracted: an underflow here would revert a payout — a Law 2
+        // breach in exchange for accounting tidiness. An instalment retires what it pays; the
+        // closing payment retires everything _queueExit ADDED for this receipt that is still
+        // open (H-2: a re-valued payout must close its own entry, or recallMargin() would keep
+        // asking the venue for a shortfall that no longer exists).
+        totalOwedOutstanding =
+            _floorSub(totalOwedOutstanding, done ? _floorSub(owedCollateral, paidBefore) : amountOut);
+        redeemPaid[receiptId] = paidBefore + amountOut;
+        if (done) r.paid = true;
+        // M-12. owedCollateral is non-zero whenever amountOut is (amountOut <= owed18 in collateral
+        // units), and the guard keeps mulDiv's division total when it is not.
+        if (!capped && owedCollateral != 0) {
+            _accrueFee(Math.mulDiv(redeemFee[receiptId], amountOut, owedCollateral));
+        }
 
-        r.paid = true;
         IERC20(cfg.collateral).safeTransfer(r.user, amountOut);
         emit RedeemClaimed(receiptId, amountOut);
+        if (!done) emit RedeemClaimOutstanding(receiptId, due - amountOut);
     }
 
     /// @notice What a queued receipt pays right now: what it was written for, capped at what the
@@ -1493,17 +1632,31 @@ contract CertVault {
     ///      which is total for every uint256 pair. The observable behaviour of this function at an
     ///      extreme price is identical to what the removed branch produced (owed18), for the reason
     ///      that branch already gave: at any price that large the cap cannot bite.
-    function _payout18(uint256 receiptId, uint256 owed18) internal view returns (uint256) {
+    ///
+    /// @dev H-1 (stack 5), and the change to the list above. A price is usable for the cap only if
+    ///      it was OBSERVED at or after the receipt's request (pxUnguarded's second value is the
+    ///      feed's own updatedAt, or lastGoodAt, which is also a feed time). Friday's price applied
+    ///      to a Saturday request is not a protection, it is the option H-1 describes. With no such
+    ///      price - including the oracle reverting or reporting zero, which used to pay owed18 at
+    ///      once - the claim now WAITS (CertVault_AwaitingFreshPrice), and that wait ends
+    ///      unconditionally at enqueuedAt + QUEUED_PRICE_TIMEOUT, after which owed18 is paid
+    ///      uncapped. So the only new revert here is bounded in time and needs nobody to act.
+    ///      A fresh price, once it exists, is used even after the timeout: capping never blocks.
+    ///      Returns the payout ceiling and whether the cap is what set it.
+    function _payout18(uint256 receiptId, RedeemReceipt storage r) internal view returns (uint256, bool) {
+        uint256 owed18 = r.owed18;
         uint256 certIn = redeemCertIn[receiptId];
-        if (certIn == 0) return owed18;
+        if (certIn == 0) return (owed18, false);
 
         uint256 px18;
-        try oracle.pxUnguarded() returns (uint256 p, uint256) {
-            px18 = p;
-        } catch {
-            return owed18;
+        uint256 observedAt;
+        try oracle.pxUnguarded() returns (uint256 p, uint256 t) {
+            (px18, observedAt) = (p, t);
+        } catch {}
+        if (px18 == 0 || observedAt < r.enqueuedAt) {
+            if (block.timestamp < uint256(r.enqueuedAt) + QUEUED_PRICE_TIMEOUT) revert CertVault_AwaitingFreshPrice();
+            return (owed18, false);
         }
-        if (px18 == 0) return owed18;
 
         // FINDING 1: the ad-hoc `px18 > type(uint256).max / certIn` bail-out that used to sit here
         // is GONE, and its removal is the fix rather than a simplification. It was the right
@@ -1516,7 +1669,7 @@ contract CertVault {
         // astronomically above any receipt written at a tradeable price, so the `min` below still
         // returns owed18 — which the old bail-out returned directly.
         uint256 valueNow18 = _value18(certIn, px18);
-        return valueNow18 < owed18 ? valueNow18 : owed18;
+        return valueNow18 < owed18 ? (valueNow18, true) : (owed18, false);
     }
 
     /// @notice Bring exit-allocated margin home from the venue. Permissionless and retryable.
@@ -1937,14 +2090,12 @@ contract CertVault {
     /// @notice Fees assessed and not yet swept, in collateral units. A CEILING on what
     ///         sweepFees() may move, never a claim on the balance: spareCollateral() is the bound
     ///         that protects everyone the vault owes.
-    /// @dev Raised at the moment each fee is taken: both mint paths, redeemInstant and _queueExit.
-    ///      The queued redeem fee is assessed at the request price. claimRedeem's H-2 cap can later
-    ///      pay less than owed18 when the price has fallen, in which case part of that assessed fee
-    ///      was never realised as cash; this counter does not un-assess it, because the shortfall
-    ///      simply never reaches the balance and spareCollateral() cannot see cash that is not
-    ///      there. The consequence is bounded: an overstated ceiling can only let a sweep take some
-    ///      OTHER surplus (a realised gain, a donation) up to the assessed amount, never anything
-    ///      spareCollateral() reserves.
+    /// @dev Raised when each fee is EARNED (stack 5): mintInstant and redeemInstant at once;
+    ///      requestMint's fee at settleMint (L-10: a refund returns it, so it is held with the
+    ///      escrow until then); a queued redemption's fee in claimRedeem, pro rata to what is paid
+    ///      and only on an uncapped payment (M-12). It used to be raised at requestMint and at
+    ///      _queueExit, i.e. before the fee was earned, and on a capped claim the difference had
+    ///      never been cash - a sweep of it came out of the remaining holders' backing.
     uint256 public feesAccrued;
 
     /// @notice Escrow held for mint receipts that are neither settled nor refunded, in collateral
@@ -1952,6 +2103,21 @@ contract CertVault {
     /// @dev Added in requestMint; released in settleMint (it becomes certificate backing) or
     ///      refundMint (it is paid back). Floored on release so a counter can never revert either.
     uint256 public escrowOutstanding;
+
+    /// @notice The part of escrowOutstanding that requestMint posted to the venue for receipts not
+    ///         yet settled or staged, in collateral units: escrow that is NOT in this contract's
+    ///         balance.
+    /// @dev Stack 5. Two readers need to know where escrow physically is, and a full-escrow figure
+    ///      is wrong for both. redeemInstant ring-fences the escrow a refund will need out of the
+    ///      buffer (H-7); ring-fencing the venue share as well would hold back OTHER cash (the
+    ///      holders' own float) against money that was never in the buffer, and in keeper mode,
+    ///      where every mint is queued, would shut instant exits for every open receipt.
+    ///      insuranceShortfall() counts the venue share as recoverable rather than missing, so an
+    ///      open receipt never reads as a loss (it must never overstate). Added in requestMint;
+    ///      released, with the same formula _postMargin used, in settleMint (the margin becomes
+    ///      certificate backing) and in stageRefund (it moves to marginPendingRecall, and the whole
+    ///      escrow is then due from the balance). Floored on release.
+    uint256 public escrowAtVenue;
 
     /// @notice The part of outstanding certificates' net collateral that stayed in this contract's
     ///         balance instead of going to the venue as margin: their float.
@@ -2075,6 +2241,12 @@ contract CertVault {
         return a > b ? a - b : 0;
     }
 
+    /// @dev Escrow that is in this contract's balance, or due from it: escrowOutstanding less the
+    ///      venue share of receipts still inside their settle window (see escrowAtVenue).
+    function _escrowHeld() internal view returns (uint256) {
+        return _floorSub(escrowOutstanding, escrowAtVenue);
+    }
+
     /// @notice Collect any margin the venue has actually released, and only then reduce the
     ///         outstanding recall. getPendingBalance is the sole on-chain proof a withdrawal
     ///         executed (Task 8d, fact 5) — L1 acceptance of the withdraw() call carries none.
@@ -2155,8 +2327,10 @@ contract CertVault {
     /// @dev M-1: the third leg passed to CapacityOracle is bufferCapacity18() — derived from
     ///      collateral the vault actually holds — and no longer BufferBook.capacity18() raw. See
     ///      bufferCapacity18() for the whole argument. Nothing else in this function changed.
-    function _requireCapacity(uint256 addNotional18, uint256 px18) internal view {
-        uint256 max = capacity.maxNotional18(address(this), bufferCapacity18());
+    /// @dev M-5 (stack 5): `bufCap` is bufferCapacity18() as the caller measured it BEFORE pulling
+    ///      the deposit. See mintInstant.
+    function _requireCapacity(uint256 addNotional18, uint256 px18, uint256 bufCap) internal view {
+        uint256 max = capacity.maxNotional18(address(this), bufCap);
         // FINDING 1: `(totalSupply + pendingMintCerts) * px18 / 1e18`. A mint path, so a revert
         // here is permitted (Laws 2 and 3 gate minting, never redemption) — but supply is NOT
         // bounded relative to the CURRENT price the way a single mint's own certOut is (that one

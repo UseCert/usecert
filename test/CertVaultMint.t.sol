@@ -358,8 +358,10 @@ contract CertVaultMintTest is VaultFixture {
         vm.prank(stranger);
         uint256 out = vault.refundMint(id);
 
-        assertEq(out, escrow);
-        assertEq(usdg.balanceOf(alice), aliceBefore + escrow);
+        // Stack 5, L-10: the refund returns the mint fee as well as the escrow - all 50_000e6.
+        assertEq(out, escrow + vault.mintFee(id));
+        assertEq(out, 50_000e6);
+        assertEq(usdg.balanceOf(alice), aliceBefore + out);
         assertEq(usdg.balanceOf(stranger), strangerBefore);
         assertEq(cert.totalSupply(), 0); // refunded, not minted
 

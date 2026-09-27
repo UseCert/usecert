@@ -129,4 +129,15 @@ abstract contract VaultFixture is Test {
         vm.prank(address(vault));
         usdg.transfer(makeAddr("bufferSink"), buf);
     }
+
+    /// @dev Stack 5, M-5: a vault with no capital of its own can no longer admit a mint (its
+    ///      capacity leg is measured before the deposit arrives), so a test that wants "an empty
+    ///      buffer with a mint in it" reads the vault's own balance first, mints, and then removes
+    ///      exactly that amount with this - leaving precisely what the mint itself left behind,
+    ///      which is the state the old drain-then-mint sequence produced.
+    function _drainAmount(uint256 amount) internal {
+        if (amount == 0) return;
+        vm.prank(address(vault));
+        usdg.transfer(makeAddr("bufferSink"), amount);
+    }
 }

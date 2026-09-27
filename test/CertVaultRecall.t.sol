@@ -277,10 +277,13 @@ contract CertVaultRecallTest is VaultFixture {
     ///      (owed, recalledIntoVault, paid) in collateral units so the caller can assert on the
     ///      exact arithmetic.
     function _proveReceiptPayableAt(uint256 mult) internal returns (uint256 owed, uint256 recalled, uint256 paid) {
-        _drainHotBuffer();
+        // Stack 5, M-5: the seed is removed right AFTER the mint (an empty vault can no longer
+        // admit one); the state left is the one the old drain-then-mint produced.
+        uint256 own = vault.hotBuffer();
 
         vm.prank(alice);
         vault.mintInstant(3_558.6e6);
+        _drainAmount(own);
         lighter.settleBatch(); // the hedge fills; MockLighter records entryPrice = PX
         uint256 bal = cert.balanceOf(alice);
 
