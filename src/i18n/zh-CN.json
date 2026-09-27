@@ -1108,7 +1108,11 @@
   "Anyone can pay rewards in. A funding during a running stream is spread over the time left and never moves its end.": "任何人都可以注入奖励。在奖励流进行期间的注资会分摊到剩余时间内，且永远不会推迟其结束时间。",
   "Rewards exist only when someone pays them in: the buyback fund's share of the vaults' fees is forwarded here, and anyone can add to it. No annual rate is shown, because it would be a forecast, not a fact. There are no token emissions. Reward funded while nobody is staked is not lost: it is carried into the next stream": "只有当有人注入时才会有奖励：回购基金所得的金库费用份额会转发到这里，任何人也都可以追加。这里不显示年化收益率，因为那只是预测，而不是事实。没有代币增发。在无人质押期间注入的奖励不会丢失：它会被结转到下一轮奖励流中",
   "Withdraw all and claim": "全部提取并领取",
-  "Approve USDG for the reward stream": "为奖励流授权 USDG"
+  "Approve USDG for the reward stream": "为奖励流授权 USDG",
+  "Insurance pool v1 · exit only": "保险池 v1 · 仅可退出",
+  "This pool is replaced by v2 above. Deposits are closed here; withdrawals stay open: request, wait out the cooldown, then withdraw in the window.": "此池已由上方的 v2 取代。这里不再接受存款；提款仍然开放：先申请，等待冷却期结束，然后在提款窗口内提取。",
+  "Staking · insurance pool v1 (exit only)": "质押 · 保险池 v1（仅可退出）",
+  "CERT staking v1 · exit only: withdraw and claim here, stake in v2 above": "CERT 质押 v1 · 仅可退出：在此提取和领取奖励，请在上方的 v2 中质押"
  },
  "tpl": {
   "(EST. {#} · VERSION {#}.{#})": "（创立于 {0} · 版本 {1}.{2}）",

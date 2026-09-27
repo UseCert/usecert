@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { formatUnits, parseUnits } from "viem";
 import { usePublicClient, useReadContracts, useWriteContract } from "wagmi";
 import { ArrowUpRight, Loader2 } from "lucide-react";
-import { CHAIN_ID, IS_STACK5 } from "@/chain/deployment";
+import { CHAIN_ID } from "@/chain/deployment";
 import { CertificateABI } from "@/chain/contracts";
 import { explorerAddressUrl, explorerTxUrl } from "@/chain/config";
 import {
@@ -39,12 +39,13 @@ const when = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 16).re
  * STACK 5: CertStaking v2 lives at its own address. Shown only on a stack-5 bundle and once that
  * address is recorded in certStaking.ts; every other build renders v1 below, unchanged.
  */
-export default function CertStakePanel() {
-  if (IS_STACK5 && CERT_STAKING_V2_ADDRESS) return <CertStakePanelV2 pool={CERT_STAKING_V2_ADDRESS} deployTx={CERT_STAKING_V2_DEPLOY_TX} />;
-  return <CertStakePanelV1 />;
+export default function CertStakePanel({ legacy = false }: { legacy?: boolean } = {}) {
+  // Selected by its own address (see StakeView). Inside the exit-only v1 page it renders v1.
+  if (!legacy && CERT_STAKING_V2_ADDRESS) return <CertStakePanelV2 pool={CERT_STAKING_V2_ADDRESS} deployTx={CERT_STAKING_V2_DEPLOY_TX} />;
+  return <CertStakePanelV1 legacy={legacy} />;
 }
 
-function CertStakePanelV1() {
+function CertStakePanelV1({ legacy = false }: { legacy?: boolean } = {}) {
   const { address, connected, wrongNetwork, setWalletModalOpen, switchToUseCert, pushToast, settleToast, dismissToast, now } = useDashboard();
   const me = address ?? ZERO;
   const publicClient = usePublicClient({ chainId: CHAIN_ID });
@@ -121,7 +122,7 @@ function CertStakePanelV1() {
 
   const gate = !connected ? "connect" : wrongNetwork ? "network" : null;
   const room = cap !== undefined && total !== undefined ? (cap > total ? cap - total : 0n) : undefined;
-  const stakeBlocked = gate !== null || amount18 <= 0n || (room !== undefined && amount18 > room) || (wallet !== undefined && amount18 > wallet);
+  const stakeBlocked = legacy || gate !== null || amount18 <= 0n || (room !== undefined && amount18 > room) || (wallet !== undefined && amount18 > wallet);
 
   const Btn = ({ label, onClick, disabled, id }: { label: string; onClick: () => void; disabled?: boolean; id: string }) => (
     <button
@@ -146,7 +147,7 @@ function CertStakePanelV1() {
     <section className="mt-14 border-t hairline-dark pt-10">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <MicroLabel>CERT staking · share of the buyback fund</MicroLabel>
+          <MicroLabel>{legacy ? "CERT staking v1 · exit only: withdraw and claim here, stake in v2 above" : "CERT staking · share of the buyback fund"}</MicroLabel>
           <h2 className="mt-3 text-[28px] font-semibold uppercase leading-[0.95] tracking-[-0.04em] md:text-[40px]">
             Stake CERT, <span className="text-metallic">share the fees.</span>
           </h2>

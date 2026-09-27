@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { formatUnits, parseUnits } from "viem";
 import { usePublicClient, useReadContracts, useWriteContract } from "wagmi";
 import { ArrowUpRight, Loader2 } from "lucide-react";
-import { CHAIN_ID, IS_STACK5 } from "@/chain/deployment";
+import { CHAIN_ID } from "@/chain/deployment";
 import { SHARED, TestUSDGABI } from "@/chain/contracts";
 import { explorerAddressUrl, explorerTxUrl } from "@/chain/config";
 import {
@@ -42,11 +42,19 @@ type Draw = readonly [string, bigint, bigint, boolean, boolean];
  * unchanged. The choice is a module constant, so no hook is ever called conditionally.
  */
 export default function StakeView() {
-  if (IS_STACK5 && INSURANCE_V2_ADDRESS) return <StakeViewV2 pool={INSURANCE_V2_ADDRESS} deployTx={INSURANCE_V2_DEPLOY_TX} />;
+  // Staking v2 does not depend on the vault stack (it went live before the stack-5 vaults), so it
+  // is selected by its own address alone. v1 stays below, exit-only, so its holders can leave.
+  if (INSURANCE_V2_ADDRESS)
+    return (
+      <>
+        <StakeViewV2 pool={INSURANCE_V2_ADDRESS} deployTx={INSURANCE_V2_DEPLOY_TX} />
+        <StakeViewV1 legacy />
+      </>
+    );
   return <StakeViewV1 />;
 }
 
-function StakeViewV1() {
+function StakeViewV1({ legacy = false }: { legacy?: boolean } = {}) {
   const { address, connected, wrongNetwork, setWalletModalOpen, switchToUseCert, pushToast, settleToast, dismissToast, now } = useDashboard();
   const me = address ?? ZERO;
   const publicClient = usePublicClient({ chainId: CHAIN_ID });
@@ -146,7 +154,7 @@ function StakeViewV1() {
 
   const gate = !connected ? "connect" : wrongNetwork ? "network" : null;
   const depositBlocked =
-    gate !== null || drawPending === true || amount6 <= 0n || (room !== undefined && amount6 > room) || (wallet !== undefined && amount6 > wallet);
+    legacy || gate !== null || drawPending === true || amount6 <= 0n || (room !== undefined && amount6 > room) || (wallet !== undefined && amount6 > wallet);
 
   const Btn = ({ label, onClick, disabled, id }: { label: string; onClick: () => void; disabled?: boolean; id: string }) => (
     <button
@@ -170,8 +178,16 @@ function StakeViewV1() {
 
   return (
     <div className="mx-auto max-w-[1180px] px-4 py-8 md:px-8">
+      {legacy && (
+        <div className="mb-6 border border-warn/40 bg-[#12120d] p-4">
+          <p className="font-mono text-[11px] uppercase tracking-[0.06em] text-warn">Insurance pool v1 · exit only</p>
+          <p className="mt-1 font-mono text-[11px] leading-[1.6] text-white-60">
+            This pool is replaced by v2 above. Deposits are closed here; withdrawals stay open: request, wait out the cooldown, then withdraw in the window.
+          </p>
+        </div>
+      )}
       <ViewHeader
-        label="Staking · insurance pool"
+        label={legacy ? "Staking · insurance pool v1 (exit only)" : "Staking · insurance pool"}
         title={
           <>
             Insure the <span className="text-metallic">certificates.</span>
@@ -309,7 +325,7 @@ function StakeViewV1() {
         <span>{`Updated ${reads.dataUpdatedAt ? Math.round((now - reads.dataUpdatedAt) / 1000) : "—"}s ago`}</span>
       </p>
 
-      <CertStakePanel />
+      <CertStakePanel legacy={legacy} />
     </div>
   );
 }
