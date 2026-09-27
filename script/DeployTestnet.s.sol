@@ -723,13 +723,7 @@ contract DeployTestnet is Script {
     ///      exist to be called; the vault holds NO reference to the factory and does not depend on
     ///      it at all.
     function _phase3_coreAndVaults() internal virtual {
-        capacity = address(
-            new CapacityOracle(
-                registry, govAddr, DEPTH_BPS, MIN_DEPTH_BPS, MAX_DEPTH_BPS, MAX_ATTESTATION_AGE_SEC, _maxAbsoluteCap()
-            )
-        );
-
-        factory = address(new CertFactory(lighter, registry, capacity, govAddr));
+        _deployCapacityAndFactory();
 
         for (uint256 i = 0; i < assets.length; ++i) {
             // §6 step 3: deployed DIRECTLY, never through `CertFactory.deployVault` — that reverts
@@ -776,6 +770,30 @@ contract DeployTestnet is Script {
     // ------------------------------------------------------------------------------- phase 4
 
     /// @dev The governance phase, in §5's order.
+    /// @dev Split out so a mainnet deploy can create these two ahead of the vaults (they need the
+    ///      registry, not the oracles) and a later run reuses them: see the `_preset*` hooks.
+    function _deployCapacityAndFactory() internal {
+        capacity = _presetCapacity();
+        if (capacity == address(0)) {
+            capacity = address(
+                new CapacityOracle(
+                    registry, govAddr, DEPTH_BPS, MIN_DEPTH_BPS, MAX_DEPTH_BPS, MAX_ATTESTATION_AGE_SEC, _maxAbsoluteCap()
+                )
+            );
+        }
+        factory = _presetFactory();
+        if (factory == address(0)) factory = address(new CertFactory(lighter, registry, capacity, govAddr));
+    }
+
+    /// @dev Already-deployed CapacityOracle / CertFactory to reuse; none on testnet.
+    function _presetCapacity() internal view virtual returns (address) {
+        return address(0);
+    }
+
+    function _presetFactory() internal view virtual returns (address) {
+        return address(0);
+    }
+
     function _phase4_governance() internal virtual {
         for (uint256 i = 0; i < assets.length; ++i) {
             // §6 step 4. Records the vault in `vaults`/`isVault` and cross-checks the certificate.

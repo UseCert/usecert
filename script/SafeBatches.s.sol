@@ -166,11 +166,29 @@ contract SafeBatches is DeployMainnet {
 
         bytes[] memory inits = batch1InitCodes(attester);
         uint64 nonce = vm.getNonce(safe);
+        // BATCH1_PART: "registry" | "oracles" | unset (both, as stack 4 ran it). Split because
+        // every CertOracle refuses a stale price in its constructor and the RH stock feeds do not
+        // update at weekends: the registry (which needs no price) can go first and the staking
+        // side can deploy against it, while the oracles wait for the feeds. The registry is
+        // entry 0 either way, so every address is the same as in the combined batch.
+        string memory part = vm.envOr("BATCH1_PART", string(""));
+        bytes32 ph = keccak256(bytes(part));
+        uint256 from = 0;
+        uint256 to = inits.length;
+        if (ph == keccak256("registry")) {
+            to = 1;
+        } else if (ph == keccak256("oracles")) {
+            from = 1;
+            address reg = vm.computeCreateAddress(safe, nonce - 1);
+            require(reg.code.length > 0, "SafeBatches: BATCH1_PART=oracles needs the registry batch executed first");
+        } else {
+            require(ph == keccak256(""), "SafeBatches: BATCH1_PART must be registry, oracles or unset");
+        }
         bytes memory packed;
-        for (uint256 k = 0; k < inits.length; ++k) {
+        for (uint256 k = from; k < to; ++k) {
             packed = _entry(packed, inits[k]);
             string memory what = k == 0 ? "registry" : string.concat("oracle ", assets[k - 1].symbol);
-            console2.log(string.concat("CREATE ", what, " ->"), vm.computeCreateAddress(safe, nonce + uint64(k)));
+            console2.log(string.concat("CREATE ", what, " ->"), vm.computeCreateAddress(safe, nonce + uint64(k - from)));
         }
 
         bytes memory data = abi.encodeWithSelector(MULTI_SEND, packed);

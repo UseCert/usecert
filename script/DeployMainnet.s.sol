@@ -639,35 +639,70 @@ contract DeployMainnet is DeployTestnet {
     ///      msg.sender: InsuranceStaking takes it as an argument and the other three have none.
     function _phase3_coreAndVaults() internal override {
         super._phase3_coreAndVaults();
+        _deployStack5Shared();
+    }
 
+    /// @dev The four stack-5 contracts. None needs an oracle, so on 2026-09-27 they were deployed
+    ///      ahead of the vaults (script/DeployStack5Shared.s.sol) while the stock feeds were frozen
+    ///      for the weekend. Each is reused when named in the environment; the S9 read-backs
+    ///      (_verifyFeeVault, _verifyStakings) check reused ones exactly as fresh ones, so a wrong
+    ///      address fails the dry run before anything is sent.
+    function _deployStack5Shared() internal {
         // Registry = CertFactory: the pool reads isVault and registeredAt (H-3) from it.
-        insuranceStaking = address(
-            new InsuranceStaking(
-                IERC20(collateral),
-                IVaultRegistry(factory),
-                govAddr,
-                INSURANCE_COOLDOWN,
-                INSURANCE_WITHDRAW_WINDOW,
-                INSURANCE_DRAW_DELAY,
-                INSURANCE_MAX_DRAW_BPS,
-                INSURANCE_DEPOSIT_CAP,
-                INSURANCE_REGISTRATION_DELAY,
-                INSURANCE_NAME,
-                INSURANCE_SYMBOL
-            )
-        );
+        insuranceStaking = _reuse("MAINNET_INSURANCE_STAKING");
+        if (insuranceStaking == address(0)) {
+            insuranceStaking = address(
+                new InsuranceStaking(
+                    IERC20(collateral),
+                    IVaultRegistry(factory),
+                    govAddr,
+                    INSURANCE_COOLDOWN,
+                    INSURANCE_WITHDRAW_WINDOW,
+                    INSURANCE_DRAW_DELAY,
+                    INSURANCE_MAX_DRAW_BPS,
+                    INSURANCE_DEPOSIT_CAP,
+                    INSURANCE_REGISTRATION_DELAY,
+                    INSURANCE_NAME,
+                    INSURANCE_SYMBOL
+                )
+            );
+        }
 
-        certStaking = address(
-            new CertStaking(
-                IERC20(CERT), IERC20(collateral), CERT_STAKING_DURATION, CERT_STAKING_CAP, CERT_STAKING_MIN_NOTIFY
-            )
-        );
+        certStaking = _reuse("MAINNET_CERT_STAKING");
+        if (certStaking == address(0)) {
+            certStaking = address(
+                new CertStaking(
+                    IERC20(CERT), IERC20(collateral), CERT_STAKING_DURATION, CERT_STAKING_CAP, CERT_STAKING_MIN_NOTIFY
+                )
+            );
+        }
 
         // Its constructor checks the staking contract streams USDG and has minNotify.
-        buybackForwarder = address(new BuybackForwarder(IERC20(collateral), ICertStakingFunding(certStaking)));
+        buybackForwarder = _reuse("MAINNET_BUYBACK_FORWARDER");
+        if (buybackForwarder == address(0)) {
+            buybackForwarder = address(new BuybackForwarder(IERC20(collateral), ICertStakingFunding(certStaking)));
+        }
 
-        (address[] memory r, uint256[] memory b) = _feeSplit();
-        feeVault = address(new FeeVault(IERC20(collateral), r, b));
+        feeVault = _reuse("MAINNET_FEE_VAULT");
+        if (feeVault == address(0)) {
+            (address[] memory r, uint256[] memory b) = _feeSplit();
+            feeVault = address(new FeeVault(IERC20(collateral), r, b));
+        }
+    }
+
+    /// @dev An already-deployed contract named by `key`, or zero. A named address with no code
+    ///      is a typo, not a request to deploy.
+    function _reuse(string memory key) internal view returns (address a) {
+        a = vm.envOr(key, address(0));
+        if (a != address(0)) require(a.code.length > 0, string.concat("STACK5: ", key, " has no code"));
+    }
+
+    function _presetCapacity() internal view override returns (address) {
+        return _reuse("MAINNET_CAPACITY_ORACLE");
+    }
+
+    function _presetFactory() internal view override returns (address) {
+        return _reuse("MAINNET_CERT_FACTORY");
     }
 
     /// @dev 70% InsuranceStaking, 20% BuybackForwarder, 5% ops wallet, 5% treasury Safe.
