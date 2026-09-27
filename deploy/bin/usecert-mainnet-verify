@@ -19,8 +19,9 @@ export PATH=/home/usecert/.foundry/bin:$PATH
 
 R=https://rpc.mainnet.chain.robinhood.com
 S=https://sourcify.dev/server
-BOOK=/opt/usecert/deployments/4663.json
-RUN=/opt/usecert/broadcast/DeployMainnet.s.sol/4663/run-latest.json
+# Stack 5: BOOK=/opt/usecert/deployments/4663.stack5.json until it is promoted to 4663.json.
+BOOK=${BOOK:-/opt/usecert/deployments/4663.json}
+RUN=${RUN:-/opt/usecert/broadcast/DeployMainnet.s.sol/4663/run-latest.json}
 
 declare -A SRC=(
   [SolvencyRegistry]=src/SolvencyRegistry.sol
@@ -30,6 +31,10 @@ declare -A SRC=(
   [CertOracle]=src/CertOracle.sol
   [Certificate]=src/Certificate.sol
   [BufferBook]=src/BufferBook.sol
+  [InsuranceStaking]=src/InsuranceStaking.sol
+  [CertStaking]=src/CertStaking.sol
+  [BuybackForwarder]=src/BuybackForwarder.sol
+  [FeeVault]=src/FeeVault.sol
 )
 
 mapfile -t TARGETS < <(python3 -c "
@@ -42,6 +47,10 @@ for t in run['transactions']:
 for v in book['vaults']:
     if v.get('certificate'): out.append('Certificate %s' % v['certificate'])
     if v.get('bufferBook'):  out.append('BufferBook %s' % v['bufferBook'])
+    # Safe mode: the Safe created these (batch 1), so they are not CREATEs in the forge run.
+    if v.get('certOracle'):  out.append('CertOracle %s' % v['certOracle'])
+if book.get('shared', {}).get('solvencyRegistry'):
+    out.append('SolvencyRegistry %s' % book['shared']['solvencyRegistry'])
 seen=set()
 for o in out:
     a=o.split()[1].lower()

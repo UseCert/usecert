@@ -491,13 +491,12 @@ contract DeployTestnet is Script {
 
     // ------------------------------------------------------------------------------------- run
 
-    function run() external {
+    function run() public virtual {
         if (block.chainid != _chainId()) revert DeployTestnet_WrongChain(block.chainid, _chainId());
 
         (uint256 deployerPk, uint256 govPk, uint256 attesterPk) = _senderKeys();
 
         deployerAddr = vm.addr(deployerPk);
-        govAddr = vm.addr(govPk);
         attesterAddr = vm.addr(attesterPk);
 
         // SAFE MODE (ROADMAP 6.15). Governance is an existing multisig rather than an EOA key. It
@@ -505,8 +504,11 @@ contract DeployTestnet is Script {
         // contracts (registry, oracles) were already created BY THE SAFE through a delegatecall to
         // Safe's CreateCall and are adopted - and fully verified - rather than deployed; and
         // phase 4 is not broadcast at all, it is a Safe batch (script/SafeBatches.s.sol).
+        //
+        // Stack 5: in Safe mode no governance KEY is derived at all. Stack 4 still required a
+        // MAINNET_GOV_PK it never used, which is a private key in an env file for nothing.
         address safeGov = _externalGovernance();
-        if (safeGov != address(0)) govAddr = safeGov;
+        govAddr = safeGov != address(0) ? safeGov : vm.addr(govPk);
 
         // Three DISTINCT senders. Collapsing any two would silently defeat §4's separation: with
         // governance == deployer, "governance is a multisig" stops being true and the emergency
@@ -516,6 +518,9 @@ contract DeployTestnet is Script {
         require(govAddr != attesterAddr, "SENDERS: governance == attester");
 
         _loadAssets();
+        // Stack 5: whatever a subclass must know and check before the first broadcast (the mainnet
+        // settler, fee recipients, CERT token). Empty on testnet.
+        _preBroadcastChecks();
 
         // Task 7 gated `LighterSim.settleBatch` to `owner` or `keeper`. Registered in phase 5, by
         // the deployer (who is also the simulator's owner); loaded and validated here so a missing
@@ -720,7 +725,7 @@ contract DeployTestnet is Script {
     function _phase3_coreAndVaults() internal virtual {
         capacity = address(
             new CapacityOracle(
-                registry, govAddr, DEPTH_BPS, MIN_DEPTH_BPS, MAX_DEPTH_BPS, MAX_ATTESTATION_AGE_SEC, MAX_ABSOLUTE_CAP_18
+                registry, govAddr, DEPTH_BPS, MIN_DEPTH_BPS, MAX_DEPTH_BPS, MAX_ATTESTATION_AGE_SEC, _maxAbsoluteCap()
             )
         );
 
@@ -925,7 +930,7 @@ contract DeployTestnet is Script {
 
         // ---- §5 / §9: the capacity oracle's immutable ceiling and its governance
         require(CapacityOracle(capacity).governance() == govAddr, "S9: capacity.governance != GOV");
-        require(CapacityOracle(capacity).maxAbsoluteCap() == MAX_ABSOLUTE_CAP_18, "S9: capacity.maxAbsoluteCap wrong");
+        require(CapacityOracle(capacity).maxAbsoluteCap() == _maxAbsoluteCap(), "S9: capacity.maxAbsoluteCap wrong");
         require(CapacityOracle(capacity).maxAbsoluteCap() != type(uint256).max, "S9: maxAbsoluteCap is unbounded");
         require(CapacityOracle(capacity).depthBps() == DEPTH_BPS, "S9: capacity.depthBps wrong");
         require(CapacityOracle(capacity).minDepthBps() == MIN_DEPTH_BPS, "S9: capacity.minDepthBps wrong");
@@ -951,6 +956,10 @@ contract DeployTestnet is Script {
         for (uint256 i = 0; i < assets.length; ++i) {
             _verifyAsset(i);
         }
+
+        // Stack 5: the contracts a subclass adds (mainnet: FeeVault, BuybackForwarder,
+        // InsuranceStaking, CertStaking). Empty on testnet.
+        _verifyExtra();
     }
 
     /// @dev The part of §9 that is about THIS deployment's collateral rather than about the
@@ -1053,6 +1062,8 @@ contract DeployTestnet is Script {
         require(o.pokeConfirmationSeconds() == POKE_CONFIRMATION_SECONDS, "S9: pokeConfirmationSeconds wrong");
         require(o.pokeConfirmationSeconds() != 0, "S9: pokeConfirmationSeconds == 0");
         require(o.basisBandBps() == BASIS_BAND_BPS, "S9: oracle.basisBandBps wrong");
+        // Stack 5 (H-6): minting needs a mark younger than this. Bounded on chain to [30, 3600].
+        require(o.maxMarkAge() == MAX_MARK_AGE, "S9: oracle.maxMarkAge wrong");
         require(o.priceDecimals() == a.priceDecimals, "S9: oracle.priceDecimals != venue price_decimals");
         require(o.lastGoodPx18() != 0, "S9: oracle.lastGoodPx18 == 0, mintAllowed fails closed");
 
@@ -1216,7 +1227,7 @@ contract DeployTestnet is Script {
 
     function _writeAddressBook() internal {
         string memory out = "{\n";
-        out = string.concat(out, _jStr("  ", "_generatedBy", "script/DeployTestnet.s.sol"));
+        out = string.concat(out, _jStr("  ", "_generatedBy", _generatedBy()));
         out = string.concat(
             out,
             _jStr(
@@ -1225,6 +1236,7 @@ contract DeployTestnet is Script {
                 "GENERATED PER DEPLOYMENT. NEVER HAND-EDIT: each mirror is a new vault AND a new certificate token, and an edited map repoints a UI at a new token while balances sit in the old one. Re-run the script."
             )
         );
+        out = string.concat(out, _stackMarkerJson());
         out = string.concat(out, _jNum("  ", "chainId", block.chainid));
         out = string.concat(out, _jNum("  ", "blockNumber", block.number));
         out = string.concat(out, _jNum("  ", "timestamp", block.timestamp));
@@ -1271,11 +1283,13 @@ contract DeployTestnet is Script {
                 )
             );
         }
+        out = string.concat(out, _extraSharedJson());
         out = string.concat(out, _jAddrLast("    ", "certFactory", factory));
         out = string.concat(out, "  },\n");
 
         out = string.concat(out, '  "parameters": {\n');
         out = string.concat(out, _parametersJson());
+        out = string.concat(out, _extraParametersJson());
         out = string.concat(out, "\n  },\n");
 
         out = string.concat(out, '  "vaults": [\n');
@@ -1285,7 +1299,53 @@ contract DeployTestnet is Script {
         }
         out = string.concat(out, "  ]\n}\n");
 
-        vm.writeFile(string.concat("deployments/", vm.toString(block.chainid), ".json"), out);
+        vm.writeFile(_bookPath(), out);
+    }
+
+    // ------------------------------------------------------- address-book seams (stack 5)
+    //
+    // Empty on testnet, so its book keeps its shape. DeployMainnet fills them.
+
+    /// @dev Which script wrote the book.
+    function _generatedBy() internal pure virtual returns (string memory) {
+        return "script/DeployTestnet.s.sol";
+    }
+
+    /// @dev Where the book goes. Testnet: `deployments/46630.json`, as always.
+    function _bookPath() internal view virtual returns (string memory) {
+        return string.concat("deployments/", vm.toString(block.chainid), ".json");
+    }
+
+    /// @dev A top-level line such as `"stack": 5,` - or nothing.
+    function _stackMarkerJson() internal view virtual returns (string memory) {
+        return "";
+    }
+
+    /// @dev Extra `shared` rows, each ending in ",\n" (certFactory stays the last row).
+    function _extraSharedJson() internal view virtual returns (string memory) {
+        return "";
+    }
+
+    /// @dev Extra `parameters` rows, each STARTING with ",\n" (feedDecimals has no comma).
+    function _extraParametersJson() internal view virtual returns (string memory) {
+        return "";
+    }
+
+    /// @dev Extra per-vault rows, each ending in ",\n" (seedOpenInterest18 stays last).
+    function _extraAssetJson(uint256) internal view virtual returns (string memory) {
+        return "";
+    }
+
+    /// @dev Stack 5 hooks with no testnet behaviour.
+    function _preBroadcastChecks() internal virtual {}
+
+    function _verifyExtra() internal view virtual {}
+
+    function _reportExtra() internal view virtual {}
+
+    /// @dev The immutable ceiling on any per-asset absoluteCap18. Testnet keeps its 1e27.
+    function _maxAbsoluteCap() internal view virtual returns (uint256) {
+        return MAX_ABSOLUTE_CAP_18;
     }
 
     function _jStr(string memory pad, string memory k, string memory v) internal pure returns (string memory) {
@@ -1323,10 +1383,18 @@ contract DeployTestnet is Script {
             '    "minDepthBps": 100,\n',
             '    "maxDepthBps": 3000,\n',
             '    "maxAttestationAgeSec": 300,\n',
-            '    "maxAbsoluteCap18": "1000000000000000000000000000",\n',
+            _capAndMarkJson(),
             '    "venueWithdrawCap": "18446744073709551615",\n',
             '    "simRequiredMarginBps": 5000,\n',
             '    "feedDecimals": 8'
+        );
+    }
+
+    /// @dev Split out of `_parametersJson` for the legacy codegen's stack (via_ir stays off).
+    function _capAndMarkJson() internal view returns (string memory) {
+        return string.concat(
+            '    "maxAbsoluteCap18": "', vm.toString(_maxAbsoluteCap()), '",\n',
+            '    "maxMarkAge": ', vm.toString(MAX_MARK_AGE), ',\n'
         );
     }
 
@@ -1346,6 +1414,7 @@ contract DeployTestnet is Script {
         // JavaScript consumer that parsed them as numbers. The front-end adapter reads this file.
         out = string.concat(out, _jStr("      ", "seedPrice18", vm.toString(assets[i].seedPx18)));
         out = string.concat(out, _jStr("      ", "absoluteCap18", vm.toString(assets[i].absoluteCap18)));
+        out = string.concat(out, _extraAssetJson(i));
         out = string.concat(
             out, string.concat('      "seedOpenInterest18": "', vm.toString(assets[i].openInterest18), '"\n    }')
         );
@@ -1367,7 +1436,7 @@ contract DeployTestnet is Script {
     ///      The book is written during forge's simulation pass, before anything is broadcast,
     ///      so this refuses the whole run rather than stranding a deployed stack without a book.
     function _commit() internal view returns (string memory) {
-        string memory c = vm.envOr("COMMIT", string(""));
+        string memory c = _commitEnv();
         if (block.chainid == 4663) {
             bytes memory b = bytes(c);
             bool ok = b.length == 40;
@@ -1379,6 +1448,12 @@ contract DeployTestnet is Script {
             return c;
         }
         return bytes(c).length == 0 ? "UNKNOWN - COMMIT env unset; record it by hand before publishing" : c;
+    }
+
+    /// @dev The raw COMMIT value. A seam so an in-process test can supply one without writing the
+    ///      process environment, which forge's parallel test threads share (see CommitGuard.t.sol).
+    function _commitEnv() internal view virtual returns (string memory) {
+        return vm.envOr("COMMIT", string(""));
     }
 
     // --------------------------------------------------------------------------------- helpers
@@ -1422,7 +1497,8 @@ contract DeployTestnet is Script {
             console2.log("  Certificate     ", deployed[i].certificate);
             console2.log("  BufferBook      ", deployed[i].bufferBook);
         }
-        console2.log("address book -> deployments/%s.json", vm.toString(block.chainid));
+        _reportExtra();
+        console2.log("address book ->", _bookPath());
         console2.log("NEXT: this script's requires are simulation-only, so verify on chain.");
         console2.log("      script/VerifyTestnet.s.sol is NOT in the tree yet - until it is, run");
         console2.log("      docs/TESTNET-RUNBOOK.md section 7.4's health check by hand instead.");

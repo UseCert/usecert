@@ -17,7 +17,8 @@ set -a; . /etc/usecert/mainnet-deployer.env; set +a
 
 R=https://rpc.mainnet.chain.robinhood.com
 U=0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168
-BOOK=/opt/usecert/deployments/4663.json
+# Stack 5: BOOK=/opt/usecert/deployments/4663.stack5.json until it is promoted to 4663.json.
+BOOK=${BOOK:-/opt/usecert/deployments/4663.json}
 num() { sed 's/ .*//'; }
 
 mapfile -t ROWS < <(python3 -c "
