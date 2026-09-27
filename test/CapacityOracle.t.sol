@@ -117,7 +117,7 @@ contract CapacityOracleTest is Test {
     function test_extremeOpenInterestClampsInsteadOfReverting() public {
         // Attest an extreme openInterest18 that would overflow in naive multiplication
         vm.prank(attester);
-        reg.attest(asset, 3, 0, 0, type(uint256).max);
+        reg.attest(asset, 2, 0, 0, type(uint256).max); // M-11: batchId must be exactly the next one
         // Should return exactly ABSOLUTE_CAP without reverting, demonstrating Math.mulDiv safety
         assertEq(cap.maxNotional18(asset, HUGE_BUFFER), ABSOLUTE_CAP);
     }

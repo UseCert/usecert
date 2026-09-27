@@ -83,8 +83,8 @@ contract SharedSimMultiVaultTest is Test {
         reg = new SolvencyRegistry(attester);
         cap = new CapacityOracle(address(reg), gov, 1000, 100, 3000, 300, MAX_ABSOLUTE_CAP);
 
-        oracleA = new CertOracle(address(feed), attester, 2, 3600, 500, 100, 3600, false);
-        oracleB = new CertOracle(address(feed), attester, 2, 3600, 500, 100, 3600, false);
+        oracleA = new CertOracle(address(feed), attester, 2, 3600, 500, 100, 3600, false, 3600);
+        oracleB = new CertOracle(address(feed), attester, 2, 3600, 500, 100, 3600, false, 3600);
         vaultA = _deployVault(oracleA, 9_000, "UseCert TSLA A", "uTSLAa");
         vaultB = _deployVault(oracleB, 5_000, "UseCert TSLA B", "uTSLAb");
 

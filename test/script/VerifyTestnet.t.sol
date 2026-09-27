@@ -104,7 +104,8 @@ contract VerifyFixture is DeployTestnet {
                     DEVIATION_BPS,
                     BASIS_BAND_BPS,
                     POKE_CONFIRMATION_SECONDS,
-                    SINGLE_SOURCE
+                    SINGLE_SOURCE,
+                    MAX_MARK_AGE
                 )
             );
         }

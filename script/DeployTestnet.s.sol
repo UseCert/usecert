@@ -177,6 +177,10 @@ contract DeployTestnet is Script {
     ///      300 s is short for a testnet so a tester can actually observe the two-phase poke
     ///      complete inside a session; mainnet's reasoning puts it on the order of an hour.
     uint256 internal constant POKE_CONFIRMATION_SECONDS = 300;
+    /// @dev H-6 / L-12: CertOracle's `maxMarkAge` - how old the mark may be and still open
+    ///      minting. Bounded on chain to [30, 3600]. 300 s matches `maxAttestationAgeSec`: the signer
+    ///      issues the mark and the attestation together, so they should age out together.
+    uint256 internal constant MAX_MARK_AGE = 300;
 
     /// @dev NEVER 0. At zero the H-1 clamp permits no advance in either direction, so the FIRST
     ///      price tick pauses minting and it stays paused until an operator widens their own
@@ -591,7 +595,8 @@ contract DeployTestnet is Script {
                         DEVIATION_BPS,
                         BASIS_BAND_BPS,
                         POKE_CONFIRMATION_SECONDS,
-                        _singleSource()
+                        _singleSource(),
+                        MAX_MARK_AGE
                     )
                 );
         }

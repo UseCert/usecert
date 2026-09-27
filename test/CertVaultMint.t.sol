@@ -493,8 +493,10 @@ contract CertVaultMintTest is VaultFixture {
         assertGt(reg.ageSec(address(vault)), 300, "the attestation was supposed to age out");
         assertEq(cap.maxNotional18(address(vault), vault.bufferCapacity18()), 0, "capacity did not die");
 
-        // Minting is dead, and before M-5 it was dead forever.
-        vm.expectRevert(CertVault.CertVault_AtCapacity.selector);
+        // Minting is dead, and before M-5 it was dead forever. H-6: the lost key's mark has also
+        // aged past maxMarkAge, so the oracle gate now closes minting before the capacity gate is
+        // reached (capacity == 0 is asserted directly above).
+        vm.expectRevert(CertVault.CertVault_MintPaused.selector);
         vm.prank(alice);
         vault.mintInstant(1_000e6);
 
@@ -546,5 +548,35 @@ contract CertVaultMintTest is VaultFixture {
         vm.prank(newAttester);
         reg.attest(address(vault), 3, 0, 0, 1_190_000e18);
         assertEq(vault.solvency().provenAtBatch, 3, "the batch id stopped advancing");
+    }
+
+    /// @notice H-6 / L-12 at the vault: a mark older than the oracle's maxMarkAge closes both mint
+    ///         paths even with the feed fresh and the mark in band, and a fresh mark reopens them.
+    ///         Redemption does not read the mark, so the holder exits regardless.
+    function test_H6_aStaleMarkClosesVaultMinting() public {
+        vm.prank(alice);
+        vault.mintInstant(1_000e6);
+        uint256 bal = cert.balanceOf(alice);
+
+        vm.warp(block.timestamp + oracle.maxMarkAge() + 1);
+        feed.set(int256(PX / 1e10), block.timestamp); // the feed is fine; only the mark is old
+        vm.prank(attester);
+        reg.attest(address(vault), 2, 0, 0, 1_190_000e18); // and capacity is fine
+
+        vm.prank(alice);
+        vm.expectRevert(CertVault.CertVault_MintPaused.selector);
+        vault.mintInstant(1_000e6);
+        vm.prank(alice);
+        vm.expectRevert(CertVault.CertVault_MintPaused.selector);
+        vault.requestMint(1_000e6);
+
+        vm.prank(alice);
+        vault.forceExit(bal);
+        assertEq(cert.balanceOf(alice), 0, "Law 2: exits never read the mark");
+
+        vm.prank(attester);
+        oracle.setMarkPrice(PX);
+        vm.prank(alice);
+        assertGt(vault.mintInstant(1_000e6), 0, "a fresh mark reopens minting");
     }
 }

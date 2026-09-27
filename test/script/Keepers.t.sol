@@ -235,7 +235,7 @@ contract KeepersTest is Test {
         reg = new SolvencyRegistry(attesterAddr);
         cap = new CapacityOracle(address(reg), gov, 1_000, 100, 3_000, MAX_ATTESTATION_AGE_SEC, MAX_ABSOLUTE_CAP_18);
         oracle = new CertOracle(
-            address(feed), attesterAddr, 2, STALENESS_SECONDS, 500, 500, POKE_CONFIRMATION_SECONDS, false
+            address(feed), attesterAddr, 2, STALENESS_SECONDS, 500, 500, POKE_CONFIRMATION_SECONDS, false, 3600
         );
         vm.stopPrank();
 

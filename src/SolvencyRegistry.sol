@@ -24,16 +24,38 @@ contract SolvencyRegistry is ISolvencyRegistry {
     error SolvencyRegistry_OnlyGovernance();
     /// @dev L-3, and M-5's own hard floor: an attester of address(0) is unrecoverable, since
     ///      nothing could ever attest again and rotation itself would be the only way back. Never
-    ///      constructible and never installable.
+    ///      constructible and never installable. H-4: zero is reachable only as the deliberate
+    ///      disabled state (disableAttester), and rotation IS the way back from it by design.
     error SolvencyRegistry_ZeroAddress();
     error SolvencyRegistry_NoPendingAttester();
     error SolvencyRegistry_RotationNotDue();
+    /// @dev M-11: `batchId` skipped ahead of `latest.batchId + 1`, or a first attestation above
+    ///      MAX_SEED_BATCH_ID. Distinct from StaleBatch because the remedies differ: a stale batch
+    ///      is superseded and can be dropped, a gap means the signer's counter has drifted.
+    error SolvencyRegistry_BatchGap();
+    /// @dev H-4: a SIGNED `observedAt` equal to the one already held. Not backwards, but not new
+    ///      either: the same second re-attested is a replay of an observation, not a newer one.
+    error SolvencyRegistry_ObservationNotAdvanced();
+    /// @dev H-4 kill switch: governance has disabled the attester and no replacement has been
+    ///      installed through the rotation yet. Both attestation paths refuse until one is.
+    error SolvencyRegistry_AttesterDisabled();
 
     event Attested(address indexed asset, uint64 batchId, uint256 notional18, uint256 margin18, uint256 openInterest18);
     /// @dev M-5 (Law 3): a rotation is a public commitment with a published effective time, not a
     ///      silent swap. This is the whole protection, so it has to be observable.
     event AttesterRotationProposed(address indexed attester, uint256 effectiveAt);
     event AttesterRotated(address indexed previous, address indexed attester);
+    /// @dev H-4: the instant, disable-only revoke. `attester` is the key that was switched off.
+    event AttesterDisabled(address indexed attester);
+
+    /// @notice The highest batchId a FIRST attestation for an asset may carry.
+    /// @dev M-11. After the first attestation every batchId must be exactly the previous one plus
+    ///      one, so the counter can never be pushed to type(uint64).max (which bricked minting
+    ///      permanently, even across a rotation, because the registry is immutable in the vault).
+    ///      The first one is allowed to start anywhere up to 2**32 so a new deployment can seed its
+    ///      counter from an existing off-chain sequence. At one batch a second, 2**32 still leaves
+    ///      the uint64 counter ~4 billion times more room than the protocol could use.
+    uint64 public constant MAX_SEED_BATCH_ID = 2 ** 32;
 
     /// @notice The immutable notice period every attester rotation must serve. Cannot be shortened,
     ///         waived, or configured — by governance or by anyone else.
@@ -86,7 +108,8 @@ contract SolvencyRegistry is ISolvencyRegistry {
     ///      is the C2 cleanup.
     address public immutable governance;
 
-    /// @notice Who may post attestations. No longer immutable — see ATTESTER_ROTATION_DELAY.
+    /// @notice Who may post attestations. No longer immutable — see ATTESTER_ROTATION_DELAY. Zero
+    ///         means governance has disabled it (H-4) and no replacement has been accepted yet.
     address public attester;
     /// @notice The proposed next attester, and the timestamp from which it may be installed.
     /// @dev Zero means no rotation is pending. A proposal is corrected by proposing again, which
@@ -165,6 +188,8 @@ contract SolvencyRegistry is ISolvencyRegistry {
     ///      commitment that has already been public for ATTESTER_ROTATION_DELAY, and requiring
     ///      governance to act a second time would let a lost or stalled governance key strand a
     ///      recovery that the protocol has already been told is coming.
+    /// @dev H-4: also the ONLY way out of disableAttester(), so re-enabling always costs a full,
+    ///      public ATTESTER_ROTATION_DELAY.
     function acceptAttester() external {
         address next = pendingAttester;
         if (next == address(0)) revert SolvencyRegistry_NoPendingAttester();
@@ -177,11 +202,72 @@ contract SolvencyRegistry is ISolvencyRegistry {
         emit AttesterRotated(previous, next);
     }
 
+    /// @notice Switch the attester off, instantly. Governance only, and disable-only: the one way
+    ///         back is a fresh rotation (proposeAttester, then acceptAttester after the notice).
+    /// @dev H-4. ATTESTER_ROTATION_DELAY is the right bound on INSTALLING a key and the wrong one
+    ///      on removing a key that is being abused now: for two days it could keep signing inflated
+    ///      notionals, one batch at a time, each one feeding the permissionless rebalance(). This
+    ///      closes that window without adding a power. It can only REMOVE a writer, never install
+    ///      one, so governance gains nothing it could use against holders; the worst a compromised
+    ///      governance can do with it is stop new attestations, which setAbsoluteCap(asset, 0)
+    ///      already allowed for minting.
+    ///
+    ///      Implemented as `attester = address(0)`, which the constructor and proposeAttester both
+    ///      refuse to install, so the state is reachable only from here and left only through
+    ///      acceptAttester. attest and attestSigned then revert SolvencyRegistry_AttesterDisabled;
+    ///      the held attestation ages past CapacityOracle.maxAttestationAgeSec, so capacity and
+    ///      therefore minting close. `latest` and `ageSec` keep answering, and no redemption path
+    ///      reads this contract for any gate (Law 2), so exits are untouched.
+    ///
+    ///      A pending rotation that would merely REINSTALL the disabled key (proposing the
+    ///      incumbent is how a rotation is abandoned) is cleared, so a stale proposal coming due
+    ///      cannot undo the switch. A pending rotation to a DIFFERENT key is kept: it is a
+    ///      published recovery already serving its notice. Idempotent.
+    function disableAttester() external {
+        if (msg.sender != governance) revert SolvencyRegistry_OnlyGovernance();
+        address previous = attester;
+        if (previous != address(0) && pendingAttester == previous) {
+            pendingAttester = address(0);
+            pendingAttesterAt = 0;
+        }
+        attester = address(0);
+        emit AttesterDisabled(previous);
+    }
+
+    /// @dev The sequencing rules both attestation paths share, so they cannot drift apart.
+    ///      - H-4: on the SIGNED path `observedAt` must STRICTLY increase. Backwards was already
+    ///        refused; EQUAL was not, so a signed observation could be re-posted under the next
+    ///        batchId with its age unchanged. `strictTime` is false only for the direct path, where
+    ///        `observedAt` is block time and the attester is the sender: a second direct write in
+    ///        the same second is the attester speaking again, not anyone replaying it, and
+    ///        refusing it would only break same-block operation for no gain. Backwards is refused
+    ///        on both (unreachable on the direct path, since a signed `observedAt` is never in the
+    ///        future).
+    ///      - M-11: `batchId` must be exactly `latest.batchId + 1`. A strict `>` alone let one
+    ///        signature (or one compromised attester call) jump the counter to type(uint64).max,
+    ///        after which no batch could ever be newer, for any attester, forever. The first
+    ///        attestation may seed the counter anywhere in [1, MAX_SEED_BATCH_ID].
+    ///      Order: backwards, then the batch checks, then equal time. Backwards-before-stale is the
+    ///      order attestSigned always used; putting the equal-time check last keeps an exact
+    ///      replay of a landed signature reporting StaleBatch, as it always has, so the new error
+    ///      fires only for the new case it names (same observation, next batchId).
+    function _checkSequence(address asset, uint64 batchId, uint64 observedAt, bool strictTime) internal view {
+        Attestation storage prev = _latest[asset];
+        uint64 lastAt = prev.attestedAt;
+        if (observedAt < lastAt) revert SolvencyRegistry_ObservationWentBackwards();
+        uint64 last = prev.batchId;
+        if (batchId <= last) revert SolvencyRegistry_StaleBatch();
+        if (last == 0 ? batchId > MAX_SEED_BATCH_ID : batchId != last + 1) revert SolvencyRegistry_BatchGap();
+        if (strictTime && observedAt == lastAt) revert SolvencyRegistry_ObservationNotAdvanced();
+    }
+
     function attest(address asset, uint64 batchId, uint256 notional18, uint256 margin18, uint256 openInterest18)
         external
     {
-        if (msg.sender != attester) revert SolvencyRegistry_OnlyAttester();
-        if (batchId <= _latest[asset].batchId) revert SolvencyRegistry_StaleBatch();
+        address a = attester;
+        if (a == address(0)) revert SolvencyRegistry_AttesterDisabled();
+        if (msg.sender != a) revert SolvencyRegistry_OnlyAttester();
+        _checkSequence(asset, batchId, uint64(block.timestamp), false);
 
         _latest[asset] = Attestation({
             notional18: notional18,
@@ -221,14 +307,15 @@ contract SolvencyRegistry is ISolvencyRegistry {
     ///        failure C-1 found on the feed timestamp.
     ///      - `observedAt` going BACKWARDS is rejected. Storing an older observation than the one
     ///        already held would move the recorded age up rather than down, which is a free way to
-    ///        push capacity to zero using a signature the attester really did issue.
+    ///        push capacity to zero using a signature the attester really did issue. H-4: EQUAL is
+    ///        now rejected too (SolvencyRegistry_ObservationNotAdvanced) - see _checkSequence.
     ///      - `deadline` is capped at SIGNATURE_VALIDITY from the observation, not merely honoured
     ///        as given, so a signer cannot mint a long-lived credential by mistake or otherwise.
     ///
     /// @dev Replay is already handled and needs nothing new: `asset` is inside the digest so a
     ///      signature cannot be moved between vaults; EIP-712's domain separator binds chainId and
-    ///      this contract so it cannot be moved between deployments or chains; and batchId must
-    ///      strictly increase, so a signature dies the moment a later one lands. Recovery is
+    ///      this contract so it cannot be moved between deployments or chains; and batchId must be
+    ///      exactly the next one (M-11), so a signature dies the moment a later one lands. Recovery is
     ///      checked against the CURRENT attester, so a rotated-out key's signatures stop working
     ///      the instant acceptAttester() runs — rotation keeps the meaning M-5 gave it.
     function attestSigned(
@@ -241,11 +328,12 @@ contract SolvencyRegistry is ISolvencyRegistry {
         uint64 deadline,
         bytes calldata signature
     ) external {
+        address a = attester;
+        if (a == address(0)) revert SolvencyRegistry_AttesterDisabled();
         if (block.timestamp > deadline) revert SolvencyRegistry_SignatureExpired();
         if (deadline > uint256(observedAt) + SIGNATURE_VALIDITY) revert SolvencyRegistry_SignatureExpired();
         if (observedAt > block.timestamp) revert SolvencyRegistry_ObservationInFuture();
-        if (observedAt < _latest[asset].attestedAt) revert SolvencyRegistry_ObservationWentBackwards();
-        if (batchId <= _latest[asset].batchId) revert SolvencyRegistry_StaleBatch();
+        _checkSequence(asset, batchId, observedAt, true);
 
         bytes32 digest = _hashTypedData(
             keccak256(
@@ -257,7 +345,7 @@ contract SolvencyRegistry is ISolvencyRegistry {
         // ECDSA.recover rejects a malleable `s` and a zero recovery, so a forged signature cannot
         // resolve to address(0) and match an uninitialised attester — which the constructor's
         // zero-address check already makes unreachable, and this makes unreachable twice.
-        if (ECDSA.recover(digest, signature) != attester) revert SolvencyRegistry_BadSignature();
+        if (ECDSA.recover(digest, signature) != a) revert SolvencyRegistry_BadSignature();
 
         _latest[asset] = Attestation({
             notional18: notional18,

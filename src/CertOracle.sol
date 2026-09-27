@@ -38,7 +38,9 @@ contract CertOracle is ICertOracle {
     /// @dev M-5: only the rotation authority bound at deploy may propose a new attester.
     error CertOracle_OnlyGovernance();
     /// @dev L-3, and M-5's hard floor: an attester of address(0) would freeze markPx18 and
-    ///      CertVault.accrueFunding forever. Never constructible, never installable.
+    ///      CertVault.accrueFunding forever. Never constructible, never installable. H-4: zero is
+    ///      reachable only as the deliberate disabled state (disableAttester), which acceptAttester
+    ///      leaves, so it is never the terminal state this error guards against.
     error CertOracle_ZeroAddress();
     error CertOracle_NoPendingAttester();
     error CertOracle_RotationNotDue();
@@ -74,10 +76,25 @@ contract CertOracle is ICertOracle {
     ///      `d <= 18` with an unrepresentable answer) and a caller must be able to tell "the
     ///      feed's scale is absurd" from "the feed's print cannot be normalised at its own scale".
     error CertOracle_AnswerNotNormalisable();
+    /// @dev H-6 / L-12: a signed mark whose `observedAt` is later than the block it lands in. Not a
+    ///      "very fresh" mark: it is a signer clock fault or a forgery attempt, and storing it would
+    ///      make `block.timestamp - markAt` underflow inside mintAllowed(), which must never revert.
+    error CertOracle_ObservationInFuture();
+    /// @dev H-6 / L-12: a signed mark observed EARLIER than the mark already held. Nonces order
+    ///      signatures, not observations; without this a relayer holding two valid signatures could
+    ///      land the older reading after the newer one and wind `markAt` back.
+    error CertOracle_ObservationWentBackwards();
+    /// @dev H-4 kill switch: governance has disabled the mark attester and no replacement has been
+    ///      installed through the rotation yet. Both mark setters refuse until one is.
+    error CertOracle_AttesterDisabled();
 
     /// @dev M-5 (Law 3): a rotation is a public commitment with a published effective time.
     event AttesterRotationProposed(address indexed attester, uint256 effectiveAt);
     event AttesterRotated(address indexed previous, address indexed attester);
+    /// @dev H-4: the instant, disable-only revoke. `attester` is the key that was switched off.
+    event AttesterDisabled(address indexed attester);
+    /// @dev H-6: every accepted mark, with the observation time it will be aged from.
+    event MarkSet(uint256 px18, uint64 nonce, uint64 observedAt);
 
     /// @notice The immutable notice period every attester rotation must serve.
     /// @dev M-5. The full argument for why the ceiling bounds SPEED rather than magnitude, and why
@@ -115,6 +132,21 @@ contract CertOracle is ICertOracle {
     ///      second price source instead.
     uint256 public constant MAX_SINGLE_SOURCE_DEVIATION_BPS = 200;
 
+    /// @notice The longest a signed mark may stay relayable, measured from its own `observedAt`.
+    /// @dev F7 / H-6: the deadline is CAPPED on chain, not merely honoured as signed. A signer bug
+    ///      (or a compromised signer host) that issues a day-long deadline would otherwise hand
+    ///      every relayer a day-long menu of marks to choose from. Same number and same shape as
+    ///      SolvencyRegistry.SIGNATURE_VALIDITY, so one signer rule covers both halves of a mint.
+    uint256 public constant MARK_SIGNATURE_VALIDITY = 60;
+
+    /// @notice Bounds on the `maxMarkAge` a deployment may be constructed with.
+    /// @dev H-6. Below 30 s a mark could not survive the signer's round trip plus inclusion
+    ///      latency, so minting would be closed by construction. Above an hour the bound stops
+    ///      meaning anything: at the weekend both the index and the mark freeze, and past an hour
+    ///      "the perp agrees with the index" is a claim about some earlier moment, not about now.
+    uint256 public constant MIN_MAX_MARK_AGE = 30;
+    uint256 public constant MAX_MAX_MARK_AGE = 3600;
+
     IAggregatorV3 public immutable feed;
     /// @notice The rotation authority. Immutable, bound to the deployer at construction.
     /// @dev M-5: msg.sender rather than a constructor parameter, matching SolvencyRegistry so the
@@ -123,7 +155,8 @@ contract CertOracle is ICertOracle {
     ///      DIRECTLY FROM the governance multisig. An explicit parameter is the C2 cleanup; see
     ///      SolvencyRegistry.governance for why the arity is frozen in this pass.
     address public immutable governance;
-    /// @notice Who may write markPx18 and relay the buffer accrual. No longer immutable.
+    /// @notice Who may write markPx18 and relay the buffer accrual. No longer immutable. Zero means
+    ///         governance has disabled it (H-4) and no replacement has been accepted yet.
     address public attester;
     /// @notice The proposed next attester and the timestamp from which it may be installed.
     /// @dev Zero means none pending. Re-proposing overwrites and restarts the notice period;
@@ -170,7 +203,29 @@ contract CertOracle is ICertOracle {
     ///      re-creates the exact silent failure this exists to close.
     bool public immutable singleSource;
 
+    /// @notice How old the mark may be, in seconds from its `observedAt`, and still open minting.
+    /// @dev H-6 / L-12. Deliberately its own immutable and NOT `stalenessSeconds`: that one is the
+    ///      Chainlink heartbeat (26 h on mainnet), while a mark is meant to be re-signed for every
+    ///      mint. Bounded by [MIN_MAX_MARK_AGE, MAX_MAX_MARK_AGE] at construction. It gates minting
+    ///      only; no redemption path reads the mark or its age (Law 2).
+    uint256 public immutable maxMarkAge;
+
     uint256 public markPx18;
+
+    /// @notice When the current mark was OBSERVED: the signed `observedAt` on the signed path, the
+    ///         block time on the attester's direct path. Zero until the first mark.
+    /// @dev H-6 / L-12: the mark had no timestamp, so a days-old seed mark (uSPY and uMSFT still
+    ///      carried their deploy-time marks) passed the basis band exactly when the perp had moved
+    ///      away and the index had frozen. mintAllowed() now ages the mark from this field.
+    ///
+    ///      RESIDUAL, stated rather than hidden: relaying a mark is still the minter's choice, and a
+    ///      relayer holding several valid signatures may still pick among them. What is bounded is
+    ///      the menu: only a mark observed within the last `maxMarkAge` opens minting, a signature
+    ///      is dead MARK_SIGNATURE_VALIDITY after its observation, `observedAt` can never go back,
+    ///      and whichever mark is chosen must still sit inside `basisBandBps` of the live index. The
+    ///      remaining freedom is "which in-band mark from the last `maxMarkAge` seconds", not "any
+    ///      mark ever signed".
+    uint64 public markAt;
 
     /// @notice Highest mark-price nonce accepted so far. Replay protection for setMarkPriceSigned.
     /// @dev Strictly increasing, and deliberately NOT derived from markPx18: writing the same price
@@ -184,9 +239,15 @@ contract CertOracle is ICertOracle {
     bytes32 private constant _DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 private constant _NAME_HASH = keccak256("UseCert CertOracle");
-    bytes32 private constant _VERSION_HASH = keccak256("1");
+    /// @dev H-6: version "2" because the SetMark type changed shape (it gained `observedAt`). A new
+    ///      version makes a v1 signature fail on a v2 oracle by construction rather than by the
+    ///      accident of a different struct hash, and lets a signer tell the two apart by domain.
+    bytes32 private constant _VERSION_HASH = keccak256("2");
 
-    bytes32 public constant SET_MARK_TYPEHASH = keccak256("SetMark(uint256 px18,uint64 nonce,uint64 deadline)");
+    /// @dev H-6 / L-12: `observedAt` is inside the signed payload so the relayer cannot choose the
+    ///      age the contract records - the same reasoning as SolvencyRegistry.ATTEST_TYPEHASH.
+    bytes32 public constant SET_MARK_TYPEHASH =
+        keccak256("SetMark(uint256 px18,uint64 nonce,uint64 observedAt,uint64 deadline)");
 
     /// @notice EIP-712 domain separator for this oracle on this chain.
     /// @dev Recomputed per call, not cached: a cached separator would keep the deploy-time chainId
@@ -236,7 +297,8 @@ contract CertOracle is ICertOracle {
         uint256 _deviationBps,
         uint256 _basisBandBps,
         uint256 _pokeConfirmationSeconds,
-        bool _singleSource
+        bool _singleSource,
+        uint256 _maxMarkAge
     ) {
         // L-3: no constructor in src/ validated its dependencies, so a mistyped address deployed
         // silently and failed later at an arbitrary call site. A zero feed is the sharpest case —
@@ -263,6 +325,11 @@ contract CertOracle is ICertOracle {
         // real and sufficient reason to refuse zero. Refuse it at deploy time rather than discover
         // it live.
         if (_pokeConfirmationSeconds == 0) revert CertOracle_ConfigOutOfBounds();
+        // H-6: see MIN_MAX_MARK_AGE / MAX_MAX_MARK_AGE. Checked in both modes: the bound describes
+        // the attester's cadence, which does not depend on whether the band is consulted.
+        if (_maxMarkAge < MIN_MAX_MARK_AGE || _maxMarkAge > MAX_MAX_MARK_AGE) {
+            revert CertOracle_ConfigOutOfBounds();
+        }
         // Task 2: in single-source mode the deviation clamp is the only guard left standing, so its
         // width is the whole safety budget. Refuse a configuration that leaves it wide. Checked
         // only when `_singleSource` is true, so a dual-source deployment's tolerance is untouched.
@@ -278,6 +345,7 @@ contract CertOracle is ICertOracle {
         basisBandBps = _basisBandBps;
         pokeConfirmationSeconds = _pokeConfirmationSeconds;
         singleSource = _singleSource;
+        maxMarkAge = _maxMarkAge;
 
         // L-4: the constructor checked positivity but not staleness, so a vault could be deployed
         // against an already-dead feed and start life with a reference price nobody had quoted for
@@ -290,9 +358,17 @@ contract CertOracle is ICertOracle {
         lastGoodAt = t;
     }
 
+    /// @notice The attester's direct mark write. Ages from the block it lands in.
+    /// @dev H-6: records `markAt = block.timestamp`, which is honest here because the attester is
+    ///      the sender and observes the instant it broadcasts. Refused while the attester is
+    ///      disabled. Does not touch `markNonce`, so a later signed mark still needs a fresh nonce.
     function setMarkPrice(uint256 px18) external {
-        if (msg.sender != attester) revert CertOracle_OnlyAttester();
+        address a = attester;
+        if (a == address(0)) revert CertOracle_AttesterDisabled();
+        if (msg.sender != a) revert CertOracle_OnlyAttester();
         markPx18 = px18;
+        markAt = uint64(block.timestamp);
+        emit MarkSet(px18, markNonce, uint64(block.timestamp));
     }
 
     /// @notice The mark price the attester SIGNED rather than SENT, so the minter pays the gas.
@@ -300,31 +376,78 @@ contract CertOracle is ICertOracle {
     ///      update: the attester writes markPx18 here and the solvency figures there, and on the
     ///      signed path a minter submits both inside their own transaction.
     ///
-    /// @dev WHY THIS ONE NEEDS LESS TIMESTAMP MACHINERY THAN THE REGISTRY. markPx18 has no stored
-    ///      timestamp and never did, because nothing measures its age - it is a CROSS-CHECK, not a
-    ///      clock. Its staleness is caught structurally instead: mintAllowed() bands it against the
-    ///      live feed (`diff * 10_000 / p > basisBandBps` fails), so a mark that has drifted away
-    ///      from reality closes minting by itself, whatever timestamp anyone attaches to it. Adding
-    ///      an `observedAt` here would therefore be ceremony rather than a guard. The `deadline`
-    ///      still earns its place: it bounds how long a relayer may sit on any one signature, which
-    ///      is what stops a mark being replayed at a moment of the relayer's choosing INSIDE the
-    ///      band, where the band would not catch it.
+    /// @dev H-6 / L-12: WHY THE MARK NOW CARRIES A TIMESTAMP. The previous version argued that the
+    ///      band made a timestamp ceremony, since a mark that drifted from the index would close
+    ///      minting by itself. That holds while the index moves and fails exactly when it matters:
+    ///      at the weekend the Chainlink index freezes, the old mark stays put, and the band passes
+    ///      on two numbers that agree only because neither has been refreshed, while the perp the
+    ///      vault hedges on has moved away. So `observedAt` is signed, stored as `markAt`, and
+    ///      mintAllowed() refuses a mark older than `maxMarkAge`.
     ///
-    /// @dev `nonce` is what replay protection there is. The registry gets it free from a strictly
-    ///      increasing batchId; there is no equivalent here, since setting the same mark twice is
-    ///      legitimate and markPx18 carries no sequence of its own. So the nonce is explicit, it is
-    ///      inside the signed payload, and it must strictly increase - which also means the two
-    ///      halves can be submitted independently without one having to know the other's state.
-    function setMarkPriceSigned(uint256 px18, uint64 nonce, uint64 deadline, bytes calldata signature) external {
+    /// @dev The guards, in order, each load-bearing:
+    ///      - a disabled attester is refused (H-4 kill switch);
+    ///      - `observedAt` in the future is refused: it would make mintAllowed()'s age computation
+    ///        underflow, and mintAllowed() must never revert;
+    ///      - `deadline` is capped at MARK_SIGNATURE_VALIDITY after `observedAt` (F7), so no
+    ///        signature is relayable for longer than a minute whatever the signer put in it;
+    ///      - `deadline` is honoured;
+    ///      - `nonce` strictly increases. That is the replay protection: setting the same price
+    ///        twice is legitimate, so markPx18 carries no sequence of its own, and the registry's
+    ///        batchId is not shared, so the two halves of a mint can land independently;
+    ///      - `observedAt` is never earlier than the held mark's. Equal is allowed: two readings
+    ///        from the same second are both current, and the nonce already orders them.
+    function setMarkPriceSigned(uint256 px18, uint64 nonce, uint64 observedAt, uint64 deadline, bytes calldata signature)
+        external
+    {
+        address a = attester;
+        if (a == address(0)) revert CertOracle_AttesterDisabled();
+        if (observedAt > block.timestamp) revert CertOracle_ObservationInFuture();
+        if (deadline > uint256(observedAt) + MARK_SIGNATURE_VALIDITY) revert CertOracle_SignatureExpired();
         if (block.timestamp > deadline) revert CertOracle_SignatureExpired();
         if (nonce <= markNonce) revert CertOracle_StaleNonce();
+        if (observedAt < markAt) revert CertOracle_ObservationWentBackwards();
 
-        bytes32 structHash = keccak256(abi.encode(SET_MARK_TYPEHASH, px18, nonce, deadline));
+        bytes32 structHash = keccak256(abi.encode(SET_MARK_TYPEHASH, px18, nonce, observedAt, deadline));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator(), structHash));
-        if (ECDSA.recover(digest, signature) != attester) revert CertOracle_BadSignature();
+        if (ECDSA.recover(digest, signature) != a) revert CertOracle_BadSignature();
 
         markNonce = nonce;
         markPx18 = px18;
+        markAt = observedAt;
+        emit MarkSet(px18, nonce, observedAt);
+    }
+
+    /// @notice Switch the mark attester off, instantly. Governance only, and disable-only: the one
+    ///         way back is a fresh rotation (proposeAttester, then acceptAttester after the notice).
+    /// @dev H-4. Rotation alone is the wrong tool for a key being abused right now: it takes
+    ///      ATTESTER_ROTATION_DELAY, and for those two days the key keeps every power it has. This
+    ///      closes the window without adding a power: it can only REMOVE a writer, never install
+    ///      one, so it gives governance nothing it could use against holders.
+    ///
+    ///      Implemented as `attester = address(0)`, which the constructor and proposeAttester both
+    ///      refuse to install, so the state is reachable only from here and left only through
+    ///      acceptAttester. Consequences, all intended:
+    ///        * setMarkPrice and setMarkPriceSigned revert CertOracle_AttesterDisabled;
+    ///        * `attester()` reads zero, so CertVault's two attester-gated calls (keeper-mode
+    ///          settleMint and accrueFunding) refuse the old key too. A switch that left the key
+    ///          able to settle unhedged mints would not be a kill switch;
+    ///        * the held mark ages out within `maxMarkAge`, which closes dual-source minting;
+    ///        * px(), pxUnguarded() and toTickPrice() read neither the attester nor the mark, so
+    ///          every redemption path is untouched (Law 2). Mint refunds are not attester-gated.
+    ///
+    ///      A pending rotation that would merely REINSTALL the disabled key (proposing the
+    ///      incumbent is how a rotation is abandoned) is cleared, so a stale proposal coming due
+    ///      cannot undo the switch. A pending rotation to a DIFFERENT key is kept: it is a
+    ///      published recovery already serving its notice. Idempotent.
+    function disableAttester() external {
+        if (msg.sender != governance) revert CertOracle_OnlyGovernance();
+        address previous = attester;
+        if (previous != address(0) && pendingAttester == previous) {
+            pendingAttester = address(0);
+            pendingAttesterAt = 0;
+        }
+        attester = address(0);
+        emit AttesterDisabled(previous);
     }
 
     /// @notice Start an attester rotation. Governance-gated; effective no sooner than
@@ -341,6 +464,8 @@ contract CertOracle is ICertOracle {
 
     /// @notice Install a rotation whose notice period has elapsed. Permissionless (Law 6) — see
     ///         SolvencyRegistry.acceptAttester for why anyone may finalise.
+    /// @dev H-4: also the ONLY way out of disableAttester(), so re-enabling always costs a full,
+    ///      public ATTESTER_ROTATION_DELAY.
     function acceptAttester() external {
         address next = pendingAttester;
         if (next == address(0)) revert CertOracle_NoPendingAttester();
@@ -523,20 +648,16 @@ contract CertOracle is ICertOracle {
         return (true, diff * 10_000 / p);
     }
 
-    /// @dev NOT FIXED, recorded deliberately (C1 audit, H-1 follow-on): the basis band below is
-    ///      measured against `markPx18`, which is written by the trusted attester with NO
-    ///      timestamp and is subject to NO staleness check anywhere in this contract. It fails
-    ///      CLOSED — a mark frozen while the index moves widens the basis and returns false — so
-    ///      it is not dangerous today, and that is the only reason it is not fixed here. But it
-    ///      fails closed only incidentally: a mark frozen at a level that happens to track the
-    ///      index keeps minting open against a number nobody has refreshed, so the guard's
-    ///      liveness is unproven. That is H-1's mistake in a different field. The fix needs a
-    ///      `markAt` plus its own `markStalenessSeconds` — the attester's cadence is not the
-    ///      Chainlink heartbeat and must not be conflated with `stalenessSeconds` — which means a
-    ///      new constructor parameter and every deployment site with it. It is neither trivial nor
-    ///      isolated, so it is scoped separately. Note also that H-1's rate limit leaves this band
-    ///      as the guard doing the real work for several windows during a large sustained
-    ///      repricing, which raises the stakes on its liveness rather than lowering them.
+    /// @dev H-6 / L-12, closing the C1 audit's H-1 follow-on that was recorded here as NOT FIXED.
+    ///      The basis band used to be measured against a `markPx18` with no timestamp, so a mark
+    ///      frozen at a level that happened to track a frozen index kept minting open against a
+    ///      number nobody had refreshed. In dual-source mode the mark must now also be younger than
+    ///      `maxMarkAge`, its own immutable rather than the Chainlink heartbeat. H-1's rate limit
+    ///      leaves this band as the guard doing the real work for several windows during a large
+    ///      sustained repricing, which is why its liveness had to be enforced, not assumed.
+    ///      Single-source mode does not age the mark, for the reason given below for dropping its
+    ///      `markPx18 != 0` precondition: nothing in that mode reads the mark, so an age gate there
+    ///      would only hand the attester a pause-by-silence.
     ///
     /// @dev TASK 2 — THE GUARD SET IS DELIBERATELY SMALLER IN SINGLE-SOURCE MODE, AND SAYING SO IS
     ///      THE POINT. When `singleSource` is true the basis band is SKIPPED ENTIRELY. It is not a
@@ -575,6 +696,10 @@ contract CertOracle is ICertOracle {
             if (lastGoodPx18 == 0) return false;
         } else {
             if (markPx18 == 0) return false;
+            // H-6 / L-12: the mark must be recent. `markAt <= block.timestamp` always holds (the
+            // signed path refuses a future observation, the direct path writes block time), so the
+            // subtraction cannot underflow and this function still never reverts.
+            if (block.timestamp - markAt > maxMarkAge) return false;
             uint256 diff = markPx18 > p ? markPx18 - p : p - markPx18;
             if (diff * 10_000 / p > basisBandBps) return false;
         }

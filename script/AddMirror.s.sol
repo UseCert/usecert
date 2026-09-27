@@ -198,6 +198,10 @@ contract AddMirror is Script {
     ///      carried over. See `DeployTestnet`'s constant for the full argument.
     uint256 internal constant STALENESS_SECONDS = 900;
     uint256 internal constant POKE_CONFIRMATION_SECONDS = 300;
+    /// @dev H-6 / L-12: CertOracle's `maxMarkAge` - how old the mark may be and still open
+    ///      minting. Bounded on chain to [30, 3600]. 300 s matches `maxAttestationAgeSec`: the signer
+    ///      issues the mark and the attestation together, so they should age out together.
+    uint256 internal constant MAX_MARK_AGE = 300;
     uint256 internal constant DEVIATION_BPS = 500;
     uint256 internal constant BASIS_BAND_BPS = 500;
     /// @dev See the `singleSource` honesty note in the contract NatSpec. Cannot be `true` at
@@ -398,7 +402,8 @@ contract AddMirror is Script {
                 DEVIATION_BPS,
                 BASIS_BAND_BPS,
                 POKE_CONFIRMATION_SECONDS,
-                SINGLE_SOURCE
+                SINGLE_SOURCE,
+                MAX_MARK_AGE
             )
         );
 

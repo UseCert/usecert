@@ -296,4 +296,178 @@ contract SolvencyRegistrySignedTest is Test {
         vm.chainId(block.chainid + 1);
         assertTrue(here != reg.domainSeparator(), "a fork must not inherit valid signatures");
     }
+
+    // ------------------------------------------------------------------ M-11 batch sequencing
+
+    /// @notice M-11: after the first attestation, batchId must be exactly the next one, on both
+    ///         paths. A jump of any size is refused, including the uint64.max brick.
+    function test_M11_aBatchJumpIsRejected() public {
+        (uint64 o1, uint64 d1, bytes memory s1) = _signFresh(1);
+        _relay(1, o1, d1, s1);
+        vm.warp(block.timestamp + 1);
+
+        (uint64 o3, uint64 d3, bytes memory s3) = _signFresh(3);
+        vm.prank(relayer);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_BatchGap.selector);
+        reg.attestSigned(asset, 3, 1_000e18, 1_100e18, 50_000e18, o3, d3, s3);
+
+        (uint64 oMax, uint64 dMax, bytes memory sMax) = _signFresh(type(uint64).max);
+        vm.prank(relayer);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_BatchGap.selector);
+        reg.attestSigned(asset, type(uint64).max, 1_000e18, 1_100e18, 50_000e18, oMax, dMax, sMax);
+
+        vm.prank(attester);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_BatchGap.selector);
+        reg.attest(asset, type(uint64).max, 1, 1, 1);
+
+        // The next one is accepted.
+        (uint64 o2, uint64 d2, bytes memory s2) = _signFresh(2);
+        _relay(2, o2, d2, s2);
+        assertEq(reg.latest(asset).batchId, 2);
+    }
+
+    /// @notice M-11: the first attestation for an asset may seed its counter, but only up to
+    ///         MAX_SEED_BATCH_ID, so even the very first write cannot brick the counter.
+    function test_M11_theFirstAttestationSeedsWithinABound() public {
+        uint64 seedMax = reg.MAX_SEED_BATCH_ID();
+        assertEq(seedMax, 2 ** 32);
+
+        vm.startPrank(attester);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_BatchGap.selector);
+        reg.attest(asset, type(uint64).max, 1, 1, 1);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_BatchGap.selector);
+        reg.attest(asset, seedMax + 1, 1, 1, 1);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_StaleBatch.selector);
+        reg.attest(asset, 0, 1, 1, 1);
+
+        reg.attest(asset, seedMax, 1, 1, 1);
+        reg.attest(other, 7, 1, 1, 1); // any value in range seeds; each asset has its own counter
+        reg.attest(asset, seedMax + 1, 1, 1, 1); // and from then on it is +1 from the seed
+        vm.stopPrank();
+        assertEq(reg.latest(asset).batchId, seedMax + 1);
+        assertEq(reg.latest(other).batchId, 7);
+    }
+
+    // ------------------------------------------------------------------ H-4 observation order
+
+    /// @notice H-4: a signed observedAt EQUAL to the held one is refused, even under the next
+    ///         batchId; one second later is accepted.
+    function test_H4_anEqualObservedAtIsRejected() public {
+        (uint64 o2, uint64 d2, bytes memory s2) = _signFresh(2);
+        _relay(2, o2, d2, s2);
+
+        (uint64 o3, uint64 d3, bytes memory s3) = _signFresh(3);
+        assertEq(o3, o2, "same second");
+        vm.prank(relayer);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_ObservationNotAdvanced.selector);
+        reg.attestSigned(asset, 3, 1_000e18, 1_100e18, 50_000e18, o3, d3, s3);
+
+        vm.warp(block.timestamp + 1);
+        (uint64 o3b, uint64 d3b, bytes memory s3b) = _signFresh(3);
+        _relay(3, o3b, d3b, s3b);
+        assertEq(reg.latest(asset).attestedAt, o3b);
+    }
+
+    /// @dev An exact replay of a landed signature still reports StaleBatch, as it always has.
+    function test_H4_anExactReplayStillReportsStaleBatch() public {
+        (uint64 o, uint64 d, bytes memory s) = _signFresh(2);
+        _relay(2, o, d, s);
+        vm.warp(block.timestamp + 1);
+        vm.prank(relayer);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_StaleBatch.selector);
+        reg.attestSigned(asset, 2, 1_000e18, 1_100e18, 50_000e18, o, d, s);
+    }
+
+    // ------------------------------------------------------------------ H-4 kill switch
+
+    function test_H4_disableAttesterIsGovernanceOnly() public {
+        vm.prank(relayer);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_OnlyGovernance.selector);
+        reg.disableAttester();
+        vm.prank(attester);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_OnlyGovernance.selector);
+        reg.disableAttester();
+    }
+
+    /// @notice H-4: disabling blocks both attestation paths in the same block, including a
+    ///         signature issued before the switch, and leaves the views consumers read
+    ///         (latest, ageSec) answering. Capacity then ages to zero on its own.
+    function test_H4_disableBlocksAttestImmediately() public {
+        CapacityOracle cap = new CapacityOracle(address(reg), address(this), 100, 1, 10_000, 300, type(uint256).max);
+        cap.setAbsoluteCap(asset, 10_000_000e18);
+
+        (uint64 o1, uint64 d1, bytes memory s1) = _signFresh(1);
+        _relay(1, o1, d1, s1);
+        vm.warp(block.timestamp + 1);
+        (uint64 o2, uint64 d2, bytes memory s2) = _signFresh(2); // signed before the switch
+
+        vm.expectEmit(true, false, false, false);
+        emit SolvencyRegistry.AttesterDisabled(attester);
+        reg.disableAttester(); // this test contract deployed the registry, so it is governance
+        assertEq(reg.attester(), address(0));
+
+        vm.prank(relayer);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_AttesterDisabled.selector);
+        reg.attestSigned(asset, 2, 1_000e18, 1_100e18, 50_000e18, o2, d2, s2);
+
+        vm.prank(attester);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_AttesterDisabled.selector);
+        reg.attest(asset, 2, 1, 1, 1);
+
+        // The views keep answering.
+        assertEq(reg.latest(asset).batchId, 1);
+        assertEq(reg.ageSec(asset), 1);
+        assertGt(cap.maxNotional18(asset, 1_000_000e18), 0, "the held attestation is still in date");
+        vm.warp(block.timestamp + 300);
+        assertEq(cap.maxNotional18(asset, 1_000_000e18), 0, "capacity closes as it ages out");
+        assertEq(reg.ageSec(asset), 301);
+    }
+
+    /// @notice H-4: the only way back is the full rotation.
+    function test_H4_reEnableOnlyViaRotation() public {
+        reg.disableAttester();
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_NoPendingAttester.selector);
+        reg.acceptAttester();
+
+        uint256 nextPk = 0xB0B;
+        address next = vm.addr(nextPk);
+        reg.proposeAttester(next);
+        vm.warp(block.timestamp + reg.ATTESTER_ROTATION_DELAY() - 1);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_RotationNotDue.selector);
+        reg.acceptAttester();
+
+        vm.warp(block.timestamp + 1);
+        reg.acceptAttester();
+        assertEq(reg.attester(), next);
+
+        // The old key's signatures stay dead; the new key's work.
+        (uint64 o, uint64 d, bytes memory oldSig) = _signFresh(1);
+        vm.prank(relayer);
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_BadSignature.selector);
+        reg.attestSigned(asset, 1, 1_000e18, 1_100e18, 50_000e18, o, d, oldSig);
+
+        bytes memory newSig = _sign(nextPk, _digest(asset, 1, 1_000e18, 1_100e18, 50_000e18, o, d));
+        vm.prank(relayer);
+        reg.attestSigned(asset, 1, 1_000e18, 1_100e18, 50_000e18, o, d, newSig);
+        assertEq(reg.latest(asset).batchId, 1);
+    }
+
+    /// @dev Proposing the incumbent is how a rotation is abandoned; a disable must clear such a
+    ///      proposal or it would reinstall the disabled key when it came due. A rotation to a
+    ///      DIFFERENT key is a recovery already serving its notice and is kept.
+    function test_H4_disableClearsOnlyAPendingReinstallOfTheSameKey() public {
+        reg.proposeAttester(attester);
+        reg.disableAttester();
+        assertEq(reg.pendingAttester(), address(0));
+        vm.warp(block.timestamp + reg.ATTESTER_ROTATION_DELAY());
+        vm.expectRevert(SolvencyRegistry.SolvencyRegistry_NoPendingAttester.selector);
+        reg.acceptAttester();
+
+        address next = makeAddr("next");
+        reg.proposeAttester(next);
+        uint256 due = reg.pendingAttesterAt();
+        reg.disableAttester(); // idempotent, and keeps the recovery in flight
+        assertEq(reg.pendingAttester(), next);
+        assertEq(reg.pendingAttesterAt(), due);
+    }
 }
