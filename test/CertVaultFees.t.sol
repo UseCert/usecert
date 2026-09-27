@@ -190,12 +190,13 @@ contract CertVaultFeesTest is VaultFixture {
     function test_keeperModeRequestMintAccruesTheSame() public {
         vm.prank(gov);
         vault.enableKeeperHedging();
+        _setSettler(vault); // stack 5, H-4
         vm.prank(alice);
         uint256 id = vault.requestMint(1_000e6);
         assertEq(vault.feesAccrued(), 0); // stack 5, L-10: earned at settle
         assertEq(vault.escrowOutstanding(), 1_000e6);
 
-        vm.prank(attester); // in keeper mode settling is the keeper's claim that the hedge filled
+        vm.prank(settler); // in keeper mode settling is the keeper's claim that the hedge filled
         vault.settleMint(id, PX);
         assertEq(vault.feesAccrued(), 1e6);
         assertEq(vault.escrowOutstanding(), 0);

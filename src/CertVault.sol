@@ -689,19 +689,115 @@ contract CertVault {
     function setBufferThresholds(uint256 floor18, uint256 feeOn18, uint256 mintSlow18, uint256 insuranceDraw18)
         external
     {
-        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        _onlyGovernance();
         buffer.configure(address(this), floor18, feeOn18, mintSlow18, insuranceDraw18);
     }
 
-    /// @notice Record the venue's minimum order for this market.
+    // ---------------------------------------------------------------- delayed governance (stack 5)
+
+    /// @notice The notice every delayed governance change serves between proposal and effect.
+    /// @dev H-2, M-7 and H-4 (stack 5). Three setters used to take effect in the block governance
+    ///      sent them, although each can hurt holders: the venue API key trades about 90% of every
+    ///      keeper-mode deposit (H-2); the venue minimum can be raised until no close is ever
+    ///      placed (M-7); and the settler decides, on its own word, that a keeper-mode mint was
+    ///      hedged (H-4). Attester rotation already waits two days (SolvencyRegistry); these now
+    ///      wait the same, so a compromised or mistaken Safe is visible for two days before it
+    ///      bites, and holders can leave through paths nobody can close (Law 2). A constant for
+    ///      the reason INSTANT_MAX_PRICE_AGE gives.
+    uint256 public constant GOVERNANCE_DELAY = 2 days;
+
+    /// @notice When each proposed change may be applied, keyed by keccak256 of the setter's EXACT
+    ///         calldata. Zero means "not proposed" (or applied, or cancelled).
+    mapping(bytes32 => uint256) public changeReadyAt;
+
+    /// @notice The only address that may settle a keeper-mode mint.
+    /// @dev H-4 (stack 5). Settling in keeper mode is the claim that the off-chain hedge FILLED,
+    ///      and it mints certificates on that word alone. It used to be the oracle attester's - the
+    ///      same hot key that signs the solvency figures rebalance() acts on and relays funding -
+    ///      so one key could both mint unhedged certificates and then attest them away. The attester
+    ///      keeps attestations and accrueFunding; settlement is this separate key, set through the
+    ///      delay. Zero (the default) means no keeper-mode mint can settle, so every receipt goes to
+    ///      the permissionless refund: a missing settler costs time, never principal.
+    address public settler;
+
+    /// @dev A delayed setter called before its proposal matured, or with calldata nobody proposed.
+    error CertVault_ChangeNotReady();
+    error CertVault_OnlySettler();
+
+    event ChangeProposed(bytes32 indexed id, uint256 readyAt, bytes data);
+    event ChangeCancelled(bytes32 indexed id);
+    event ChangeApplied(bytes32 indexed id);
+    event SettlerSet(address indexed settler);
+
+    /// @notice Announce a delayed change. `data` is the exact calldata of the setter that will
+    ///         apply it (setVenueApiKey, setVenueMinimums or setSettler), e.g.
+    ///         abi.encodeCall(CertVault.setSettler, (keeper)).
+    /// @dev The whole payload is in the event, so anyone can decode what is coming and when. It is
+    ///      not checked against a selector list: a proposal that matches no delayed setter can
+    ///      never be applied by anything, so it is inert. Re-proposing restarts the clock.
+    function proposeChange(bytes calldata data) external returns (bytes32 id) {
+        _onlyGovernance();
+        id = keccak256(data);
+        uint256 readyAt = block.timestamp + GOVERNANCE_DELAY;
+        changeReadyAt[id] = readyAt;
+        emit ChangeProposed(id, readyAt, data);
+    }
+
+    /// @notice Withdraw a proposed change before it is applied.
+    function cancelChange(bytes32 id) external {
+        _onlyGovernance();
+        if (changeReadyAt[id] == 0) revert CertVault_ChangeNotReady();
+        delete changeReadyAt[id];
+        emit ChangeCancelled(id);
+    }
+
+    /// @dev The first line of every delayed setter: governance, applying calldata it proposed at
+    ///      least GOVERNANCE_DELAY ago. Consumed on use, so a proposal applies once.
+    function _applyChange() internal {
+        _onlyGovernance();
+        bytes32 id = keccak256(msg.data);
+        uint256 readyAt = changeReadyAt[id];
+        if (readyAt == 0 || block.timestamp < readyAt) revert CertVault_ChangeNotReady();
+        delete changeReadyAt[id];
+        emit ChangeApplied(id);
+    }
+
+    function _onlyGovernance() internal view {
+        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+    }
+
+    /// @notice Set the keeper-mode settler. DELAYED: propose first (see proposeChange).
+    function setSettler(address newSettler) external {
+        _applyChange();
+        settler = newSettler;
+        emit SettlerSet(newSettler);
+    }
+
+    /// @notice Record the venue's minimum order for this market. DELAYED: propose first.
     /// @dev Governance-set rather than constructor-set, like the buffer thresholds above, because
     ///      the venue can change its minimums and a vault whose market index is immutable should
     ///      not need a redeploy to follow. Bounded so it cannot be used to price out every mint.
     ///      It gates MINTS only: redemptions never revert on it (Law 2); a close below the
     ///      minimum is reported as not placed instead.
+    /// @dev M-7 (stack 5). minBase was bounded only by uint48, so governance could set it to a
+    ///      size no close ever reaches and every on-chain close would silently not be placed. It is
+    ///      now bounded in NOTIONAL: at the oracle's price when the change is applied, minBase may
+    ///      imply at most MAX_VENUE_MIN_NOTIONAL_18, the same $1,000 ceiling minNotional18 already
+    ///      had. A notional bound was chosen over a constant base bound because a base amount means
+    ///      nothing without a price - one base unit of one market is cents, of another thousands of
+    ///      dollars - so no single constant is both safe and usable across assets. The residual,
+    ///      stated rather than hidden: the check holds at the price of application, and a later
+    ///      rally raises the notional minBase implies. That can make small closes fail open (not
+    ///      placed, CloseOrderNotPlaced), never block a redemption, and governance can lower it
+    ///      through the same delay. With no price (px 0) only minBase = 0 is accepted, since the
+    ///      bound cannot be checked.
     function setVenueMinimums(uint256 minBase, uint256 minNotional18) external {
-        if (msg.sender != governance) revert CertVault_OnlyGovernance();
-        if (minNotional18 > MAX_VENUE_MIN_NOTIONAL_18 || minBase > type(uint48).max) {
+        _applyChange();
+        (uint256 px18,) = oracle.pxUnguarded();
+        if (
+            minNotional18 > MAX_VENUE_MIN_NOTIONAL_18 || minBase > type(uint48).max
+                || (minBase != 0 && (px18 == 0 || _value18(minBase * 10 ** (18 - cfg.sizeDecimals), px18) > MAX_VENUE_MIN_NOTIONAL_18))
+        ) {
             revert CertVault_VenueMinimumOutOfBounds();
         }
         venueMinBase = minBase;
@@ -722,7 +818,7 @@ contract CertVault {
     ///      What remains is the protocol's own capital - seed, buffer, bootstrap dust - and after
     ///      this the vault never mints again, so nobody can become a holder of it later.
     function retire() external {
-        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        _onlyGovernance();
         if (
             certificate.totalSupply() != 0 || openMintReceipts != 0 || totalOwedOutstanding != 0
                 || venuePositionBase != 0
@@ -737,7 +833,7 @@ contract CertVault {
     ///      outright (see recallMarginUpTo). A withdrawal lands in this vault, so call again once
     ///      it has arrived to forward it.
     function sweepRetired(uint256 venueAmount) external {
-        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        _onlyGovernance();
         if (!retired) revert CertVault_NotRetired();
         if (venueAmount > 0) _requestWithdraw(venueAmount);
         uint256 bal = IERC20(cfg.collateral).balanceOf(address(this));
@@ -747,19 +843,25 @@ contract CertVault {
 
     /// @notice Switch to keeper-opened hedges. One-way; see keeperHedging.
     function enableKeeperHedging() external {
-        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        _onlyGovernance();
         if (keeperHedging) revert CertVault_KeeperHedgingAlreadyEnabled();
         keeperHedging = true;
         emit KeeperHedgingEnabled();
     }
 
-    /// @notice Register the keeper's API key on this vault's own venue account.
+    /// @notice Register the keeper's API key on this vault's own venue account. DELAYED: propose
+    ///         first (see proposeChange).
     /// @dev The key can trade the account, which is the trust this mode adds. It cannot move
     ///      collateral to another account: the venue requires an Ethereum signature from the
     ///      account's own L1 address for that, and this vault is a contract with no such key.
     ///      Governance can overwrite the key at the same index to rotate or retire it.
+    /// @dev H-2 (stack 5): the key can lose about 90% of every keeper-mode deposit by trading, so
+    ///      replacing it now waits GOVERNANCE_DELAY, announced by ChangeProposed with the key in it.
+    ///      Retiring a compromised key waits too; that is the price of the delay, and the Safe can
+    ///      shrink the exposure meanwhile (closeAll is immediate). The venue-equity check the
+    ///      pre-audit also suggests needs an attested equity figure this contract does not have.
     function setVenueApiKey(uint8 apiKeyIndex, bytes calldata pubKey) external {
-        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        _applyChange();
         lighter.changePubKey(lighterAccountIndex(), apiKeyIndex, pubKey);
         emit VenueApiKeySet(apiKeyIndex);
     }
@@ -1027,10 +1129,8 @@ contract CertVault {
         if (refPx == 0 || diff * 10_000 / refPx > cfg.settleBandBps) revert CertVault_FillPriceOutOfBand();
 
         // Keeper mode: settling is the claim that the off-chain hedge FILLED, so it is the
-        // keeper's to make - the same key already trusted for the solvency attestation.
-        if (keeperHedging && msg.sender != ICertOracleAttester(address(oracle)).attester()) {
-            revert CertVault_OnlyAttester();
-        }
+        // settler's to make. H-4 (stack 5): no longer the attester's - see settler.
+        if (keeperHedging && msg.sender != settler) revert CertVault_OnlySettler();
 
         r.settled = true;
         --openMintReceipts;
@@ -1827,7 +1927,7 @@ contract CertVault {
     ///         The only governance-gated function in this contract (Law 6: no privileged trading
     ///         key otherwise — this is wind-down, not routine trading).
     function closeAll() external {
-        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        _onlyGovernance();
 
         // M-3: the SIDE is derived from the vault's own order ledger, not assumed to be ASK.
         // `baseAmount == 0` defaults to the full position SIZE and leaves `isAsk` to the caller, so
@@ -2139,7 +2239,7 @@ contract CertVault {
     ///      make every fee flow a standing governance decision. It gates nothing but sweepFees():
     ///      no mint or redemption path reads it (Law 2).
     function setFeeSink(address sink) external {
-        if (msg.sender != governance) revert CertVault_OnlyGovernance();
+        _onlyGovernance();
         if (feeSink != address(0)) revert CertVault_FeeSinkAlreadySet();
         if (sink == address(0)) revert CertVault_ZeroAddress();
         feeSink = sink;

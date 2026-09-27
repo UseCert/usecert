@@ -130,6 +130,34 @@ abstract contract VaultFixture is Test {
         usdg.transfer(makeAddr("bufferSink"), buf);
     }
 
+    /// @dev Stack 5 (H-2, M-7, H-4): setVenueApiKey, setVenueMinimums and setSettler now apply
+    ///      only a change governance proposed GOVERNANCE_DELAY earlier. For a test whose subject is
+    ///      NOT the delay, this proposes, travels past the delay, applies, and travels BACK, so the
+    ///      rest of the test's clock (feed freshness, attestation age, settle windows) is exactly
+    ///      what it was. The delay itself is tested in real time in CertVaultStack5.t.sol.
+    function _applyDelayed(CertVault v, bytes memory data) internal {
+        uint256 t0 = block.timestamp;
+        vm.prank(gov);
+        v.proposeChange(data);
+        vm.warp(t0 + v.GOVERNANCE_DELAY());
+        vm.prank(gov);
+        (bool ok, bytes memory ret) = address(v).call(data);
+        if (!ok) {
+            assembly {
+                revert(add(ret, 32), mload(ret))
+            }
+        }
+        vm.warp(t0);
+    }
+
+    /// @dev Stack 5, H-4: keeper-mode settlement belongs to a settler that is not the attester.
+    ///      Tests that used the attester as the settling keeper name this address instead.
+    address internal settler = makeAddr("settler");
+
+    function _setSettler(CertVault v) internal {
+        _applyDelayed(v, abi.encodeCall(CertVault.setSettler, (settler)));
+    }
+
     /// @dev Stack 5, M-5: a vault with no capital of its own can no longer admit a mint (its
     ///      capacity leg is measured before the deposit arrives), so a test that wants "an empty
     ///      buffer with a mint in it" reads the vault's own balance first, mints, and then removes

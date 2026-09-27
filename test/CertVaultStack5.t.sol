@@ -340,6 +340,128 @@ contract CertVaultStack5Test is VaultFixture {
         assertTrue(_paid(id));
     }
 
+    // ================================================================== H-2 / M-7 / H-4 delays
+
+    bytes internal constant PUBKEY =
+        hex"012258abd09aa219c49c168c88d3fdb0c4f1004757709ae2400824c2ed19534cb4e3e038864c6076";
+
+    /// The venue key could be replaced in the block governance sent it. Now: proposed, public,
+    /// applied no sooner than GOVERNANCE_DELAY later, once, and cancellable.
+    function test_H2_venueApiKeyChangeWaitsTheDelayAppliesOnceAndCanBeCancelled() public {
+        bytes memory data = abi.encodeCall(CertVault.setVenueApiKey, (uint8(3), PUBKEY));
+        bytes32 id = keccak256(data);
+
+        vm.prank(alice);
+        vm.expectRevert(CertVault.CertVault_OnlyGovernance.selector);
+        vault.proposeChange(data);
+
+        uint256 t0 = block.timestamp;
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit CertVault.ChangeProposed(id, t0 + vault.GOVERNANCE_DELAY(), data);
+        vm.prank(gov);
+        vault.proposeChange(data);
+
+        vm.warp(t0 + vault.GOVERNANCE_DELAY() - 1);
+        vm.prank(gov);
+        vm.expectRevert(CertVault.CertVault_ChangeNotReady.selector);
+        vault.setVenueApiKey(3, PUBKEY);
+        // A different key than the one proposed is not the proposal.
+        vm.warp(t0 + vault.GOVERNANCE_DELAY());
+        vm.prank(gov);
+        vm.expectRevert(CertVault.CertVault_ChangeNotReady.selector);
+        vault.setVenueApiKey(4, PUBKEY);
+
+        vm.prank(gov);
+        vault.setVenueApiKey(3, PUBKEY);
+        assertEq(lighter.apiKeyOf(vault.lighterAccountIndex(), 3), PUBKEY);
+        // Consumed: it cannot be replayed.
+        vm.prank(gov);
+        vm.expectRevert(CertVault.CertVault_ChangeNotReady.selector);
+        vault.setVenueApiKey(3, PUBKEY);
+
+        // Cancelled proposals never apply.
+        vm.prank(gov);
+        vault.proposeChange(data);
+        vm.prank(gov);
+        vault.cancelChange(id);
+        vm.warp(block.timestamp + vault.GOVERNANCE_DELAY());
+        vm.prank(gov);
+        vm.expectRevert(CertVault.CertVault_ChangeNotReady.selector);
+        vault.setVenueApiKey(3, PUBKEY);
+    }
+
+    /// minBase was bounded only by uint48, so every close could be priced out. Now bounded in
+    /// notional at the price when applied, and delayed like the key.
+    function test_M7_venueMinBaseIsBoundedInNotionalAndDelayed() public {
+        // 200 TSLA (~$71k): refused even after the delay.
+        bytes memory tooBig = abi.encodeCall(CertVault.setVenueMinimums, (2_000_000, 0));
+        vm.prank(gov);
+        vault.proposeChange(tooBig);
+        vm.warp(block.timestamp + vault.GOVERNANCE_DELAY());
+        vm.prank(gov);
+        vm.expectRevert(CertVault.CertVault_VenueMinimumOutOfBounds.selector);
+        vault.setVenueMinimums(2_000_000, 0);
+
+        // 2.8 TSLA (~$996) is inside the $1,000 ceiling.
+        _setPrice(PX);
+        _applyDelayed(vault, abi.encodeCall(CertVault.setVenueMinimums, (28_000, 10e18)));
+        assertEq(vault.venueMinBase(), 28_000);
+        assertEq(vault.venueMinNotional18(), 10e18);
+        // Not without the delay.
+        vm.prank(gov);
+        vm.expectRevert(CertVault.CertVault_ChangeNotReady.selector);
+        vault.setVenueMinimums(0, 0);
+    }
+
+    /// One attester key used to both attest and settle keeper-mode mints on its own word. Now
+    /// settlement belongs to a separate settler, set through the delay; the attester keeps its
+    /// attestations and funding relay.
+    function test_H4_attesterCannotSettleKeeperMintsAndTheSettlerIsDelayed() public {
+        vm.prank(gov);
+        vault.enableKeeperHedging();
+        vm.prank(alice);
+        uint256 id = vault.requestMint(50_000e6);
+
+        // No settler yet: nobody settles, and the receipt still refunds (a missing settler costs
+        // time, not principal).
+        vm.prank(attester);
+        vm.expectRevert(CertVault.CertVault_OnlySettler.selector);
+        vault.settleMint(id, PX);
+
+        address keeper = makeAddr("keeper");
+        bytes memory data = abi.encodeCall(CertVault.setSettler, (keeper));
+        vm.prank(gov);
+        vault.proposeChange(data);
+        vm.prank(gov);
+        vm.expectRevert(CertVault.CertVault_ChangeNotReady.selector);
+        vault.setSettler(keeper);
+
+        vm.warp(block.timestamp + SETTLE_WINDOW + 1);
+        vault.stageRefund(id); // the refund path is untouched by the settler
+        vm.warp(block.timestamp + vault.GOVERNANCE_DELAY());
+        vm.prank(gov);
+        vault.setSettler(keeper);
+        assertEq(vault.settler(), keeper);
+
+        _setPrice(PX);
+        vm.startPrank(attester);
+        reg.attest(address(vault), 2, 0, 0, 1_190_000e18);
+        vault.accrueFunding(0); // the attester keeps the funding relay
+        vm.stopPrank();
+        vm.prank(alice);
+        uint256 id2 = vault.requestMint(50_000e6);
+        vm.prank(attester);
+        vm.expectRevert(CertVault.CertVault_OnlySettler.selector);
+        vault.settleMint(id2, PX);
+        vm.prank(keeper);
+        vault.settleMint(id2, PX);
+        assertGt(cert.balanceOf(alice), 0);
+        // and the settler is not an attester
+        vm.prank(keeper);
+        vm.expectRevert(CertVault.CertVault_OnlyAttester.selector);
+        vault.accrueFunding(0);
+    }
+
     function test_L11_ownerMayTakeACappedPayoutAtOnce() public {
         uint256 certs = _mintAlice(10_000e6);
         vm.prank(alice);
