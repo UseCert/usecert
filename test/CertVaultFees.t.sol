@@ -28,7 +28,10 @@ contract FeesMockRegistry is IVaultRegistry {
 ///      deposit cannot vouch for itself. So the proofs now end by checking the seed is still there:
 ///      a seed that had paid for anything would be a sweep that took too much, hidden.
 contract CertVaultFeesTest is VaultFixture {
-    address internal sink = makeAddr("feeSink");
+    /// @dev Stack 5, L-3: setFeeSink now refuses anything but a contract whose asset() is the
+    ///      vault's collateral, so the sink is a real FeeVault (one recipient) rather than a bare
+    ///      address. Swept fees sit in it until distribute(), so balanceOf(sink) reads the same.
+    address internal sink;
     address internal bob = makeAddr("bob");
     address internal carol = makeAddr("carol");
     address internal stranger = makeAddr("stranger");
@@ -41,6 +44,14 @@ contract CertVaultFeesTest is VaultFixture {
 
     function setUp() public override {
         super.setUp();
+        address[] memory r = new address[](1);
+        uint256[] memory sh = new uint256[](1);
+        (r[0], sh[0]) = (makeAddr("feeRecipient"), 10_000);
+        sink = address(new FeeVault(IERC20(address(usdg)), r, sh));
+        // Stack 5, H-8: a sweep needs a funding relay no older than FEE_SWEEP_MAX_ACCRUAL_AGE.
+        // A zero delta is the attester's "nothing to declare" heartbeat.
+        vm.prank(attester);
+        vault.accrueFunding(0);
         address[3] memory users = [alice, bob, carol];
         for (uint256 i = 0; i < 3; i++) {
             usdg.mint(users[i], 1_000_000e6);
@@ -131,7 +142,8 @@ contract CertVaultFeesTest is VaultFixture {
     }
 
     function test_setFeeSinkIsSetOnceAndNeverZero() public {
-        vm.expectRevert(CertVault.CertVault_ZeroAddress.selector);
+        // Stack 5, L-3: zero is refused as "not a contract over this collateral".
+        vm.expectRevert(CertVault.CertVault_BadCounterparty.selector);
         vm.prank(gov);
         vault.setFeeSink(address(0));
 

@@ -7,6 +7,21 @@ import {CertVault} from "../src/CertVault.sol";
 import {FeeVault} from "../src/FeeVault.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 
+/// @notice The vault's side of the fixed insurance interface, driven exactly as the new
+///         InsuranceStaking will drive it: approve, then receiveInsurance(amount).
+contract PoolStub {
+    IERC20 public immutable asset;
+
+    constructor(IERC20 a) {
+        asset = a;
+    }
+
+    function pay(CertVault v, uint256 amount) external {
+        asset.approve(address(v), amount);
+        v.receiveInsurance(amount);
+    }
+}
+
 /// @notice Stack 5: one test per pre-audit finding fixed in CertVault, each asserting that the
 ///         attack in the finding no longer works (and, where the fix adds a wait or a refusal,
 ///         that it is bounded and that forceExit stays open - Law 2).
@@ -627,6 +642,151 @@ contract CertVaultStack5Test is VaultFixture {
         assertEq(isAsk, 1, "the orphan trim must be a reduce-only sell");
         assertGt(base, 0);
         assertEq(vault.venuePositionBase(), 0, "the ledger recorded a short that does not exist");
+    }
+
+    // ================================================================== H-3 / K2-M-13 insurance
+
+    function _pool() internal returns (PoolStub p) {
+        p = new PoolStub(IERC20(address(usdg)));
+        usdg.mint(address(p), 1_000_000e6);
+        vm.prank(gov);
+        vault.setInsurancePool(address(p));
+    }
+
+    function test_H3_insurancePoolIsGovernanceSetOnceAndMustBeACollateralContract() public {
+        PoolStub p = new PoolStub(IERC20(address(usdg)));
+        vm.prank(alice);
+        vm.expectRevert(CertVault.CertVault_OnlyGovernance.selector);
+        vault.setInsurancePool(address(p));
+        vm.prank(gov);
+        vm.expectRevert(CertVault.CertVault_BadCounterparty.selector);
+        vault.setInsurancePool(makeAddr("eoa"));
+        PoolStub other = new PoolStub(IERC20(makeAddr("otherToken")));
+        vm.prank(gov);
+        vm.expectRevert(CertVault.CertVault_BadCounterparty.selector);
+        vault.setInsurancePool(address(other));
+
+        vm.prank(gov);
+        vault.setInsurancePool(address(p));
+        assertEq(vault.insurancePool(), address(p));
+        vm.prank(gov);
+        vm.expectRevert(CertVault.CertVault_InsurancePoolAlreadySet.selector);
+        vault.setInsurancePool(address(other));
+
+        // Only the pool may pay in through the insurance door.
+        vm.prank(alice);
+        vm.expectRevert(CertVault.CertVault_OnlyInsurancePool.selector);
+        vault.receiveInsurance(1e6);
+    }
+
+    /// The pre-audit's route: draw into an EMPTY vault, retire it, sweepRetired() the draw to the
+    /// Safe, repeat weekly. An empty vault now reports no shortfall whatever the ledger says, and
+    /// anything the pool paid in goes back to the pool before governance sees a unit.
+    function test_H3_aDrawIntoAnEmptyVaultCannotBeRoutedToGovernance() public {
+        PoolStub p = _pool();
+        // A declared loss on an empty vault is no reason for insurance.
+        vm.prank(attester);
+        vault.accrueFunding(-500_000e18);
+        assertEq(vault.insuranceShortfall(), 0, "an empty vault claimed a shortfall");
+
+        // Suppose a draw lands anyway.
+        uint256 poolBefore = usdg.balanceOf(address(p));
+        p.pay(vault, 30_000e6);
+        assertEq(vault.insuranceReceived(), 30_000e6);
+
+        uint256 own = vault.hotBuffer() - 30_000e6;
+        uint256 govBefore = usdg.balanceOf(gov);
+        vm.startPrank(gov);
+        vault.retire();
+        vault.sweepRetired(0);
+        vm.stopPrank();
+        assertEq(usdg.balanceOf(address(p)), poolBefore, "the pool did not get its draw back");
+        assertEq(usdg.balanceOf(gov) - govBefore, own, "governance received insurance money");
+        assertEq(vault.insuranceReceived(), 0);
+    }
+
+    /// K2-M-13: fees rightly held back while the vault is short used to become sweepable the
+    /// moment a draw landed as a plain transfer, and 30% of them left the loss waterfall. A draw
+    /// now arrives as bufferCapital: it closes the shortfall and frees no fee.
+    function test_H3_aDrawClosesTheShortfallAndIsNeverSweptAsFees() public {
+        PoolStub p = _pool();
+        address[] memory r = new address[](1);
+        uint256[] memory s = new uint256[](1);
+        (r[0], s[0]) = (makeAddr("treasury"), 10_000);
+        FeeVault fv = new FeeVault(IERC20(address(usdg)), r, s);
+        vm.prank(gov);
+        vault.setFeeSink(address(fv));
+
+        _mintAlice(10_000e6); // fee 10 USDG accrued
+        // The float and the seed are spent (a real hole), and the attester declares a 500 USDG
+        // venue loss beyond the capital.
+        _drainHotBuffer();
+        int256 ledger = book.balance18(address(vault));
+        int256 capital18 = int256(vault.bufferCapital() * 1e12);
+        vm.prank(attester);
+        vault.accrueFunding(capital18 - ledger - 500e18);
+
+        uint256 need = vault.insuranceShortfall();
+        assertEq(need, vault.retainedBacking() + 500e6, "shortfall = the float hole plus the declared loss");
+        assertEq(vault.sweepFees(), 0);
+
+        uint256 capBefore = vault.bufferCapital();
+        p.pay(vault, need);
+        assertEq(vault.insuranceShortfall(), 0, "the draw did not close the shortfall");
+        assertEq(vault.bufferCapital(), capBefore + need, "insurance is reserved capital");
+        assertEq(vault.insuranceReceived(), need);
+        assertEq(vault.sweepFees(), 0, "an insurance draw was swept out as fees");
+        assertEq(usdg.balanceOf(address(fv)), 0);
+    }
+
+    // ================================================================== H-8 fees vs losses
+
+    /// Nothing called accrueFunding, so the declared deficit was always 0 and sweeps took the loss
+    /// cushion. A sweep now needs a recent relay.
+    function test_H8_sweepFeesNeedsARecentFundingRelay() public {
+        address[] memory r = new address[](1);
+        uint256[] memory s = new uint256[](1);
+        (r[0], s[0]) = (makeAddr("treasury"), 10_000);
+        FeeVault fv = new FeeVault(IERC20(address(usdg)), r, s);
+        vm.prank(gov);
+        vault.setFeeSink(address(fv));
+        _mintAlice(10_000e6);
+        assertGt(vault.sweepableFees(), 0);
+
+        vm.expectRevert(CertVault.CertVault_FundingRelayStale.selector); // never relayed
+        vault.sweepFees();
+
+        vm.prank(attester);
+        vault.accrueFunding(0);
+        assertEq(vault.lastAccrualAt(), block.timestamp);
+        vm.warp(block.timestamp + vault.FEE_SWEEP_MAX_ACCRUAL_AGE() + 1);
+        vm.expectRevert(CertVault.CertVault_FundingRelayStale.selector); // relay went quiet
+        vault.sweepFees();
+
+        vm.prank(attester);
+        vault.accrueFunding(0);
+        assertEq(vault.sweepFees(), 10e6);
+    }
+
+    // ================================================================== L-3 fee sink
+
+    function test_L3_feeSinkMustBeAContractOverTheCollateral() public {
+        vm.prank(gov);
+        vm.expectRevert(CertVault.CertVault_BadCounterparty.selector);
+        vault.setFeeSink(makeAddr("typo"));
+
+        address[] memory r = new address[](1);
+        uint256[] memory s = new uint256[](1);
+        (r[0], s[0]) = (makeAddr("treasury"), 10_000);
+        FeeVault wrong = new FeeVault(IERC20(makeAddr("otherToken")), r, s);
+        vm.prank(gov);
+        vm.expectRevert(CertVault.CertVault_BadCounterparty.selector);
+        vault.setFeeSink(address(wrong));
+
+        FeeVault right = new FeeVault(IERC20(address(usdg)), r, s);
+        vm.prank(gov);
+        vault.setFeeSink(address(right));
+        assertEq(vault.feeSink(), address(right));
     }
 
     function test_L11_ownerMayTakeACappedPayoutAtOnce() public {
