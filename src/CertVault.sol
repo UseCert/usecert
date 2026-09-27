@@ -2500,7 +2500,7 @@ contract CertVault {
     /// @dev L-3 / H-3: code, and IFeeVault.asset() == this vault's collateral. ERC-4626 pools answer
     ///      the same selector, so one check serves the fee sink and the insurance pool.
     function _requireCollateralContract(address a) internal view {
-        if (a.code.length == 0 || IFeeVault(a).asset() != address(IERC20(cfg.collateral))) revert CertVault_BadCounterparty();
+        if (a.code.length == 0 || IFeeVault(a).asset() != cfg.collateral) revert CertVault_BadCounterparty();
     }
 
     /// @notice Set where fee income goes. Governance, once, never zero.
