@@ -342,6 +342,13 @@ contract CertVaultRedeemTest is VaultFixture {
     ///      call and the first claim reverts `OracleUnreadable()`; drop its `px18 == 0` guard and
     ///      the second claim pays 0 instead of the full owed amount; drop its
     ///      `px18 > type(uint256).max / certIn` guard and the third panics 0x11.
+    /// @dev CHANGED IN STACK 5 (H-1). An oracle that cannot price used to pay owed18 AT ONCE. That
+    ///      is exactly the weekend option H-1 describes - no usable price since the request, paid
+    ///      at the request price anyway - so a claim with no usable price now WAITS, retryably,
+    ///      and pays owed18 uncapped once QUEUED_PRICE_TIMEOUT has passed. The two mocked cases
+    ///      therefore first prove the wait, then warp past the timeout; the property this test
+    ///      exists for - an unpriceable oracle never shrinks or blocks a payout for good - is the
+    ///      same.
     function test_claimRedeemPaysInFullWhenTheOracleCannotPrice() public {
         vm.prank(alice);
         vault.mintInstant(3_558.6e6);
@@ -367,10 +374,15 @@ contract CertVaultRedeemTest is VaultFixture {
         assertGt(owedB, 0);
         assertGt(owedC, 0);
 
-        // 1. The oracle read itself reverts.
+        // 1. The oracle read itself reverts. Before the timeout the claim waits (H-1); after it,
+        //    it pays in full with no price at all.
         vm.mockCallRevert(
             address(oracle), abi.encodeWithSignature("pxUnguarded()"), abi.encodeWithSignature("OracleUnreadable()")
         );
+        vm.prank(alice);
+        vm.expectRevert(CertVault.CertVault_AwaitingFreshPrice.selector);
+        vault.claimRedeem(idA);
+        vm.warp(block.timestamp + vault.QUEUED_PRICE_TIMEOUT());
         uint256 beforeA = usdg.balanceOf(alice);
         vm.prank(alice);
         uint256 outA = vault.claimRedeem(idA);
@@ -450,6 +462,10 @@ contract CertVaultRedeemTest is VaultFixture {
         _setPrice(PX);
         uint256 expected = bal * PX / 1e18 / 1e12; // gross current value, in collateral units
         uint256 before = usdg.balanceOf(alice);
+        // Stack 5, L-11: this payout is CAPPED, and inside REDEEM_OWNER_GRACE only the owner may
+        // take a capped payout, so the holder claims it herself. (It used to be the test contract,
+        // i.e. a stranger locking the cap in for her - the exact L-11 behaviour.)
+        vm.prank(alice);
         vault.claimRedeem(id);
         assertEq(usdg.balanceOf(alice) - before, expected, "the clamp cost the holder value");
     }

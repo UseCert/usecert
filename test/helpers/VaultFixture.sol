@@ -129,4 +129,57 @@ abstract contract VaultFixture is Test {
         vm.prank(address(vault));
         usdg.transfer(makeAddr("bufferSink"), buf);
     }
+
+    /// @dev Stack 5 (H-2, M-7, H-4): setVenueApiKey, setVenueMinimums and setSettler now apply
+    ///      only a change governance proposed GOVERNANCE_DELAY earlier. For a test whose subject is
+    ///      NOT the delay, this proposes, travels past the delay, applies, and travels BACK, so the
+    ///      rest of the test's clock (feed freshness, attestation age, settle windows) is exactly
+    ///      what it was. The delay itself is tested in real time in CertVaultStack5.t.sol.
+    function _applyDelayed(CertVault v, bytes memory data) internal {
+        uint256 t0 = block.timestamp;
+        vm.prank(gov);
+        v.proposeChange(data);
+        vm.warp(t0 + v.GOVERNANCE_DELAY());
+        vm.prank(gov);
+        (bool ok, bytes memory ret) = address(v).call(data);
+        if (!ok) {
+            assembly {
+                revert(add(ret, 32), mload(ret))
+            }
+        }
+        vm.warp(t0);
+    }
+
+    /// @dev Stack 5, H-5: rebalance() acts only on an attestation OBSERVED more than
+    ///      REBALANCE_VENUE_LAG after the vault's last order. SolvencyRegistry.attest stamps
+    ///      block.timestamp, so a test that orders and then attests must let the lag pass first -
+    ///      acting on an attestation from the same block as an order is exactly H-5.
+    function _pastVenueLag() internal {
+        vm.warp(block.timestamp + vault.REBALANCE_VENUE_LAG() + 1);
+    }
+
+    /// @dev Stack 5, H-5: consecutive rebalances are at least REBALANCE_MIN_INTERVAL apart (which
+    ///      is also longer than the venue lag).
+    function _nextRebalanceWindow() internal {
+        vm.warp(block.timestamp + vault.REBALANCE_MIN_INTERVAL());
+    }
+
+    /// @dev Stack 5, H-4: keeper-mode settlement belongs to a settler that is not the attester.
+    ///      Tests that used the attester as the settling keeper name this address instead.
+    address internal settler = makeAddr("settler");
+
+    function _setSettler(CertVault v) internal {
+        _applyDelayed(v, abi.encodeCall(CertVault.setSettler, (settler)));
+    }
+
+    /// @dev Stack 5, M-5: a vault with no capital of its own can no longer admit a mint (its
+    ///      capacity leg is measured before the deposit arrives), so a test that wants "an empty
+    ///      buffer with a mint in it" reads the vault's own balance first, mints, and then removes
+    ///      exactly that amount with this - leaving precisely what the mint itself left behind,
+    ///      which is the state the old drain-then-mint sequence produced.
+    function _drainAmount(uint256 amount) internal {
+        if (amount == 0) return;
+        vm.prank(address(vault));
+        usdg.transfer(makeAddr("bufferSink"), amount);
+    }
 }

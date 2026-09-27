@@ -17,9 +17,11 @@ contract CertVaultKeeperHedgingTest is VaultFixture {
 
     bytes32 internal constant HEDGE_REQUESTED = keccak256("HedgeRequested(uint256,uint256,uint8,uint256)");
 
+    /// @dev Stack 5, H-4: keeper-mode settlement needs a settler, set through the delay.
     function _enable() internal {
         vm.prank(gov);
         vault.enableKeeperHedging();
+        _setSettler(vault);
     }
 
     function _indicative(uint256 id) internal view returns (uint256 indicative) {
@@ -91,17 +93,16 @@ contract CertVaultKeeperHedgingTest is VaultFixture {
 
     function test_keeperMode_requestMintBelowTheVenueMinimumRefusesBeforeTakingEscrow() public {
         _enable();
-        // The notional minimum cannot bite here: this fixture's instant cap is $10k, so every
-        // requestMint is above it, and the setter refuses a notional minimum above $1,000 so it
-        // cannot be used to price out every mint. The BASE minimum is the one that bites: this
-        // mint hedges 1,403,641 base units (140.3641 TSLA at sizeDecimals 4).
-        vm.prank(gov);
-        vault.setVenueMinimums(2_000_000, 0);
+        // The BASE minimum is the one that bites. Stack 5, M-7: it is now bounded in notional
+        // too (at most $1,000 at the oracle price when applied), so the old 2_000_000 units
+        // (200 TSLA, ~$71k) is refused by the setter; 28_000 units is 2.8 TSLA, ~$996. Keeper mode
+        // queues small mints, so a ~$899 mint (25_265 units) meets the minimum and is refused.
+        _applyDelayed(vault, abi.encodeCall(CertVault.setVenueMinimums, (28_000, 0)));
 
         uint256 balBefore = usdg.balanceOf(alice);
         vm.expectRevert(CertVault.CertVault_BelowVenueMinimum.selector);
         vm.prank(alice);
-        vault.requestMint(50_000e6);
+        vault.requestMint(900e6);
         assertEq(usdg.balanceOf(alice), balBefore);
     }
 
@@ -123,17 +124,22 @@ contract CertVaultKeeperHedgingTest is VaultFixture {
 
     /// Settling is the claim that the off-chain hedge FILLED, so only the keeper makes it, and the
     /// position enters the vault's ledger then and not before.
-    function test_keeperMode_onlyTheAttesterSettlesAndSettlingRecordsThePosition() public {
+    /// @dev Stack 5, H-4: "the keeper" is now the SETTLER, a key separate from the attester. This
+    ///      test used to pin the attester as the settling key; the attester is now refused too.
+    function test_keeperMode_onlyTheSettlerSettlesAndSettlingRecordsThePosition() public {
         _enable();
         vm.prank(alice);
         uint256 id = vault.requestMint(50_000e6);
         uint256 indicative = _indicative(id);
         int256 ledgerBefore = vault.venuePositionBase();
 
-        vm.expectRevert(CertVault.CertVault_OnlyAttester.selector);
+        vm.expectRevert(CertVault.CertVault_OnlySettler.selector);
+        vault.settleMint(id, PX);
+        vm.prank(attester);
+        vm.expectRevert(CertVault.CertVault_OnlySettler.selector);
         vault.settleMint(id, PX);
 
-        vm.prank(attester);
+        vm.prank(settler);
         vault.settleMint(id, PX);
 
         assertEq(cert.balanceOf(alice), indicative);
@@ -148,7 +154,7 @@ contract CertVaultKeeperHedgingTest is VaultFixture {
         _enable();
         vm.prank(alice);
         uint256 id = vault.requestMint(50_000e6);
-        vm.prank(attester);
+        vm.prank(settler);
         vault.settleMint(id, PX);
 
         // Read first: vm.prank applies to the NEXT external call, and cert.balanceOf inside the
@@ -184,7 +190,7 @@ contract CertVaultKeeperHedgingTest is VaultFixture {
         _enable();
         vm.prank(alice);
         uint256 id = vault.requestMint(50_000e6);
-        vm.prank(attester);
+        vm.prank(settler);
         vault.settleMint(id, PX);
         uint256 certs = cert.balanceOf(alice);
         vm.prank(alice);
@@ -215,8 +221,13 @@ contract CertVaultKeeperHedgingTest is VaultFixture {
         vm.prank(alice);
         vault.setVenueApiKey(3, PUBKEY);
 
+        // Stack 5, H-2: governance alone is no longer enough; the key must have been proposed
+        // GOVERNANCE_DELAY earlier (the delay itself is tested in CertVaultStack5.t.sol).
         vm.prank(gov);
+        vm.expectRevert(CertVault.CertVault_ChangeNotReady.selector);
         vault.setVenueApiKey(3, PUBKEY);
+
+        _applyDelayed(vault, abi.encodeCall(CertVault.setVenueApiKey, (uint8(3), PUBKEY)));
         assertEq(lighter.apiKeyOf(vault.lighterAccountIndex(), 3), PUBKEY);
     }
 

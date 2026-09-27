@@ -11,6 +11,7 @@ contract CertVaultRebalanceTest is VaultFixture {
         vm.prank(alice);
         vault.mintInstant(3_558.6e6);
 
+        _pastVenueLag(); // stack 5, H-5
         vm.prank(attester);
         reg.attest(address(vault), 2, 3_554e18, 3_600e18, 1_190_000e18);
         vm.warp(block.timestamp + 45);
@@ -28,6 +29,7 @@ contract CertVaultRebalanceTest is VaultFixture {
         vault.mintInstant(3_558.6e6);
         lighter.settleBatch();
 
+        _pastVenueLag(); // stack 5, H-5
         vm.prank(attester);
         reg.attest(address(vault), 2, 3_554e18, 3_600e18, 1_190_000e18);
 
@@ -41,6 +43,7 @@ contract CertVaultRebalanceTest is VaultFixture {
         lighter.settleBatch();
 
         // report only half the needed notional -> under-hedged, out of band
+        _pastVenueLag(); // stack 5, H-5
         vm.prank(attester);
         reg.attest(address(vault), 2, 1_777e18, 3_600e18, 1_190_000e18);
 
@@ -54,6 +57,7 @@ contract CertVaultRebalanceTest is VaultFixture {
         vm.prank(alice);
         vault.mintInstant(3_558.6e6);
         lighter.settleBatch();
+        _pastVenueLag(); // stack 5, H-5
         vm.prank(attester);
         reg.attest(address(vault), 2, 1_777e18, 3_600e18, 1_190_000e18);
 
@@ -74,6 +78,7 @@ contract CertVaultRebalanceTest is VaultFixture {
         lighter.settleBatch();
         vault.settleMint(id, PX);
 
+        _pastVenueLag(); // stack 5, H-5
         vm.prank(attester);
         reg.attest(address(vault), 2, 0, 600_000e18, 1_190_000e18); // fully unhedged
 
@@ -177,6 +182,7 @@ contract CertVaultRebalanceTest is VaultFixture {
 
         // Attest a matching low (zero) notional for the now-dust supply -> the vault reads as
         // fully unhedged in percentage terms, but the dollar gap is sub-tick.
+        _pastVenueLag(); // stack 5, H-5
         vm.prank(attester);
         reg.attest(address(vault), 2, 0, 100e18, 1_190_000e18);
 
@@ -203,6 +209,7 @@ contract CertVaultRebalanceTest is VaultFixture {
     ///      reports the position as fully unhedged, so the gap is ~50_000e18 against a
     ///      MAX_REBALANCE_NOTIONAL_18 of 10_000e18.
     function _driveLargeDelta(uint64 batchId) internal {
+        _pastVenueLag(); // stack 5, H-5
         vm.prank(attester);
         reg.attest(address(vault), batchId, 0, 600_000e18, 1_190_000e18);
     }
@@ -237,7 +244,9 @@ contract CertVaultRebalanceTest is VaultFixture {
         uint256 movedNotional18 = uint256(moved) * PX / (10 ** 4); // sizeDecimals = 4
         assertLe(movedNotional18, vault.MAX_REBALANCE_NOTIONAL_18());
 
-        // Fresh information re-opens it: still permissionless, still bounded per call.
+        // Fresh information re-opens it: still permissionless, still bounded per call. Stack 5,
+        // H-5: and no sooner than REBALANCE_MIN_INTERVAL after the last rebalance order.
+        _nextRebalanceWindow();
         _driveLargeDelta(3);
         vm.prank(stranger);
         vault.rebalance();
@@ -253,6 +262,7 @@ contract CertVaultRebalanceTest is VaultFixture {
         lighter.settleBatch();
 
         // In band -> reverts InBand, which rolls back lastRebalancedBatch.
+        _pastVenueLag(); // stack 5, H-5
         vm.prank(attester);
         reg.attest(address(vault), 2, 3_554e18, 3_600e18, 1_190_000e18);
         vm.expectRevert(CertVault.CertVault_InBand.selector);
@@ -260,6 +270,7 @@ contract CertVaultRebalanceTest is VaultFixture {
         assertEq(vault.lastRebalancedBatch(), 0, "a reverted attempt consumed the batch");
 
         // Same batch, now genuinely out of band: a real trim must still be possible.
+        _pastVenueLag(); // stack 5, H-5
         vm.prank(attester);
         reg.attest(address(vault), 3, 1_777e18, 3_600e18, 1_190_000e18);
         vm.prank(makeAddr("anyone"));
@@ -289,6 +300,7 @@ contract CertVaultRebalanceTest is VaultFixture {
         (uint256 px18,) = oracle.pxUnguarded();
         assertEq(px18, 0, "the feed did not actually truncate to zero");
 
+        _pastVenueLag(); // stack 5, H-5
         vm.prank(attester);
         reg.attest(address(vault), 2, 3_554e18, 3_600e18, 1_190_000e18);
         assertEq(vault.solvency().deltaBps, vault.DELTA_UNBOUNDED_BPS(), "a zero price is not a hedged vault");

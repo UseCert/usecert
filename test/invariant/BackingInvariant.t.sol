@@ -256,6 +256,7 @@ contract BackingInvariantTest is VaultFixture {
 
         // Attest that dangling notional truthfully. This is the state the fix is about.
         uint256 notional18 = uint256(dangling) * PX / (10 ** 4); // sizeDecimals = 4
+        _pastVenueLag(); // stack 5, H-5: observed after the mint's order
         vm.prank(attester);
         reg.attest(address(vault), 2, notional18, 3_600e18, 1_190_000e18);
         assertEq(
@@ -283,6 +284,7 @@ contract BackingInvariantTest is VaultFixture {
         uint64 batchId = 3;
         for (uint256 i = 0; i < 8 && lighter.positionBase(MARKET) != 0; ++i) {
             uint256 remaining18 = uint256(lighter.positionBase(MARKET)) * PX / (10 ** 4);
+            _nextRebalanceWindow(); // stack 5, H-5
             vm.prank(attester);
             reg.attest(address(vault), batchId++, remaining18, 3_600e18, 1_190_000e18);
             vm.prank(makeAddr("danglingTrimmer"));
@@ -298,6 +300,7 @@ contract BackingInvariantTest is VaultFixture {
 
         // And once flat, a truthful attestation puts the vault back in band: it stops, it does
         // not keep selling into a short.
+        _nextRebalanceWindow(); // stack 5, H-5
         vm.prank(attester);
         reg.attest(address(vault), batchId, 0, 3_600e18, 1_190_000e18); // M-11: the next batch, no jump
         assertEq(vault.solvency().deltaBps, 10_000);
@@ -382,8 +385,11 @@ contract BackingInvariantTest is VaultFixture {
     ///      coverage of the refund branches, and the fuzzed actions are there so the branches
     ///      cannot silently stop being callable.
     function test_refundAwaitingSettlementIsRetryableNotAViolation() public {
-        _drainHotBuffer(); // the vault cannot pay an escrow out of its own balance
+        // the vault cannot pay an escrow out of its own balance. Stack 5, M-5: drained right after
+        // the request, since an empty vault can no longer admit one; the state left is the same.
+        uint256 own = vault.hotBuffer();
         handler.requestMint(20_000e6); // escrow 19_980e6, of which 17_982e6 goes to the venue
+        _drainAmount(own);
         handler.settleBatch(); // the mint's own hedge fills
         vm.warp(block.timestamp + SETTLE_WINDOW + 1);
 
@@ -407,7 +413,8 @@ contract BackingInvariantTest is VaultFixture {
         uint256 before = usdg.balanceOf(address(handler));
         handler.refundMint(0);
         assertEq(handler.refundMintCount(), 1, "the receipt never actually refunded");
-        assertEq(usdg.balanceOf(address(handler)) - before, 19_980e6, "the escrow was not returned in full");
+        // Stack 5, L-10: escrow 19_980e6 plus the 20e6 mint fee, which a refund now returns too.
+        assertEq(usdg.balanceOf(address(handler)) - before, 20_000e6, "the escrow was not returned in full");
         assertEq(handler.lawTwoViolations(), 0);
         assertEq(handler.refundAwaitingSettlementCount(), 1);
         assertEq(cert.totalSupply(), 0);
@@ -441,6 +448,7 @@ contract BackingInvariantTest is VaultFixture {
     function test_rebalanceAlreadyThisBatchIsReachable() public {
         handler.mintInstant(5_000e6);
         assertGt(cert.totalSupply(), 0);
+        // (stack 5, H-5: handler.attest lets the venue lag pass before it attests)
         handler.attest(type(uint256).max, 0, 0); // fresh batch, notional 0 -> far out of band
 
         assertEq(handler.rebalanceAlreadyThisBatchCount(), 0);

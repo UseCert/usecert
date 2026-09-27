@@ -129,6 +129,8 @@ contract VaultHandler is CommonBase, StdUtils {
     uint256 public callsStageRefund;
     uint256 public callsRefundMint;
     uint256 public callsRedeemInstant;
+    /// @dev Stack 5, H-1: claims told to wait for a post-request price (retryable, bounded).
+    uint256 public claimAwaitingFreshPriceCount;
     uint256 public callsRequestRedeem;
     uint256 public callsForceExit;
     uint256 public callsClaimRedeem;
@@ -411,7 +413,12 @@ contract VaultHandler is CommonBase, StdUtils {
         try vault.redeemInstant(amount) returns (uint256 /* amountOut */ ) {
             totalBurned += amount;
         } catch (bytes memory reason) {
-            if (_isSelector(reason, CertVault.CertVault_UseQueuedRedeem.selector)) {
+            // Stack 5, H-1: a price older than INSTANT_MAX_PRICE_AGE is the same kind of routing
+            // signal - the instant path points at the queue, which must then take the same amount.
+            if (
+                _isSelector(reason, CertVault.CertVault_UseQueuedRedeem.selector)
+                    || _isSelector(reason, CertVault.CertVault_InstantPriceTooOld.selector)
+            ) {
                 _fallbackToQueuedRedeem(amount);
             } else {
                 // Any other revert on a non-zero amount the caller actually holds is a real
@@ -462,8 +469,20 @@ contract VaultHandler is CommonBase, StdUtils {
         _removeRedeemReceipt(idx);
 
         try vault.claimRedeem(receiptId) returns (uint256 /* amountOut */ ) {
-            // paid
+            // Stack 5, H-7: a claim may be an INSTALMENT. The receipt then stays open and must stay
+            // tracked, or a partially paid receipt would silently leave this suite's view.
+            (,,,, bool paid) = vault.redeemReceipts(receiptId);
+            if (!paid) pendingRedeemReceipts.push(receiptId);
         } catch (bytes memory reason) {
+            if (_isSelector(reason, CertVault.CertVault_AwaitingFreshPrice.selector)) {
+                // Stack 5, H-1: no price observed since the request yet. Retryable and BOUNDED -
+                // it ends unconditionally at QUEUED_PRICE_TIMEOUT - and it reverts before touching
+                // the receipt, so the receipt goes back on the list exactly as for
+                // AwaitingSettlement below.
+                claimAwaitingFreshPriceCount++;
+                pendingRedeemReceipts.push(receiptId);
+                return;
+            }
             if (_isSelector(reason, CertVault.CertVault_AwaitingSettlement.selector)) {
                 // M2 (final review wave): the vault cannot pay this receipt out of its own
                 // balance yet. This is a routing signal of the same kind as
@@ -591,6 +610,12 @@ contract VaultHandler is CommonBase, StdUtils {
         uint256 margin = bound(marginSeed, 0, 300_000e18);
         uint64 batchId = ++nextBatchId;
 
+        // Stack 5, H-5: rebalance() ignores an attestation observed within REBALANCE_VENUE_LAG of
+        // the vault's last order, and the fuzzer barely moves the clock, so without this every
+        // fuzzed attestation would postdate nothing and rebalance() would never act again - the
+        // "stays green because it stopped running" failure this file exists to catch. A real
+        // attester also observes after the venue has executed, so this is the faithful shape.
+        vm.warp(block.timestamp + vault.REBALANCE_VENUE_LAG() + 1);
         vm.prank(attester);
         reg.attest(address(vault), batchId, notional, margin, oi);
     }
