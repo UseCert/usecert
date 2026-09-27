@@ -1945,7 +1945,7 @@ so every read failed. It now uses `cast`'s checksum.
   USDG transferred straight to `CertStaking` is not credited: it would sit there, uncounted and
   unstreamable. An EOA that forwards by calling `notifyRewardAmount` is correct.
 * **The old governance EOA's 12.379248 USDG goes to `0x0E670BbfFc7ead71e4eb05DFe77016729B6b7C0E`**
-  (item 8). It is a transfer of funds, so the owner signs it himself on Montréal; the command was
+  (item 8). It is a transfer of funds, so the owner signs it on Montréal; the command was
   given, not run. The EOA holds 0.0036 ETH for gas. **Done by the owner:** 12.379248 USDG to
   `0x0E67…7C0E` (tx `0xd00e7131…`, block 73,382,911, status 1). The old governance EOA now
   holds 0 USDG.
