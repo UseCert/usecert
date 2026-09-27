@@ -433,7 +433,8 @@ contract CertVaultFeesTest is VaultFixture {
 
     // ================================================================== end to end
 
-    /// mint fee -> sweepFees -> FeeVault.distribute -> InsuranceStaking's share price rises.
+    /// mint fee -> sweepFees -> FeeVault.distribute -> FeeVault.claim -> InsuranceStaking's share
+    /// price rises.
     function test_endToEnd_mintFeeRaisesTheStakersSharePrice() public {
         FeesMockRegistry registry = new FeesMockRegistry();
         registry.set(address(vault));
@@ -463,6 +464,7 @@ contract CertVaultFeesTest is VaultFixture {
         vm.startPrank(stranger);
         assertEq(vault.sweepFees(), 5e6);
         assertEq(fv.distribute(), 5e6);
+        assertEq(fv.claim(address(pool)), 4e6); // pull: anyone claims for the pool
         vm.stopPrank();
 
         assertEq(usdg.balanceOf(address(pool)), 10_000e6 + 4e6, "the pool's 80% did not arrive");

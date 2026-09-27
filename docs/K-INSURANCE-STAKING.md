@@ -85,8 +85,16 @@ Constructor bounds, so no deployment can misconfigure it:
   unchanged. The counters are written, but nothing reads them except the sweep.
 * **`FeeVault`**: no owner. It is built with 1 to 8 recipients, each with a non-zero share in
   basis points. The shares must sum to exactly 10 000, and zero addresses and duplicates are
-  refused. Permissionless `distribute()` splits the whole balance. Each share is floored, and the
-  leftover (fewer units than there are recipients) stays for the next call.
+  refused. It is **pull-based** (pre-audit L-2): permissionless `distribute()` moves no tokens;
+  it credits each recipient's `owed` with its share of the income not yet credited (the balance
+  less `totalOwed`). Permissionless `claim(recipient)` pays one recipient what it is owed, so a
+  recipient whose transfer reverts fails only its own claim, and its credit stays booked for it.
+  Each share is floored, and the leftover (fewer units than there are recipients) stays
+  uncredited for the next call. `asset()` returns the collateral, for `setFeeSink` to check.
+* **`BuybackForwarder`**: no owner, bound at construction to USDG and one `CertStaking`
+  (whose `rewardToken` must be USDG). Permissionless `forward()` pays its whole USDG balance in
+  through `notifyRewardAmount` when it is at least `staking.minNotify()`, and otherwise does
+  nothing. It has no other function that can move tokens.
 
 ### Why pull, never push
 
@@ -146,25 +154,31 @@ donation), up to the assessed amount.
 | Share | Recipient | Notes |
 |---|---|---|
 | **70%** | `InsuranceStaking` | Pays stakers for taking the first loss; raises the share price. |
-| **20%** | A buyback fund | Held in USDG until a CERT market exists to buy on (K4). It must be an address that cannot revert a transfer: a Safe-controlled account, not a contract that can be paused. |
-| **5%** | A keeper and operations gas wallet | Pays the gas for settlements, refunds and recalls. |
+| **20%** | `BuybackForwarder` → `CertStaking` | Paid to CERT stakers in USDG until a CERT market exists to buy on (K4). A contract, so it is a distinct recipient with no key in the path (pre-audit L-1, L-15). |
+| **5%** | A keeper and operations gas wallet (an EOA) | Pays the gas for settlements, refunds and recalls. |
 | **5%** | The treasury, the 2-of-3 Safe `0x848c…70DF` | |
 
 It replaced three published versions that disagreed: the whitepaper's 80/10/5/5 (buyback /
 stakers / treasury / ops), the Roles page's, and the Learn page's (stakers / buffer / keepers /
-treasury). All of them now say 70/20/5/5. `test_ownerSplit_70_20_5_5` pins it: 12.345678 USDG
-splits to exactly 8.641974 / 2.469135 / 0.617283 / 0.617283, with 3 units of dust carried
-forward.
+treasury). All of them now say 70/20/5/5. `test_mainnetSplit_order_and_bps` pins the recipient
+order and the shares, with a real `BuybackForwarder` as the second recipient: 12.345678 USDG is
+credited as exactly 8.641974 / 2.469135 / 0.617283 / 0.617283, with 3 units of dust carried forward.
 
-**Decided 2026-09-26 (owner):** the buyback fund and the ops wallet are both the deployer,
-`0x6381577a72266E6b89eE9E96dF604CC3cd3f8e92`. An EOA cannot revert a USDG transfer, so it
-satisfies point 3. The buyback leg reaches CERT stakers only when the fund **calls**
-`CertStaking.notifyRewardAmount`. `FeeVault` must never pay `CertStaking` directly: a plain
-transfer into it is not credited, and nothing could ever stream it.
+**Superseded (pre-audit L-1, L-15):** on 2026-09-26 the buyback fund and the ops wallet were
+both to be the deployer, `0x6381577a72266E6b89eE9E96dF604CC3cd3f8e92`. `FeeVault` refuses a
+duplicate recipient, so that split could not be deployed (L-1), and it would have put 25% of all
+fees on the hot key that signs deploys, with the CERT stakers' 20% reaching them only if that key
+called `CertStaking.notifyRewardAmount` (L-15). The buyback leg is now a `BuybackForwarder`: a
+distinct address that anyone can make pay into `CertStaking`, and nothing else.
+`FeeVault` must never pay `CertStaking` directly: a plain transfer into it is not credited, and
+nothing could ever stream it. The keeper flow is `feeVault.claim(forwarder)` then
+`forwarder.forward()`.
 
-3. **Recipients that cannot be frozen out.** One recipient whose transfer reverts stalls every
-   `distribute()`, and `FeeVault` has no owner to route around it. Suitable recipients: the Safe
-   and `InsuranceStaking`.
+3. **A frozen recipient costs only its own share.** Since L-2, a recipient whose transfer
+   reverts fails its own `claim` and nothing else. Its credit stays booked (it is never re-split
+   among the others) and is paid in full if the transfer ever works again. With no owner, a
+   recipient frozen for good keeps its share locked here for good, so recipients that cannot be
+   frozen out (the Safe, `InsuranceStaking`, the forwarder) are still the right choice.
 
 ### Interplay with K1 draws — for K3
 
