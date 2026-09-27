@@ -2,7 +2,10 @@ import { useMemo, useState } from "react";
 import { useReadContracts } from "wagmi";
 import { Loader2 } from "lucide-react";
 import { CertVaultABI } from "@/chain/contracts";
-import { CHAIN_ID } from "@/chain/deployment";
+import { Stack5CertVaultABI } from "@/chain/contracts.stack5";
+import { CHAIN_ID, IS_STACK5 } from "@/chain/deployment";
+import { fromCollateral } from "@/chain/units";
+import { useStack5VaultTimes } from "@/chain/useStack5";
 import { useFlows, type FlowEvent } from "@/chain/useFlows";
 import { vaultAddresses, type ChainVaultId } from "@/chain/useVaults";
 import { useDashboard } from "./store";
@@ -20,7 +23,13 @@ import { fmtAge, fmtNum } from "./format";
  * A mint whose hedge never fills is refunded by the keeper once the settle window passes; the
  * Refund button is the same two permissionless calls, for when a holder would rather not wait.
  */
-export type ReceiptAction = { kind: "claim" | "refund"; id: bigint; staged: boolean };
+export type ReceiptAction = {
+  kind: "claim" | "refund";
+  id: bigint;
+  staged: boolean;
+  /** Button text where it is not the kind's default (stack 5: "Claim rest" on a part-paid receipt). */
+  label?: string;
+};
 
 type Row = {
   kind: "mint" | "redeem";
@@ -45,6 +54,9 @@ const STEP_LABEL: Record<string, string> = {
 
 /** A hedge normally fills in under a minute; before this, a refund would only revert. */
 const REFUND_OFFER_AFTER_SEC = 15 * 60;
+
+/** Unix seconds as "YYYY-MM-DD HH:MM UTC". */
+const utcMinute = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 
 export function MyReceipts({
   asset,
@@ -83,6 +95,23 @@ export function MyReceipts({
     query: { enabled: requests.length > 0, refetchInterval: 15_000 },
   });
 
+  /**
+   * STACK 5 ONLY, one read per receipt: `mintFee(id)` for a mint (a refund now returns the fee as
+   * well as the escrow) and `redeemPaid(id)` for a redemption (a claim can be an instalment).
+   * Disabled on stack 4, whose vault has neither mapping.
+   */
+  const reads5 = useReadContracts({
+    contracts: requests.map((f) => ({
+      address: vault,
+      abi: Stack5CertVaultABI,
+      chainId: CHAIN_ID,
+      functionName: f.kind === "MINT_REQUESTED" ? ("mintFee" as const) : ("redeemPaid" as const),
+      args: [BigInt(f.receiptId as string)] as const,
+    })),
+    query: { enabled: IS_STACK5 && requests.length > 0, refetchInterval: 15_000 },
+  });
+  const times5 = useStack5VaultTimes(asset);
+
   const rows = useMemo<Row[]>(() => {
     return requests.map((f, i) => {
       const id = BigInt(f.receiptId as string);
@@ -97,13 +126,27 @@ export function MyReceipts({
         .sort((a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex);
       const base = { kind: mint ? ("mint" as const) : ("redeem" as const), id, timeMs: f.timeMs, amount, events };
       if (!r || r.status !== "success") return { ...base, status: "reading chain…", tone: "wait", action: null };
+      const r5 = reads5.data?.[i];
+      const extra5 = IS_STACK5 && r5?.status === "success" ? (r5.result as bigint) : null;
       if (mint) {
-        const [, , settled, , requestedAt, refundStaged] = r.result as readonly [string, bigint, boolean, bigint, bigint, boolean, bigint];
+        const [, escrow, settled, , requestedAt, refundStaged] = r.result as readonly [string, bigint, boolean, bigint, bigint, boolean, bigint];
         const refunded = (history.mine ?? []).some((e) => e.kind === "MINT_REFUNDED" && e.vaultId === asset && e.receiptId === f.receiptId);
         if (settled) return { ...base, status: refunded ? "refunded to your wallet" : "certificates issued", tone: "done", action: null };
         const age = now / 1000 - Number(requestedAt);
         if (age < REFUND_OFFER_AFTER_SEC)
           return { ...base, status: "hedge opening · escrowed", tone: "wait", action: null };
+        if (IS_STACK5 && extra5 !== null) {
+          // STACK 5 (L-10): refundMint pays escrow + mintFee(id), i.e. everything deposited.
+          const back = fmtNum(fromCollateral(escrow + extra5), 2);
+          return {
+            ...base,
+            status: refundStaged
+              ? `refund staged · pays ${back} USDG back, fee included`
+              : `not filled · the keeper refunds ${back} USDG, fee included`,
+            tone: "open",
+            action: { kind: "refund", id, staged: refundStaged },
+          };
+        }
         return {
           ...base,
           status: refundStaged ? "refund staged · the keeper pays it back" : "not filled · the keeper refunds it",
@@ -111,11 +154,43 @@ export function MyReceipts({
           action: { kind: "refund", id, staged: refundStaged },
         };
       }
-      const [, , , , paid] = r.result as readonly [string, bigint, bigint, bigint, boolean];
+      const [, owed18, enqueuedAt, , paid] = r.result as readonly [string, bigint, bigint, bigint, boolean];
       if (paid) return { ...base, status: "claimed", tone: "done", action: null };
+      if (IS_STACK5) {
+        // STACK 5 (H-7): a claim pays what the vault holds and keeps the rest on the receipt.
+        // `owed18` is what the receipt was written for; the price cap can lower what is due, so the
+        // remainder is an upper bound and is labelled as one.
+        const paidSoFar = extra5 ?? 0n;
+        if (paidSoFar > 0n) {
+          const owed6 = owed18 / 10n ** 12n;
+          const rest = owed6 > paidSoFar ? owed6 - paidSoFar : 0n;
+          return {
+            ...base,
+            status: `part-paid · ${fmtNum(fromCollateral(paidSoFar), 2)} USDG paid, up to ${fmtNum(fromCollateral(rest), 2)} USDG outstanding`,
+            tone: "open",
+            action: { kind: "claim", id, staged: false, label: "Claim rest" },
+          };
+        }
+        // STACK 5 (H-1): no price observed since the request yet. The claim waits, and pays in
+        // full once QUEUED_PRICE_TIMEOUT has passed from the request, whatever the feed does.
+        const req = Number(enqueuedAt);
+        if (
+          times5.priceObservedAt !== null &&
+          times5.queuedPriceTimeout !== null &&
+          times5.priceObservedAt < req &&
+          now / 1000 < req + times5.queuedPriceTimeout
+        ) {
+          return {
+            ...base,
+            status: `waiting for a fresh price · pays in full from ${utcMinute(req + times5.queuedPriceTimeout)} at the latest`,
+            tone: "wait",
+            action: { kind: "claim", id, staged: false },
+          };
+        }
+      }
       return { ...base, status: "ready to claim once the collateral is back", tone: "open", action: { kind: "claim", id, staged: false } };
     });
-  }, [requests, reads.data, now, history.mine, asset]);
+  }, [requests, reads.data, reads5.data, times5.priceObservedAt, times5.queuedPriceTimeout, now, history.mine, asset]);
 
   const [open, setOpen] = useState<string | null>(null);
 
@@ -169,7 +244,7 @@ export function MyReceipts({
                   className="ml-auto flex items-center gap-2 border hairline-dark px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.08em] text-white transition-colors hover:bg-section-deep-2 disabled:pointer-events-none disabled:opacity-40"
                 >
                   {busy === row.id && <Loader2 size={11} className="animate-spin" />}
-                  {row.action.kind === "claim" ? "Claim" : "Refund now"}
+                  {row.action.label ?? (row.action.kind === "claim" ? "Claim" : "Refund now")}
                 </button>
               )}
               {open === `${row.kind}-${row.id}` && (

@@ -52,6 +52,27 @@ export const VENUE_SIM_ADDRESS: `0x${string}` | undefined = OPTIONAL.lighterSim;
 const TESTNET_FLAG: boolean = CHAIN.testnet;
 export const IS_TESTNET: boolean = TESTNET_FLAG;
 
+/**
+ * Which contract generation the bundle describes: 4 (live) or 5.
+ *
+ * WHY FROM THE BUNDLE. Stack 5 changes what the app must SEND (a mint relays a v2 mark, redeem and
+ * claim have new refusals, the staking pools are v2), so the choice cannot be a flag somebody flips
+ * in a component. The address book for a stack-5 deployment carries `"stack": 5`, and the generated
+ * `CHAIN` object is where the app reads facts about its deployment - so that is where the marker is
+ * read. Read through a cast for the reason `OptionalAddresses` gives: a bundle without the key must
+ * compile, and today's bundles have none. ABSENT MEANS 4: every existing bundle keeps its behaviour.
+ *
+ * NOTE FOR THE SWITCH. scripts/gen-frontend-abi.py does not emit this key yet. Stack-5 mode turns on
+ * only when the generator writes `stack: 5` into `CHAIN` (from the book's `stack`), which is the
+ * one-line generator change the stack-5 deploy needs on the front-end side.
+ */
+type StackMarker = { stack?: number };
+const BUNDLE_STACK: number | undefined = (CHAIN as StackMarker).stack;
+export const STACK: 4 | 5 = BUNDLE_STACK !== undefined && BUNDLE_STACK >= 5 ? 5 : 4;
+
+/** Stack-5 contracts: every stack-5 code path is behind this, and it is false on today's bundle. */
+export const IS_STACK5: boolean = STACK === 5;
+
 /** "Robinhood Chain Testnet" or "Robinhood Chain". */
 export const CHAIN_LABEL: string = CHAIN.name;
 

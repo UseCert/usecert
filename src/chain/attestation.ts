@@ -40,6 +40,85 @@ export interface SignedAttestation {
   deadline: number;
   attestSig: `0x${string}`;
   markSig: `0x${string}`;
+  /**
+   * STACK 5 ONLY - the v2 mark (CertOracle signature domain version "2"). See `markV2Of`.
+   * The signer in the contracts repo (deploy/bin/usecert-signer-mainnet.py, MARK_SIG_VERSION=2)
+   * sends these flat, next to `markPx18` / `markNonce` / `markSig`.
+   */
+  markSigVersion?: number;
+  markObservedAt?: number;
+  markDeadline?: number;
+  /** STACK 5 ONLY - the same v2 mark as one nested object, if the signer sends it that way. */
+  mark?: {
+    markPx18: string;
+    markNonce: number;
+    observedAt: number;
+    deadline: number;
+    signature: `0x${string}`;
+  };
+}
+
+/**
+ * The stack-5 mark relay's arguments: `setMarkPriceSigned(px18, nonce, observedAt, deadline, sig)`.
+ *
+ * `observedAt` is part of what was signed and is what the oracle stores as `markAt`, which
+ * `mintAllowed()` ages against `maxMarkAge`. Passed through exactly as signed, like the rest.
+ */
+export interface SignedMarkV2 {
+  px18: bigint;
+  nonce: bigint;
+  observedAt: bigint;
+  deadline: bigint;
+  signature: `0x${string}`;
+}
+
+const isHexSig = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x[0-9a-fA-F]+$/.test(v);
+const isUint = (v: unknown): boolean =>
+  (typeof v === "number" && Number.isSafeInteger(v) && v >= 0) || (typeof v === "string" && /^\d+$/.test(v));
+
+/**
+ * The v2 mark carried by one signed attestation, or null when it carries none.
+ *
+ * Two shapes are accepted, and nothing is inferred between them:
+ *  - nested: `mark: { markPx18, markNonce, observedAt, deadline, signature }`;
+ *  - flat, as the contracts repo's signer emits it: `markSigVersion: 2`, `markPx18`, `markNonce`,
+ *    `markObservedAt`, `markDeadline`, `markSig`.
+ * A v1 bundle (no `markSigVersion: 2`, no `mark`) returns null: its `markSig` signs a different
+ * struct and would revert `CertOracle_BadSignature` on a stack-5 oracle, so it is never relayed.
+ */
+export function markV2Of(a: SignedAttestation): SignedMarkV2 | null {
+  const n = a.mark;
+  if (n && isUint(n.markPx18) && isUint(n.markNonce) && isUint(n.observedAt) && isUint(n.deadline) && isHexSig(n.signature)) {
+    return {
+      px18: BigInt(n.markPx18),
+      nonce: BigInt(n.markNonce),
+      observedAt: BigInt(n.observedAt),
+      deadline: BigInt(n.deadline),
+      signature: n.signature,
+    };
+  }
+  if (
+    a.markSigVersion === 2 &&
+    isUint(a.markPx18) &&
+    isUint(a.markNonce) &&
+    isUint(a.markObservedAt) &&
+    isUint(a.markDeadline) &&
+    isHexSig(a.markSig)
+  ) {
+    return {
+      px18: BigInt(a.markPx18),
+      nonce: BigInt(a.markNonce),
+      observedAt: BigInt(a.markObservedAt as number),
+      deadline: BigInt(a.markDeadline as number),
+      signature: a.markSig,
+    };
+  }
+  return null;
+}
+
+/** As `isRelayable`, for the v2 mark's own deadline (the oracle caps it at observedAt + 60). */
+export function isMarkRelayable(m: SignedMarkV2, nowSec = Math.floor(Date.now() / 1000)): boolean {
+  return Number(m.deadline) - nowSec >= RELAY_HEADROOM_SEC;
 }
 
 interface SignerResponse {

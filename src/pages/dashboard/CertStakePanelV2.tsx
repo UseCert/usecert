@@ -2,31 +2,30 @@ import { useCallback, useMemo, useState } from "react";
 import { formatUnits, parseUnits } from "viem";
 import { usePublicClient, useReadContracts, useWriteContract } from "wagmi";
 import { ArrowUpRight, Loader2 } from "lucide-react";
-import { CHAIN_ID, IS_STACK5 } from "@/chain/deployment";
-import { CertificateABI } from "@/chain/contracts";
+import { CHAIN_ID } from "@/chain/deployment";
+import { CertificateABI, SHARED, TestUSDGABI } from "@/chain/contracts";
+import { Stack5CertStakingABI } from "@/chain/contracts.stack5";
 import { explorerAddressUrl, explorerTxUrl } from "@/chain/config";
-import {
-  CERT_STAKING_ADDRESS,
-  CERT_STAKING_DEPLOY_TX,
-  CERT_STAKING_V2_ADDRESS,
-  CERT_STAKING_V2_DEPLOY_TX,
-  CERT_TOKEN,
-  CertStakingABI,
-} from "@/chain/certStaking";
+import { CERT_TOKEN } from "@/chain/certStaking";
+import { decodeRevert } from "@/chain/useActions";
 import { useDashboard } from "./store";
 import { MicroLabel, Panel, Stagger } from "./ui";
 import { cn } from "@/lib/utils";
-import CertStakePanelV2 from "./CertStakePanelV2";
 
 /**
- * CERT staking: a share of the buyback fund's fee income, streamed in USDG. Not insurance -
- * staked CERT is never drawn. Every figure is a chain read of CertStaking. No APR is shown:
- * with rewards funded by hand and no fee routing live, an annualised rate would be a forecast
- * dressed as a fact.
+ * CERT staking, STACK 5: CertStaking v2. Rendered by CertStakePanel only on a stack-5 bundle AND
+ * once the v2 address is recorded in certStaking.ts; every other build shows v1.
+ *
+ * What v2 changes on this screen:
+ *  - `notifyRewardAmount` refuses a funding below `minNotify()` (CertStaking_BelowMinNotify), so
+ *    the funding form reads the minimum and will not send less;
+ *  - `exit()` with nothing staked just claims, so it is offered whenever there is a stake OR a
+ *    reward, as one transaction;
+ *  - `unallocated()` is a view that includes any stretch nobody was staked for.
+ * Still not insurance: staked CERT is never drawn. Every figure is a chain read of the contract.
  */
-const POOL = { address: CERT_STAKING_ADDRESS, abi: CertStakingABI, chainId: CHAIN_ID } as const;
-// Any ERC-20 ABI serves for CERT's balanceOf / allowance / approve; the certificate ABI is one.
 const CERT = { address: CERT_TOKEN, abi: CertificateABI, chainId: CHAIN_ID } as const;
+const USDG = { address: SHARED.collateral, abi: TestUSDGABI, chainId: CHAIN_ID } as const;
 const ZERO = "0x0000000000000000000000000000000000000000" as const;
 
 const cert = (v: bigint | undefined, dp = 2) =>
@@ -35,23 +34,17 @@ const usd = (v: bigint | undefined, dp = 2) =>
   v === undefined ? "—" : Number(formatUnits(v, 6)).toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: Math.max(dp, 2) });
 const when = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 
-/**
- * STACK 5: CertStaking v2 lives at its own address. Shown only on a stack-5 bundle and once that
- * address is recorded in certStaking.ts; every other build renders v1 below, unchanged.
- */
-export default function CertStakePanel() {
-  if (IS_STACK5 && CERT_STAKING_V2_ADDRESS) return <CertStakePanelV2 pool={CERT_STAKING_V2_ADDRESS} deployTx={CERT_STAKING_V2_DEPLOY_TX} />;
-  return <CertStakePanelV1 />;
-}
-
-function CertStakePanelV1() {
+export default function CertStakePanelV2({ pool, deployTx }: { pool: `0x${string}`; deployTx: `0x${string}` | undefined }) {
   const { address, connected, wrongNetwork, setWalletModalOpen, switchToUseCert, pushToast, settleToast, dismissToast, now } = useDashboard();
   const me = address ?? ZERO;
   const publicClient = usePublicClient({ chainId: CHAIN_ID });
   const { mutateAsync } = useWriteContract();
   const [amount, setAmount] = useState("");
+  const [fund, setFund] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<{ tone: "ok" | "warn"; text: string } | null>(null);
+
+  const POOL = { address: pool, abi: Stack5CertStakingABI, chainId: CHAIN_ID } as const;
 
   const reads = useReadContracts({
     contracts: [
@@ -64,7 +57,10 @@ function CertStakePanelV1() {
       { ...POOL, functionName: "balanceOf", args: [me] },
       { ...POOL, functionName: "earned", args: [me] },
       { ...CERT, functionName: "balanceOf", args: [me] },
-      { ...CERT, functionName: "allowance", args: [me, CERT_STAKING_ADDRESS] },
+      { ...CERT, functionName: "allowance", args: [me, pool] },
+      { ...POOL, functionName: "minNotify" },
+      { ...USDG, functionName: "balanceOf", args: [me] },
+      { ...USDG, functionName: "allowance", args: [me, pool] },
     ],
     query: { refetchInterval: 15_000 },
   });
@@ -72,7 +68,8 @@ function CertStakePanelV1() {
   const v = <T,>(i: number) => (r?.[i]?.status === "success" ? (r[i].result as T) : undefined);
   const total = v<bigint>(0), cap = v<bigint>(1), rate = v<bigint>(2), finish = v<bigint>(3);
   const remaining = v<bigint>(4), unallocated = v<bigint>(5), mine = v<bigint>(6), earned = v<bigint>(7);
-  const wallet = v<bigint>(8), allowance = v<bigint>(9);
+  const wallet = v<bigint>(8), allowance = v<bigint>(9), minNotify = v<bigint>(10);
+  const usdgWallet = v<bigint>(11), usdgAllowance = v<bigint>(12);
 
   const nowSec = Math.floor(now / 1000);
   const streaming = finish !== undefined && Number(finish) > nowSec && (rate ?? 0n) > 0n;
@@ -84,6 +81,13 @@ function CertStakePanelV1() {
       return -1n;
     }
   }, [amount]);
+  const fund6 = useMemo(() => {
+    try {
+      return fund.trim() === "" ? 0n : parseUnits(fund.trim(), 6);
+    } catch {
+      return -1n;
+    }
+  }, [fund]);
 
   const send = useCallback(
     async (label: string, request: Parameters<typeof mutateAsync>[0]) => {
@@ -100,7 +104,7 @@ function CertStakePanelV1() {
         return true;
       } catch (e) {
         dismissToast(t);
-        setNote({ tone: "warn", text: e instanceof Error ? e.message.split("\n")[0] : String(e) });
+        setNote({ tone: "warn", text: decodeRevert(e).message });
         return false;
       } finally {
         setBusy(null);
@@ -112,16 +116,30 @@ function CertStakePanelV1() {
   const onStake = async () => {
     if (amount18 <= 0n) return;
     if ((allowance ?? 0n) < amount18) {
-      if (!(await send("Approve CERT for staking", { ...CERT, functionName: "approve", args: [CERT_STAKING_ADDRESS, amount18] }))) return;
+      if (!(await send("Approve CERT for staking", { ...CERT, functionName: "approve", args: [pool, amount18] }))) return;
     }
     if (await send(`Stake ${amount} CERT`, { ...POOL, functionName: "stake", args: [amount18] })) setAmount("");
   };
   const onWithdraw = () => mine && send("Withdraw all staked CERT", { ...POOL, functionName: "withdraw", args: [mine] });
   const onClaim = () => send("Claim USDG reward", { ...POOL, functionName: "getReward" });
+  const onExit = () => send("Withdraw all and claim", { ...POOL, functionName: "exit" });
+  const onFund = async () => {
+    // The contract refuses less than minNotify; the button is disabled below it, and this is the
+    // same check again so a stale render cannot send a funding that can only revert.
+    if (fund6 <= 0n || minNotify === undefined || fund6 < minNotify) return;
+    if ((usdgAllowance ?? 0n) < fund6) {
+      if (!(await send("Approve USDG for the reward stream", { ...USDG, functionName: "approve", args: [pool, fund6] }))) return;
+    }
+    if (await send(`Fund ${fund} USDG of rewards`, { ...POOL, functionName: "notifyRewardAmount", args: [fund6] })) setFund("");
+  };
 
   const gate = !connected ? "connect" : wrongNetwork ? "network" : null;
   const room = cap !== undefined && total !== undefined ? (cap > total ? cap - total : 0n) : undefined;
   const stakeBlocked = gate !== null || amount18 <= 0n || (room !== undefined && amount18 > room) || (wallet !== undefined && amount18 > wallet);
+  const belowMin = fund6 > 0n && minNotify !== undefined && fund6 < minNotify;
+  const fundBlocked =
+    gate !== null || fund6 <= 0n || minNotify === undefined || fund6 < minNotify || (usdgWallet !== undefined && fund6 > usdgWallet);
+  const canExit = (mine ?? 0n) > 0n || (earned ?? 0n) > 0n;
 
   const Btn = ({ label, onClick, disabled, id }: { label: string; onClick: () => void; disabled?: boolean; id: string }) => (
     <button
@@ -153,13 +171,13 @@ function CertStakePanelV1() {
         </div>
         <p className="flex flex-wrap gap-2 font-mono text-[10px] uppercase tracking-[0.08em]">
           <span className="border border-green-bright/40 px-2 py-1 text-green-bright">live on mainnet</span>
-          <span className="border border-warn/40 px-2 py-1 text-warn">unaudited · capped at {cert(cap, 0)} CERT</span>
+          <span className="border border-warn/40 px-2 py-1 text-warn">{`unaudited · capped at ${cert(cap, 0)} CERT`}</span>
         </p>
       </div>
       <p className="mt-5 max-w-[82ch] text-[14px] leading-[1.6] text-silver">
         Stake CERT and receive a share of the buyback fund&apos;s income: the 20% of protocol fees in the 70/20/5/5 split,
-        paid in USDG and streamed to stakers pro rata over 7 days. This is not insurance: staked CERT is never drawn to
-        cover a loss, and you can withdraw at any time.
+        paid in USDG and streamed to stakers pro rata. This is not insurance: staked CERT is never drawn to cover a loss,
+        and you can withdraw at any time.
       </p>
 
       <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -197,23 +215,50 @@ function CertStakePanelV1() {
             <div className="mt-3 flex flex-wrap gap-2">
               <Btn id="Claim USDG reward" label={`Claim ${usd(earned, 4)} USDG`} onClick={() => void onClaim()} disabled={gate !== null || !earned} />
               <Btn id="Withdraw all staked CERT" label="Withdraw all CERT" onClick={() => void onWithdraw()} disabled={gate !== null || !mine} />
+              <Btn id="Withdraw all and claim" label="Exit: withdraw all and claim" onClick={() => void onExit()} disabled={gate !== null || !canExit} />
             </div>
             <p className="mt-2 font-mono text-[10px] uppercase leading-[1.6] tracking-[0.06em] text-white-60/80">
-              No cooldown: withdrawing keeps what you have already earned, and it stays claimable.
+              No cooldown: withdrawing keeps what you have already earned, and it stays claimable. Exit does both in one transaction; with nothing staked it just claims.
             </p>
           </Panel>
         </Stagger>
       </div>
 
+      <Stagger index={15}>
+        <Panel className="mt-3 p-5">
+          <MicroLabel>Fund the reward stream</MicroLabel>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <input
+              value={fund}
+              onChange={(e) => setFund(e.target.value.replace(/[^\d.]/g, ""))}
+              inputMode="decimal"
+              placeholder="USDG"
+              className="min-w-0 flex-1 border hairline-dark bg-[#0d0f0d] px-3 py-2 font-mono text-[12px] tabular-nums text-white outline-none placeholder:text-white-60/40 focus:border-green-bright"
+            />
+            {gate === null && (
+              <Btn
+                id={`Fund ${fund} USDG of rewards`}
+                label={(usdgAllowance ?? 0n) < fund6 && fund6 > 0n ? "Approve & fund" : "Fund"}
+                onClick={() => void onFund()}
+                disabled={fundBlocked}
+              />
+            )}
+          </div>
+          <p className={cn("mt-2 font-mono text-[10px] uppercase leading-[1.6] tracking-[0.06em]", belowMin ? "text-warn" : "text-white-60/80")}>
+            {`Minimum funding ${usd(minNotify)} USDG; the contract refuses less. `}
+            Anyone can pay rewards in. A funding during a running stream is spread over the time left and never moves its end.
+          </p>
+        </Panel>
+      </Stagger>
+
       {note && <p className={cn("mt-3 break-all font-mono text-[11px]", note.tone === "ok" ? "text-green-bright" : "text-warn")}>{note.text}</p>}
 
-      <Stagger index={15}>
+      <Stagger index={16}>
         <Panel className="mt-3 p-5">
           <MicroLabel>Rewards, stated plainly</MicroLabel>
           <p className="mt-3 max-w-[90ch] text-[13px] leading-[1.6] text-silver">
-            Rewards exist only when someone pays them in. Anyone can fund the pool, and the buyback fund&apos;s share of fees
-            will once fee routing (K2, a new vault version) is live; until then there is no automatic income. No annual rate is
-            shown, because with rewards funded by hand any such figure would be a forecast, not a fact. There are no token
+            Rewards exist only when someone pays them in: the buyback fund&apos;s share of the vaults&apos; fees is forwarded here,
+            and anyone can add to it. No annual rate is shown, because it would be a forecast, not a fact. There are no token
             emissions. Reward funded while nobody is staked is not lost: it is carried into the next stream
             {unallocated !== undefined && unallocated > 0n ? ` (${usd(unallocated, 4)} USDG carried now)` : ""}.
           </p>
@@ -221,15 +266,17 @@ function CertStakePanelV1() {
       </Stagger>
 
       <p className="mt-6 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[10px] uppercase tracking-[0.06em] text-white-60">
-        <a href={explorerAddressUrl(CERT_STAKING_ADDRESS)} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 underline decoration-white/20 underline-offset-2 hover:text-green-bright">
-          staking contract {CERT_STAKING_ADDRESS.slice(0, 10)}… <ArrowUpRight size={10} />
+        <a href={explorerAddressUrl(pool)} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 underline decoration-white/20 underline-offset-2 hover:text-green-bright">
+          staking contract {pool.slice(0, 10)}… <ArrowUpRight size={10} />
         </a>
-        <a href={`https://sourcify.dev/#/lookup/${CERT_STAKING_ADDRESS}`} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 underline decoration-white/20 underline-offset-2 hover:text-green-bright">
-          Sourcify: exact match <ArrowUpRight size={10} />
+        <a href={`https://sourcify.dev/#/lookup/${pool}`} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 underline decoration-white/20 underline-offset-2 hover:text-green-bright">
+          Sourcify lookup <ArrowUpRight size={10} />
         </a>
-        <a href={explorerTxUrl(CERT_STAKING_DEPLOY_TX)} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 underline decoration-white/20 underline-offset-2 hover:text-green-bright">
-          deployment tx <ArrowUpRight size={10} />
-        </a>
+        {deployTx && (
+          <a href={explorerTxUrl(deployTx)} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 underline decoration-white/20 underline-offset-2 hover:text-green-bright">
+            deployment tx <ArrowUpRight size={10} />
+          </a>
+        )}
       </p>
     </section>
   );

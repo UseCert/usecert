@@ -27,7 +27,9 @@
 
 import { useEffect, useState } from "react";
 
+import { markV2Of, type SignedAttestation } from "./attestation";
 import { SHARED } from "./contracts";
+import { IS_STACK5 } from "./deployment";
 
 const ENDPOINT = "/api/attestations";
 
@@ -92,6 +94,9 @@ export function useSignerFreshness(): SignerFreshness {
         const vaults = new Set(
           body.attestations
             .filter((a) => a.registry?.toLowerCase() === wanted)
+            // STACK 5: a mint also needs a v2 mark (`mintAllowed()` ages it), so a vault whose
+            // entry carries no v2 mark cannot be refreshed into a mintable state and is not counted.
+            .filter((a) => !IS_STACK5 || markV2Of(a as unknown as SignedAttestation) !== null)
             .map((a) => a.vault.toLowerCase()),
         );
         setState({ available: vaults.size > 0, vaults, batchAgeSec: body.ageSec ?? null });

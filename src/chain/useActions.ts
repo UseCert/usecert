@@ -29,18 +29,26 @@ import {
   BaseError,
   ContractFunctionRevertedError,
   UserRejectedRequestError,
+  decodeEventLog,
 } from "viem";
 
 import { CHAIN_ID } from "./config";
-import { CHAIN_LABEL, FAUCET_ADDRESS } from "./deployment";
+import { CHAIN_LABEL, FAUCET_ADDRESS, IS_STACK5 } from "./deployment";
 import {
   attestationFor,
   fetchSignedAttestations,
+  isMarkRelayable,
   isRelayable,
+  markV2Of,
   REFRESH_AT_AGE_SEC,
 } from "./attestation";
 import {
-  CertOracleABI,
+  Stack4MarkRelayABI,
+  Stack5CertOracleABI,
+  Stack5CertVaultABI,
+  Stack5SolvencyRegistryABI,
+} from "./contracts.stack5";
+import {
   CertVaultABI,
   CertificateABI,
   SHARED,
@@ -52,6 +60,14 @@ import { scaleCollateralTo18, toCert, toCollateral } from "./units";
 import { useVaultConfig, vaultAddresses, type ChainVaultId } from "./useVaults";
 
 export type TxHash = `0x${string}`;
+
+/**
+ * The ABI every vault WRITE is sent with. Stack 5's where stack 5 is deployed: same functions and
+ * arguments, but it carries the new custom errors (CertVault_InstantPriceTooOld,
+ * CertVault_AwaitingFreshPrice, CertVault_OwnerGracePeriod, ...), and viem can only name a revert
+ * that is in the ABI it was sent with. On stack 4 this is contracts.ts's ABI, exactly as before.
+ */
+const VAULT_WRITE_ABI = IS_STACK5 ? Stack5CertVaultABI : CertVaultABI;
 
 /* ───────────────────────────────────────────────────────────── revert decoding */
 
@@ -241,7 +257,130 @@ const REVERT_COPY: Record<string, { message: string; kind: RevertKind }> = {
   ERC20InsufficientBalance: { message: "Insufficient balance for this amount.", kind: "user" },
   SafeERC20FailedOperation: { message: "The token transfer failed.", kind: "user" },
 
+  /* ---- stack 5: vault ---------------------------------------------------- */
+  /* Routing, not failure: the price is older than an hour (every weekend, when the stock feeds
+   * stop), so the instant path refuses it and the queue - always open - is the way out. */
+  CertVault_InstantPriceTooOld: {
+    message:
+      "The price is more than an hour old, which happens every weekend when the stock feeds stop, so instant redemption is closed. Your redemption can go through the queue instead: requestRedeem is always open, and so is force exit.",
+    kind: "not-an-error",
+  },
+  CertVault_AwaitingFreshPrice: {
+    message:
+      "Waiting for a fresh price: no price has been observed since this redemption was requested. Retryable and never permanent. The claim pays as soon as a new price arrives, or in full once 4 days have passed since the request.",
+    kind: "retryable",
+  },
+  CertVault_OwnerGracePeriod: {
+    message:
+      "The price cap would lower this payout, so for the first day after the request only the receipt's owner can claim it. The owner can claim now; anyone can after that day.",
+    kind: "user",
+  },
+  CertVault_RebalanceTooSoon: {
+    message: "The vault was rebalanced a moment ago. Nothing to do yet — try again later.",
+    kind: "no-op",
+  },
+  CertVault_RebalanceBudgetSpent: {
+    message: "The vault has used its rebalancing budget for the last 24 hours. Nothing to do until it refills.",
+    kind: "no-op",
+  },
+  CertVault_AttestationPredatesLastOrder: {
+    message:
+      "The latest attestation predates the vault's last order, so a rebalance would act on old figures. Try again after the next attestation.",
+    kind: "no-op",
+  },
+
+  /* ---- stack 5: relays -------------------------------------------------- */
+  CertOracle_ObservationWentBackwards: {
+    message:
+      "A newer mark price is already on chain, so this older one was refused. Nothing was lost — the oracle already has a fresher mark.",
+    kind: "no-op",
+  },
+  CertOracle_ObservationInFuture: {
+    message:
+      "The mark price signature is timestamped ahead of the chain's clock, so the oracle refused it. Try again in a few seconds.",
+    kind: "retryable",
+  },
+  CertOracle_AttesterDisabled: {
+    message:
+      "The mark price attester has been switched off by governance, so no signed mark can be relayed and minting is closed. Redemption is unaffected and still works.",
+    kind: "user",
+  },
+  SolvencyRegistry_BatchGap: {
+    message:
+      "The attestation's batch number does not follow the one on chain, so it was refused. A new batch is signed every few seconds — try again.",
+    kind: "retryable",
+  },
+  SolvencyRegistry_ObservationNotAdvanced: {
+    message:
+      "An attestation at least as new is already on chain, so this one was refused. The backing is fresh.",
+    kind: "no-op",
+  },
+  SolvencyRegistry_AttesterDisabled: {
+    message:
+      "The solvency attester has been switched off by governance, so no attestation can be relayed and minting is closed. Redemption is unaffected and still works.",
+    kind: "user",
+  },
+
+  /* ---- stack 5: insurance pool (InsuranceStaking v2) --------------------- */
+  InsuranceStaking_AboveDepositCap: {
+    message:
+      "This deposit would take the pool's principal above its cap. Deposit at most the room shown under the cap.",
+    kind: "user",
+  },
+  InsuranceStaking_DrawPending: {
+    message:
+      "A draw is pending, so deposits and withdrawals are paused until it is executed, cancelled or expires.",
+    kind: "user",
+  },
+  InsuranceStaking_CooldownNotReady: {
+    message: "Your withdrawal is still in its cooldown. It can be completed once the window opens.",
+    kind: "user",
+  },
+  InsuranceStaking_WithdrawWindowClosed: {
+    message:
+      "Your withdrawal window has closed. Cancel the request to get the shares back in your wallet, or request again to restart the cooldown.",
+    kind: "user",
+  },
+  InsuranceStaking_ExceedsCooldownShares: {
+    message: "That is more than the shares in your withdrawal request.",
+    kind: "user",
+  },
+  InsuranceStaking_ExceedsBalance: {
+    message: "That is more shares than you hold.",
+    kind: "user",
+  },
+  InsuranceStaking_ZeroAmount: { message: "Enter an amount above zero.", kind: "user" },
+  InsuranceStaking_EscrowedShares: {
+    message:
+      "Shares in a withdrawal request are held in escrow and cannot be transferred. Cancel the request to get them back.",
+    kind: "user",
+  },
+  ERC4626ExceededMaxDeposit: {
+    message: "This deposit is above what the pool accepts right now (its cap, or a pending draw).",
+    kind: "user",
+  },
+  ERC4626ExceededMaxRedeem: {
+    message: "Only the shares in an open withdrawal window can be withdrawn.",
+    kind: "user",
+  },
+
+  /* ---- stack 5: CERT staking (CertStaking v2) ---------------------------- */
+  CertStaking_BelowMinNotify: {
+    message: "This funding is below the pool's minimum. Send at least the minimum shown.",
+    kind: "user",
+  },
+  CertStaking_AboveStakeCap: {
+    message: "This stake would take the pool above its cap. Stake at most the room shown.",
+    kind: "user",
+  },
+  CertStaking_InsufficientStake: { message: "That is more CERT than you have staked.", kind: "user" },
+  CertStaking_ZeroAmount: { message: "Enter an amount above zero.", kind: "user" },
+
   /* ---- should be unreachable from a UI ---------------------------------- */
+  CertVault_OnlySettler: {
+    message: "That is a settler-only action and cannot be called from a wallet.",
+    kind: "operator-only",
+  },
   CertVault_OnlyGovernance: {
     message: "That is a governance-only action and cannot be called from a wallet.",
     kind: "operator-only",
@@ -383,9 +522,24 @@ export type RedeemResult =
   | { status: "needs-queued"; reason: DecodedRevert };
 
 export type ClaimResult =
-  | { status: "claimed"; hash: TxHash }
+  | {
+      status: "claimed";
+      hash: TxHash;
+      /** STACK 5: collateral this claim paid (6 dp), from its own `RedeemClaimed` event. */
+      paid?: bigint | null;
+      /**
+       * STACK 5: still due after this claim (6 dp), from `RedeemClaimOutstanding`. Above zero means
+       * the claim was an instalment: the receipt stays open and can be claimed again.
+       */
+      outstanding?: bigint | null;
+    }
   /** Retryable and never terminal — the receipt stays claimable forever. */
-  | { status: "awaiting-settlement"; retryable: true; reason: DecodedRevert };
+  | { status: "awaiting-settlement"; retryable: true; reason: DecodedRevert }
+  /**
+   * STACK 5: `CertVault_AwaitingFreshPrice`. No price observed since the request yet. Retryable,
+   * and bounded: from `paysInFullAt` (unix seconds, request + 4 days) the claim pays in full.
+   */
+  | { status: "awaiting-price"; retryable: true; reason: DecodedRevert; paysInFullAt: number | null };
 
 /* ──────────────────────────────────────────────────────────────────── the hook */
 
@@ -498,7 +652,7 @@ export function useCertActions(id: ChainVaultId): CertActions {
       confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
-        abi: CertVaultABI,
+        abi: VAULT_WRITE_ABI,
         functionName: "mintInstant",
         args: [toCollateral(amountInput)],
       }),
@@ -510,7 +664,7 @@ export function useCertActions(id: ChainVaultId): CertActions {
       confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
-        abi: CertVaultABI,
+        abi: VAULT_WRITE_ABI,
         functionName: "requestMint",
         args: [toCollateral(amountInput)],
       }),
@@ -573,8 +727,8 @@ export function useCertActions(id: ChainVaultId): CertActions {
 
     // Read the age first. Most mints need no relay at all - any other user's mint in the last
     // four minutes already paid for this one's freshness - and a needless relay is a wallet
-    // prompt and a gas charge for nothing.
-    if (await registryIsFresh()) return { status: "not-needed" };
+    // prompt and a gas charge for nothing. (Stack 5 asks about the mark too; see below.)
+    if (!IS_STACK5 && (await registryIsFresh())) return { status: "not-needed" };
 
     /**
      * Send one transaction and report whether the CHAIN accepted it.
@@ -598,6 +752,113 @@ export function useCertActions(id: ChainVaultId): CertActions {
       return { ok: receipt.status === "success", hash };
     };
 
+    /* ------------------------------------------------------------------- stack 5 */
+
+    if (IS_STACK5) {
+      /**
+       * STACK 5: the MARK must be fresh too, not only the registry.
+       *
+       * `CertOracle.mintAllowed()` is false once `block.timestamp - markAt > maxMarkAge`, and
+       * `markAt` is the signed `observedAt`, never the relay's block time. So an idle protocol
+       * wakes up with a stale mark as well as a stale attestation, and a mint that refreshes only
+       * the registry reverts `CertVault_MintPaused`. Both halves are judged on chain state, aged
+       * against the CHAIN's clock (`markAt` is chain-comparable; the reader's clock is not).
+       */
+      const readMark = async (): Promise<MarkState> => {
+        const [markAt, maxMarkAge, nonce, block] = await Promise.all([
+          publicClient.readContract({ address: mirror.certOracle, abi: Stack5CertOracleABI, functionName: "markAt" }),
+          publicClient.readContract({ address: mirror.certOracle, abi: Stack5CertOracleABI, functionName: "maxMarkAge" }),
+          publicClient.readContract({ address: mirror.certOracle, abi: Stack5CertOracleABI, functionName: "markNonce" }),
+          publicClient.getBlock({ blockTag: "latest" }),
+        ]);
+        return { markAt: markAt as bigint, maxMarkAge: maxMarkAge as bigint, nonce: nonce as bigint, now: block.timestamp };
+      };
+
+      const attempt5 = async (): Promise<RefreshOutcome> => {
+        const batch = await fetchSignedAttestations();
+        const a = attestationFor(batch, mirror.vault);
+        if (!a) return { status: "unavailable", reason: "no-bundle" };
+        const [regFresh, mark] = await Promise.all([registryIsFresh(), readMark()]);
+        const markOk = markIsFresh5(mark);
+        if (regFresh && markOk) return { status: "already-fresh" };
+
+        // The v2 mark the signer served, relayed only if it is NEWER than the oracle's own: a later
+        // observation and a later nonce, or the oracle refuses it (ObservationWentBackwards /
+        // StaleNonce) and the wallet prompt was for nothing. And only if it is young enough that
+        // relaying it leaves time to send the mint behind it.
+        const m = markV2Of(a);
+        const markNewer = m !== null && m.observedAt > mark.markAt && m.nonce > mark.nonce;
+        const markUseful = m !== null && m.observedAt + mark.maxMarkAge >= mark.now + markMargin5(mark.maxMarkAge);
+        if (!markOk && (!markNewer || !markUseful)) return { status: "unavailable", reason: "no-mark" };
+        const relayMark = m !== null && markNewer && markUseful && isMarkRelayable(m);
+        if (!markOk && !relayMark) return { status: "unavailable", reason: "expiring" };
+        if (!regFresh && !isRelayable(a)) return { status: "unavailable", reason: "expiring" };
+
+        let markHash: TxHash | null = null;
+        let sentOk = false;
+        if (relayMark && m !== null) {
+          const sent = await send({
+            chainId: CHAIN_ID,
+            // PINNED to the bundled mirror, never taken from the payload.
+            address: mirror.certOracle,
+            abi: Stack5CertOracleABI,
+            functionName: "setMarkPriceSigned",
+            args: [m.px18, m.nonce, m.observedAt, m.deadline, m.signature],
+          });
+          markHash = sent.hash;
+          sentOk = sent.ok;
+          // A racing relayer landing first (StaleNonce, ObservationWentBackwards) is a success if
+          // the chain is now fresh. Asked of the chain, not of the error.
+          if (!sent.ok && !markOk && !markIsFresh5(await readMark())) {
+            return { status: "unavailable", reason: "race-lost" };
+          }
+        }
+
+        let attestationHash: TxHash | null = null;
+        if (!regFresh) {
+          const sent = await send({
+            chainId: CHAIN_ID,
+            address: SHARED.solvencyRegistry,
+            abi: Stack5SolvencyRegistryABI,
+            functionName: "attestSigned",
+            args: [
+              a.vault,
+              BigInt(a.batchId),
+              BigInt(a.notional18),
+              BigInt(a.margin18),
+              BigInt(a.openInterest18),
+              BigInt(a.observedAt),
+              BigInt(a.deadline),
+              a.attestSig,
+            ],
+          });
+          attestationHash = sent.hash;
+          sentOk = sentOk || sent.ok;
+          if (!sent.ok && !(await registryIsFresh())) return { status: "unavailable", reason: "race-lost" };
+        }
+
+        // Ground truth for both halves before the mint is allowed to go out behind them.
+        const [regNow, markNow] = await Promise.all([registryIsFresh(), readMark()]);
+        if (!regNow || !markIsFresh5(markNow)) return { status: "unavailable", reason: "race-lost" };
+        return sentOk
+          ? { status: "refreshed", hashes: { mark: markHash, attestation: attestationHash } }
+          : { status: "already-fresh" };
+      };
+
+      const [reg0, mark0] = await Promise.all([registryIsFresh(), readMark()]);
+      if (reg0 && markIsFresh5(mark0)) return { status: "not-needed" };
+      const first5 = await attempt5();
+      if (first5.status !== "unavailable" || first5.reason === "no-bundle" || first5.reason === "no-mark") {
+        return first5;
+      }
+      // ONE retry on a newly fetched bundle, exactly as stack 4 does.
+      const [reg1, mark1] = await Promise.all([registryIsFresh(), readMark()]);
+      if (reg1 && markIsFresh5(mark1)) return { status: "already-fresh" };
+      return attempt5();
+    }
+
+    /* ------------------------------------------------------------------- stack 4 */
+
     /** One full attempt on a freshly fetched bundle. */
     const attempt = async (): Promise<RefreshOutcome> => {
       const batch = await fetchSignedAttestations();
@@ -614,7 +875,7 @@ export function useCertActions(id: ChainVaultId): CertActions {
       let mark: TxHash | null = null;
       const onChainNonce = (await publicClient.readContract({
         address: mirror.certOracle,
-        abi: CertOracleABI,
+        abi: Stack4MarkRelayABI,
         functionName: "markNonce",
       })) as bigint;
 
@@ -623,7 +884,7 @@ export function useCertActions(id: ChainVaultId): CertActions {
           chainId: CHAIN_ID,
           // PINNED to the bundled mirror, exactly as the registry is below.
           address: mirror.certOracle,
-          abi: CertOracleABI,
+          abi: Stack4MarkRelayABI,
           functionName: "setMarkPriceSigned",
           args: [BigInt(a.markPx18), BigInt(a.markNonce), BigInt(a.deadline), a.markSig],
         });
@@ -696,6 +957,17 @@ export function useCertActions(id: ChainVaultId): CertActions {
       if (refresh.status === "unavailable") {
         throw new Error(REFRESH_FAILURE_COPY[refresh.reason]);
       }
+      // STACK 5: the form lets a mint through while the ONLY thing closing `mintAllowed()` is a
+      // stale mark, because this call refreshes it. So ask the oracle again now that the mark is
+      // fresh, and do not send a mint it would refuse (the feed may be stale, or out of band).
+      if (IS_STACK5 && publicClient) {
+        const allowed = (await publicClient.readContract({
+          address: mirror.certOracle,
+          abi: Stack5CertOracleABI,
+          functionName: "mintAllowed",
+        })) as boolean;
+        if (!allowed) throw new Error(MINT_STILL_CLOSED_COPY);
+      }
 
       const amountIn6 = toCollateral(amountInput);
       // A keeper-mode vault cannot hedge an instant mint (see VaultConfigView.keeperHedging):
@@ -705,8 +977,29 @@ export function useCertActions(id: ChainVaultId): CertActions {
       }
       return { status: "requested", hash: await requestMint(amountInput) };
     },
-    [cfg?.instantCap18, cfg?.keeperHedging, mintInstant, publicClient, refreshAttestationIfStale, requestMint],
+    [cfg?.instantCap18, cfg?.keeperHedging, mintInstant, mirror.certOracle, publicClient, refreshAttestationIfStale, requestMint],
   );
+
+  /**
+   * STACK 5: would `redeemInstant` refuse the current price as older than an hour?
+   * Uses the same inputs as the contract - `pxUnguarded()`'s observation time, the vault's own
+   * `INSTANT_MAX_PRICE_AGE` and the chain's clock. A failed read answers false and leaves the
+   * decision to the contract, whose refusal is also routed to the queue (see redeemInstant).
+   */
+  const instantPriceTooOld5 = useCallback(async (): Promise<boolean> => {
+    if (!IS_STACK5 || !publicClient) return false;
+    try {
+      const [px, maxAge, block] = await Promise.all([
+        publicClient.readContract({ address: mirror.certOracle, abi: Stack5CertOracleABI, functionName: "pxUnguarded" }),
+        publicClient.readContract({ address: mirror.vault, abi: Stack5CertVaultABI, functionName: "INSTANT_MAX_PRICE_AGE" }),
+        publicClient.getBlock({ blockTag: "latest" }),
+      ]);
+      const observedAt = (px as readonly [bigint, bigint])[1];
+      return observedAt + (maxAge as bigint) < block.timestamp;
+    } catch {
+      return false;
+    }
+  }, [mirror.certOracle, mirror.vault, publicClient]);
 
   const redeemInstant = useCallback(
     async (certInput: string): Promise<RedeemResult> => {
@@ -714,14 +1007,15 @@ export function useCertActions(id: ChainVaultId): CertActions {
         const hash = await confirmed({
           chainId: CHAIN_ID,
           address: mirror.vault,
-          abi: CertVaultABI,
+          abi: VAULT_WRITE_ABI,
           functionName: "redeemInstant",
           args: [toCert(certInput)],
         });
         return { status: "instant", hash };
       } catch (err) {
-        // The fast path declining is a state, not a failure.
-        if (isUseQueuedRedeem(err)) {
+        // The fast path declining is a state, not a failure. Stack 5 adds a second way to
+        // decline: a price older than an hour (a price-age check lost to the clock).
+        if (isUseQueuedRedeem(err) || (IS_STACK5 && revertName(err) === "CertVault_InstantPriceTooOld")) {
           return { status: "needs-queued", reason: decodeRevert(err) };
         }
         throw err;
@@ -735,7 +1029,7 @@ export function useCertActions(id: ChainVaultId): CertActions {
       confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
-        abi: CertVaultABI,
+        abi: VAULT_WRITE_ABI,
         functionName: "requestRedeem",
         args: [toCert(certInput)],
       }),
@@ -753,11 +1047,17 @@ export function useCertActions(id: ChainVaultId): CertActions {
       // Keeper mode posts nearly all of a mint's escrow to the venue, so the vault's own float
       // cannot pay an instant exit; the queue closes the hedge on chain and pays by claim.
       if (!cfg?.keeperHedging && routeRedeem(toCert(certInput), cap) === "instant") {
+        // STACK 5: redeemInstant refuses a price older than INSTANT_MAX_PRICE_AGE (every
+        // weekend). Checked here, before the wallet, so the holder is offered the queue instead
+        // of a prompt for a transaction that can only revert.
+        if (IS_STACK5 && (await instantPriceTooOld5())) {
+          return { status: "needs-queued", reason: instantPriceTooOldReason() };
+        }
         return redeemInstant(certInput);
       }
       return { status: "queued", hash: await requestRedeem(certInput) };
     },
-    [cfg?.instantCap18, cfg?.keeperHedging, redeemInstant, requestRedeem],
+    [cfg?.instantCap18, cfg?.keeperHedging, instantPriceTooOld5, redeemInstant, requestRedeem],
   );
 
   const redeemWithFallback = useCallback(
@@ -775,7 +1075,7 @@ export function useCertActions(id: ChainVaultId): CertActions {
       confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
-        abi: CertVaultABI,
+        abi: VAULT_WRITE_ABI,
         functionName: "forceExit",
         args: [toCert(certInput)],
       }),
@@ -788,20 +1088,63 @@ export function useCertActions(id: ChainVaultId): CertActions {
         const hash = await confirmed({
           chainId: CHAIN_ID,
           address: mirror.vault,
-          abi: CertVaultABI,
+          // Stack 5's ABI where stack 5 is deployed, so its new refusals decode by name.
+          abi: VAULT_WRITE_ABI,
           functionName: "claimRedeem",
           args: [receiptId],
         });
-        return { status: "claimed", hash };
+        if (!IS_STACK5 || !publicClient) return { status: "claimed", hash };
+        // STACK 5: a claim pays min(due, what the vault holds), so it may be an instalment. What
+        // it paid and what is still due are in THIS transaction's own events.
+        let paid: bigint | null = null;
+        let outstanding: bigint | null = 0n;
+        try {
+          const rc = await publicClient.getTransactionReceipt({ hash });
+          for (const log of rc.logs) {
+            if (log.address.toLowerCase() !== mirror.vault.toLowerCase()) continue;
+            try {
+              const ev = decodeEventLog({ abi: Stack5CertVaultABI, data: log.data, topics: log.topics });
+              if (ev.eventName === "RedeemClaimed") paid = (ev.args as { amountOut: bigint }).amountOut;
+              if (ev.eventName === "RedeemClaimOutstanding") outstanding = (ev.args as { stillDue: bigint }).stillDue;
+            } catch {
+              // not one of the vault's events
+            }
+          }
+        } catch {
+          outstanding = null;
+        }
+        return { status: "claimed", hash, paid, outstanding };
       } catch (err) {
         // Retryable, never terminal. Do not mark the receipt failed.
         if (isAwaitingSettlement(err)) {
           return { status: "awaiting-settlement", retryable: true, reason: decodeRevert(err) };
         }
+        // STACK 5: waiting for a price observed after the request. Bounded: in full after 4 days.
+        if (IS_STACK5 && revertName(err) === "CertVault_AwaitingFreshPrice") {
+          let paysInFullAt: number | null = null;
+          if (publicClient) {
+            try {
+              const [r, timeout] = await Promise.all([
+                publicClient.readContract({
+                  address: mirror.vault,
+                  abi: Stack5CertVaultABI,
+                  functionName: "redeemReceipts",
+                  args: [receiptId],
+                }),
+                publicClient.readContract({ address: mirror.vault, abi: Stack5CertVaultABI, functionName: "QUEUED_PRICE_TIMEOUT" }),
+              ]);
+              const enqueuedAt = (r as readonly [string, bigint, bigint, bigint, boolean])[2];
+              paysInFullAt = Number(enqueuedAt + (timeout as bigint));
+            } catch {
+              paysInFullAt = null;
+            }
+          }
+          return { status: "awaiting-price", retryable: true, reason: decodeRevert(err), paysInFullAt };
+        }
         throw err;
       }
     },
-    [confirmed, mutateAsync, mirror.vault],
+    [confirmed, mutateAsync, mirror.vault, publicClient],
   );
 
   const stageRefund = useCallback(
@@ -809,7 +1152,7 @@ export function useCertActions(id: ChainVaultId): CertActions {
       confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
-        abi: CertVaultABI,
+        abi: VAULT_WRITE_ABI,
         functionName: "stageRefund",
         args: [receiptId],
       }),
@@ -821,7 +1164,7 @@ export function useCertActions(id: ChainVaultId): CertActions {
       confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
-        abi: CertVaultABI,
+        abi: VAULT_WRITE_ABI,
         functionName: "refundMint",
         args: [receiptId],
       }),
@@ -833,7 +1176,7 @@ export function useCertActions(id: ChainVaultId): CertActions {
       confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
-        abi: CertVaultABI,
+        abi: VAULT_WRITE_ABI,
         functionName: "recallMargin",
         args: [],
       }),
@@ -845,7 +1188,7 @@ export function useCertActions(id: ChainVaultId): CertActions {
       confirmed({
         chainId: CHAIN_ID,
         address: mirror.vault,
-        abi: CertVaultABI,
+        abi: VAULT_WRITE_ABI,
         functionName: "rebalance",
         args: [],
       }),
@@ -904,7 +1247,12 @@ export type RefreshFailure =
   /** Every bundle offered was too close to its deadline to survive the relays. */
   | "expiring"
   /** Two attempts were relayed and both failed, and the chain is still stale. */
-  | "race-lost";
+  | "race-lost"
+  /**
+   * STACK 5: the oracle's mark is too old to mint against and the signer served no v2 mark newer
+   * than it (or none young enough to leave time for the mint).
+   */
+  | "no-mark";
 
 export interface RelayHashes {
   mark: TxHash | null;
@@ -928,7 +1276,38 @@ const REFRESH_FAILURE_COPY: Record<RefreshFailure, string> = {
   "race-lost":
     "Another transaction refreshed this vault while yours was in flight, and the attestation " +
     "is still not fresh enough to mint against. Nothing further was submitted. Try again.",
+  "no-mark":
+    "Minting needs a recent mark price from the venue, and the attester is not serving a newer " +
+    "one for this vault right now. Nothing was submitted. Try again shortly.",
 };
+
+/** STACK 5: the mark was refreshed, but the oracle still refuses a mint. */
+const MINT_STILL_CLOSED_COPY =
+  "Minting is still closed with a fresh mark price: oracle.mintAllowed() is false, so the price " +
+  "feed is stale (every weekend) or the venue mark and the feed disagree by more than the " +
+  "allowed band. The mint was not submitted. Redemption is unaffected and still works.";
+
+/** STACK 5: the oracle's mark, with the chain's clock to age it against. All unix seconds. */
+type MarkState = { markAt: bigint; maxMarkAge: bigint; nonce: bigint; now: bigint };
+
+/**
+ * How much of `maxMarkAge` a mark must still have left to count as fresh: time for the mint to
+ * land behind the relay. 60 s of a 300 s budget, mirroring REFRESH_AT_AGE_SEC's 240-of-300 for the
+ * registry, and a fifth of the budget where the budget is small.
+ */
+const MARK_REFRESH_MARGIN_SEC = 60n;
+function markMargin5(maxMarkAge: bigint): bigint {
+  return maxMarkAge / 5n < MARK_REFRESH_MARGIN_SEC ? maxMarkAge / 5n : MARK_REFRESH_MARGIN_SEC;
+}
+function markIsFresh5(s: MarkState): boolean {
+  return s.now - s.markAt + markMargin5(s.maxMarkAge) <= s.maxMarkAge;
+}
+
+/** The routing reason `redeem` returns when its own price-age check declines the instant path. */
+function instantPriceTooOldReason(): DecodedRevert {
+  const entry = REVERT_COPY.CertVault_InstantPriceTooOld;
+  return { name: "CertVault_InstantPriceTooOld", args: [], message: entry.message, kind: entry.kind, cause: null };
+}
 
 /* ───────────────────────────────────────────────────────────────────── faucet */
 

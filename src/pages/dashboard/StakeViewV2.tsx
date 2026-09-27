@@ -2,30 +2,31 @@ import { useCallback, useMemo, useState } from "react";
 import { formatUnits, parseUnits } from "viem";
 import { usePublicClient, useReadContracts, useWriteContract } from "wagmi";
 import { ArrowUpRight, Loader2 } from "lucide-react";
-import { CHAIN_ID, IS_STACK5 } from "@/chain/deployment";
+import { CHAIN_ID } from "@/chain/deployment";
 import { SHARED, TestUSDGABI } from "@/chain/contracts";
+import { Stack5InsuranceStakingABI } from "@/chain/contracts.stack5";
 import { explorerAddressUrl, explorerTxUrl } from "@/chain/config";
-import {
-  INSURANCE_ADDRESS,
-  INSURANCE_DEPLOY_TX,
-  INSURANCE_SHARE_DECIMALS,
-  INSURANCE_V2_ADDRESS,
-  INSURANCE_V2_DEPLOY_TX,
-  InsuranceStakingABI,
-} from "@/chain/insurance";
+import { INSURANCE_SHARE_DECIMALS } from "@/chain/insurance";
+import { decodeRevert } from "@/chain/useActions";
 import { useDashboard } from "./store";
 import { MicroLabel, Panel, Stagger, ViewHeader } from "./ui";
 import { cn } from "@/lib/utils";
 import CertStakePanel from "./CertStakePanel";
-import StakeViewV2 from "./StakeViewV2";
 
 /**
- * The insurance pool (InsuranceStaking, K1): stake USDG as the first-loss layer behind the
- * vaults' own buffers. Every figure is a chain read of the deployed pool; nothing here is
- * computed from a model. Stated on screen, not hidden in a tooltip: the contract is unaudited
- * and capped, and the pool has no automatic income (fee routing is K2, a new vault stack).
+ * The insurance pool, STACK 5: InsuranceStaking v2. Rendered by StakeView only on a stack-5
+ * bundle AND once the v2 address is recorded in insurance.ts; every other build shows v1.
+ *
+ * What v2 changes for a staker, and what this screen therefore shows differently:
+ *  - requestWithdraw MOVES the shares into escrow (H-9). The wallet's share balance drops by the
+ *    amount requested, so "your stake" is wallet shares PLUS escrowed shares, shown apart.
+ *    cancelWithdraw returns them, at any time - which is also how an expired request is reclaimed.
+ *  - income vests over 7 days before it counts in the share price (M-14): `unvestedIncome()` and
+ *    `vestingEnd()` are shown, and `totalAssets()` already excludes what has not vested.
+ *  - the deposit cap is on `netPrincipal` (L-16), so income never uses up room; `maxDeposit()`
+ *    already reflects it and is what the form checks against.
+ * Every figure is a chain read of the pool; nothing is computed from a model.
  */
-const POOL = { address: INSURANCE_ADDRESS, abi: InsuranceStakingABI, chainId: CHAIN_ID } as const;
 const USDG = { address: SHARED.collateral, abi: TestUSDGABI, chainId: CHAIN_ID } as const;
 const ZERO = "0x0000000000000000000000000000000000000000" as const;
 
@@ -33,20 +34,13 @@ const usd = (v: bigint | undefined, dp = 2) =>
   v === undefined ? "—" : Number(formatUnits(v, 6)).toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp });
 const when = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 const days = (sec: bigint | undefined) => (sec === undefined ? "—" : `${Number(sec) / 86400} days`);
+const sharesFmt = (v: bigint | undefined) =>
+  v === undefined ? "—" : Number(formatUnits(v, INSURANCE_SHARE_DECIMALS)).toLocaleString("en-US", { maximumFractionDigits: 4 });
 
-type Draw = readonly [string, bigint, bigint, boolean, boolean];
+/** v2 `draws(i)`: vault, amount, executableAt, executed, cancelled, executedAt, paid. */
+type DrawV2 = readonly [string, bigint, bigint, boolean, boolean, bigint, bigint];
 
-/**
- * STACK 5: InsuranceStaking v2 lives at its own address. It is shown only on a stack-5 bundle and
- * once that address is recorded in insurance.ts; every other build renders the v1 pool below,
- * unchanged. The choice is a module constant, so no hook is ever called conditionally.
- */
-export default function StakeView() {
-  if (IS_STACK5 && INSURANCE_V2_ADDRESS) return <StakeViewV2 pool={INSURANCE_V2_ADDRESS} deployTx={INSURANCE_V2_DEPLOY_TX} />;
-  return <StakeViewV1 />;
-}
-
-function StakeViewV1() {
+export default function StakeViewV2({ pool, deployTx }: { pool: `0x${string}`; deployTx: `0x${string}` | undefined }) {
   const { address, connected, wrongNetwork, setWalletModalOpen, switchToUseCert, pushToast, settleToast, dismissToast, now } = useDashboard();
   const me = address ?? ZERO;
   const publicClient = usePublicClient({ chainId: CHAIN_ID });
@@ -54,6 +48,8 @@ function StakeViewV1() {
   const [amount, setAmount] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<{ tone: "ok" | "warn"; text: string } | null>(null);
+
+  const POOL = { address: pool, abi: Stack5InsuranceStakingABI, chainId: CHAIN_ID } as const;
 
   const reads = useReadContracts({
     contracts: [
@@ -72,7 +68,13 @@ function StakeViewV1() {
       { ...POOL, functionName: "withdrawRequests", args: [me] },
       { ...POOL, functionName: "maxRedeem", args: [me] },
       { ...USDG, functionName: "balanceOf", args: [me] },
-      { ...USDG, functionName: "allowance", args: [me, INSURANCE_ADDRESS] },
+      { ...USDG, functionName: "allowance", args: [me, pool] },
+      { ...POOL, functionName: "unvestedIncome" },
+      { ...POOL, functionName: "vestingEnd" },
+      { ...POOL, functionName: "netPrincipal" },
+      { ...POOL, functionName: "registrationDelay" },
+      { ...POOL, functionName: "drawCap" },
+      { ...POOL, functionName: "drawnInPeriod" },
     ],
     query: { refetchInterval: 15_000 },
   });
@@ -80,18 +82,22 @@ function StakeViewV1() {
   const v = <T,>(i: number) => (r?.[i]?.status === "success" ? (r[i].result as T) : undefined);
   const totalAssets = v<bigint>(0), totalSupply = v<bigint>(1), cap = v<bigint>(2), pricePerShare = v<bigint>(3);
   const drawPending = v<boolean>(4), drawCount = v<bigint>(5), cooldown = v<bigint>(6), window_ = v<bigint>(7);
-  const drawDelay = v<bigint>(8), maxDrawBps = v<bigint>(9), room = v<bigint>(10), shares = v<bigint>(11);
+  const drawDelay = v<bigint>(8), maxDrawBps = v<bigint>(9), room = v<bigint>(10), walletShares = v<bigint>(11);
   const req = v<readonly [bigint, bigint]>(12), redeemable = v<bigint>(13), wallet = v<bigint>(14), allowance = v<bigint>(15);
+  const unvested = v<bigint>(16), vestingEnd = v<bigint>(17), netPrincipal = v<bigint>(18), registrationDelay = v<bigint>(19);
+  const drawCap = v<bigint>(20), drawnInPeriod = v<bigint>(21);
 
   const drawReads = useReadContracts({
     contracts: Array.from({ length: Number(drawCount ?? 0n) }, (_, i) => ({ ...POOL, functionName: "draws" as const, args: [BigInt(i)] as const })),
     query: { enabled: (drawCount ?? 0n) > 0n, refetchInterval: 30_000 },
   });
 
-  const myValue = useMemo(
-    () => (shares !== undefined && totalSupply && totalAssets !== undefined && totalSupply > 0n ? (shares * totalAssets) / totalSupply : shares === 0n ? 0n : undefined),
-    [shares, totalSupply, totalAssets],
-  );
+  // Escrowed shares are held by the pool, not the wallet, and still belong to the staker.
+  const escrowed = req?.[0] ?? 0n;
+  const ownShares = walletShares === undefined ? undefined : walletShares + escrowed;
+  const assetsOf = (sh: bigint | undefined): bigint | undefined =>
+    sh !== undefined && totalSupply && totalAssets !== undefined && totalSupply > 0n ? (sh * totalAssets) / totalSupply : sh === 0n ? 0n : undefined;
+  const myValue = assetsOf(ownShares);
   const amount6 = useMemo(() => {
     try {
       return amount.trim() === "" ? 0n : parseUnits(amount.trim(), 6);
@@ -101,11 +107,11 @@ function StakeViewV1() {
   }, [amount]);
 
   const nowSec = Math.floor(now / 1000);
-  const reqShares = req?.[0] ?? 0n;
   const readyAt = Number(req?.[1] ?? 0n);
   const closesAt = readyAt + Number(window_ ?? 0n);
   const reqState =
-    reqShares === 0n ? "none" : nowSec < readyAt ? "cooling" : nowSec < closesAt ? "open" : "expired";
+    escrowed === 0n ? "none" : nowSec < readyAt ? "cooling" : nowSec < closesAt ? "open" : "expired";
+  const vestingUntil = Number(vestingEnd ?? 0n);
 
   const confirmed = useCallback(
     async (label: string, request: Parameters<typeof mutateAsync>[0]) => {
@@ -122,7 +128,8 @@ function StakeViewV1() {
         return true;
       } catch (e) {
         dismissToast(t);
-        setNote({ tone: "warn", text: e instanceof Error ? e.message.split("\n")[0] : String(e) });
+        // Stack 5 errors are in the v2 ABI, so a revert decodes into a sentence rather than a code.
+        setNote({ tone: "warn", text: decodeRevert(e).message });
         return false;
       } finally {
         setBusy(null);
@@ -134,13 +141,16 @@ function StakeViewV1() {
   const onDeposit = async () => {
     if (amount6 <= 0n || !address) return;
     if ((allowance ?? 0n) < amount6) {
-      const ok = await confirmed("Approve USDG for the pool", { ...USDG, functionName: "approve", args: [INSURANCE_ADDRESS, amount6] });
+      const ok = await confirmed("Approve USDG for the pool", { ...USDG, functionName: "approve", args: [pool, amount6] });
       if (!ok) return;
     }
     if (await confirmed(`Deposit ${amount} USDG`, { ...POOL, functionName: "deposit", args: [amount6, address] })) setAmount("");
   };
-  const onRequest = () => shares && confirmed("Request withdrawal", { ...POOL, functionName: "requestWithdraw", args: [shares] });
+  /** Escrows every share: those in the wallet plus any already in a request (a new request replaces it). */
+  const onRequest = () =>
+    ownShares && ownShares > 0n && confirmed("Request withdrawal", { ...POOL, functionName: "requestWithdraw", args: [ownShares] });
   const onCancel = () => confirmed("Cancel withdrawal request", { ...POOL, functionName: "cancelWithdraw" });
+  const onReclaim = () => confirmed("Reclaim escrowed shares", { ...POOL, functionName: "cancelWithdraw" });
   const onRedeem = () =>
     redeemable && address && confirmed("Withdraw from the pool", { ...POOL, functionName: "redeem", args: [redeemable, address, address] });
 
@@ -180,7 +190,7 @@ function StakeViewV1() {
         right={
           <p className="flex flex-wrap gap-2 font-mono text-[10px] uppercase tracking-[0.08em]">
             <span className="border border-green-bright/40 px-2 py-1 text-green-bright">live on mainnet</span>
-            <span className="border border-warn/40 px-2 py-1 text-warn">unaudited · capped at {usd(cap, 0)} USDG</span>
+            <span className="border border-warn/40 px-2 py-1 text-warn">{`unaudited · principal capped at ${usd(cap, 0)} USDG`}</span>
           </p>
         }
       />
@@ -192,9 +202,9 @@ function StakeViewV1() {
       </p>
 
       <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Stagger index={0}><Stat label="Pool assets" value={`${usd(totalAssets)} USDG`} sub={`cap ${usd(cap, 0)} USDG · room ${usd(room)} USDG`} /></Stagger>
-        <Stagger index={1}><Stat label="Value per share" value={pricePerShare === undefined ? "—" : Number(formatUnits(pricePerShare, 6)).toFixed(6)} sub="USDG per share · rises with income, falls with a draw" /></Stagger>
-        <Stagger index={2}><Stat label="Your stake" value={`${usd(myValue)} USDG`} sub={shares === undefined || !address ? "connect a wallet" : `${Number(formatUnits(shares, INSURANCE_SHARE_DECIMALS)).toLocaleString("en-US", { maximumFractionDigits: 4 })} shares`} /></Stagger>
+        <Stagger index={0}><Stat label="Pool assets" value={`${usd(totalAssets)} USDG`} sub={`principal ${usd(netPrincipal)} of ${usd(cap, 0)} USDG · room ${usd(room)} USDG`} /></Stagger>
+        <Stagger index={1}><Stat label="Value per share" value={pricePerShare === undefined ? "—" : Number(formatUnits(pricePerShare, 6)).toFixed(6)} sub="USDG per share · rises as income vests, falls with a draw" /></Stagger>
+        <Stagger index={2}><Stat label="Your stake" value={`${usd(myValue)} USDG`} sub={walletShares === undefined || !address ? "connect a wallet" : `${sharesFmt(walletShares)} shares in wallet · ${sharesFmt(escrowed)} in escrow`} /></Stagger>
         <Stagger index={3}><Stat label="Draws" value={drawPending ? "PENDING" : "none pending"} sub={`${drawCount ?? "—"} proposed ever`} /></Stagger>
       </div>
 
@@ -220,7 +230,9 @@ function StakeViewV1() {
             </div>
             <p className="mt-2 font-mono text-[10px] uppercase leading-[1.6] tracking-[0.06em] text-white-60/80">
               {`Wallet ${usd(wallet)} USDG. `}
-              {drawPending ? "Deposits are paused while a draw is pending, so nobody walks into an announced loss." : `Room under the cap: ${usd(room)} USDG.`}
+              {drawPending
+                ? "Deposits are paused while a draw is pending, so nobody walks into an announced loss."
+                : `Room under the cap: ${usd(room)} USDG. The cap counts deposited principal only; income never uses it up.`}
             </p>
           </Panel>
         </Stagger>
@@ -229,18 +241,27 @@ function StakeViewV1() {
           <Panel className="p-5">
             <MicroLabel>Withdraw</MicroLabel>
             <p className="mt-3 font-mono text-[11px] leading-[1.7] text-silver">
-              {reqState === "none" && `No withdrawal requested. Withdrawing takes a ${days(cooldown)} cooldown, then a ${days(window_)} window to complete it.`}
-              {reqState === "cooling" && `Requested. Your window opens ${when(readyAt)} and closes ${when(closesAt)}. The shares keep earning and keep sharing any draw until you withdraw.`}
+              {reqState === "none" &&
+                `No withdrawal requested. Requesting moves your shares into escrow for a ${days(cooldown)} cooldown, then a ${days(window_)} window to complete it. Escrowed shares keep earning and keep sharing any draw, and cannot be transferred.`}
+              {reqState === "cooling" &&
+                `Requested: ${sharesFmt(escrowed)} shares are in escrow. Your window opens ${when(readyAt)} and closes ${when(closesAt)}. Cancel at any time to get them back in your wallet.`}
               {reqState === "open" && `Your window is open until ${when(closesAt)}.${drawPending ? " Paused: a draw is pending." : ""}`}
-              {reqState === "expired" && `Your window closed ${when(closesAt)} without a withdrawal. Request again to restart the cooldown.`}
+              {reqState === "expired" &&
+                `Your window closed ${when(closesAt)} without a withdrawal. Your ${sharesFmt(escrowed)} shares are still in escrow: reclaim them to your wallet, or request again to restart the cooldown.`}
             </p>
             <div className="mt-3 flex flex-wrap gap-2">
-              {(reqState === "none" || reqState === "expired") && (
-                <Btn id="Request withdrawal" label="Request withdrawal (all shares)" onClick={() => void onRequest()} disabled={gate !== null || !shares} />
+              {reqState === "none" && (
+                <Btn id="Request withdrawal" label="Request withdrawal (all shares)" onClick={() => void onRequest()} disabled={gate !== null || !ownShares} />
               )}
               {(reqState === "cooling" || reqState === "open") && <Btn id="Cancel withdrawal request" label="Cancel request" onClick={() => void onCancel()} disabled={gate !== null} />}
               {reqState === "open" && (
-                <Btn id="Withdraw from the pool" label={`Withdraw ${usd(redeemable && totalSupply ? (redeemable * (totalAssets ?? 0n)) / totalSupply : 0n)} USDG`} onClick={() => void onRedeem()} disabled={gate !== null || !redeemable} />
+                <Btn id="Withdraw from the pool" label={`Withdraw ${usd(assetsOf(redeemable ?? 0n) ?? 0n)} USDG`} onClick={() => void onRedeem()} disabled={gate !== null || !redeemable} />
+              )}
+              {reqState === "expired" && (
+                <>
+                  <Btn id="Reclaim escrowed shares" label="Reclaim shares" onClick={() => void onReclaim()} disabled={gate !== null} />
+                  <Btn id="Request withdrawal" label="Request again" onClick={() => void onRequest()} disabled={gate !== null || !ownShares} />
+                </>
               )}
             </div>
           </Panel>
@@ -257,10 +278,12 @@ function StakeViewV1() {
           <ul className="mt-3 grid gap-2 font-mono text-[11px] leading-[1.6] text-silver md:grid-cols-2">
             <li>Loss order: vault buffer → this pool → never holder backing.</li>
             <li>{`Draws: proposed by the 2-of-3 Safe, executable after ${days(drawDelay)}, expire 3 days later.`}</li>
-            <li>{`Each draw at most ${maxDrawBps === undefined ? "—" : Number(maxDrawBps) / 100}% of the pool, and only to a registered UseCert vault.`}</li>
+            <li>{`Draws in any 30 days total at most ${maxDrawBps === undefined ? "—" : Number(maxDrawBps) / 100}% of the pool, and each pays at most the vault's shortfall.`}</li>
+            <li>{`Only to a UseCert vault registered for at least ${days(registrationDelay)} and not retired, so every staker can leave first.`}</li>
             <li>At least 7 days between two draw proposals, so stakers are never held in place.</li>
             <li>While a draw is pending, deposits and withdrawals pause.</li>
-            <li>{`Deposit cap ${usd(cap, 0)} USDG. No owner, no upgrade: every parameter is immutable.`}</li>
+            <li>{`Deposit cap ${usd(cap, 0)} USDG of principal. No owner, no upgrade: every parameter is immutable.`}</li>
+            <li>{`Drawn in the last 30 days: ${usd(drawnInPeriod)} USDG · a draw now could take at most ${usd(drawCap)} USDG.`}</li>
           </ul>
         </Panel>
       </Stagger>
@@ -269,10 +292,16 @@ function StakeViewV1() {
         <Panel className="mt-3 p-5">
           <MicroLabel>Income, stated plainly</MicroLabel>
           <p className="mt-3 max-w-[90ch] text-[13px] leading-[1.6] text-silver">
-            There is no automatic income today. Anything sent to the pool raises the value per share for every staker, but
-            nothing sends anything yet: routing 70% of the vaults' fees to this pool is written and tested (K2) and needs a
-            new vault version before it can go live. There are no token emissions. The pool's return is only real income,
-            minus any draw.
+            The pool&apos;s income is its 70% share of the vaults&apos; fees, paid in through the fee vault. Income vests over 7
+            days before it counts in the value per share, so nobody can deposit just before a payment and leave with it. There
+            are no token emissions. The pool&apos;s return is only real income, minus any draw.
+          </p>
+          <p className="mt-3 font-mono text-[11px] leading-[1.6] text-silver">
+            {unvested === undefined
+              ? "—"
+              : unvested === 0n
+                ? "Nothing is vesting right now."
+                : `Vesting now: ${usd(unvested)} USDG, fully counted by ${when(vestingUntil)}.`}
           </p>
         </Panel>
       </Stagger>
@@ -285,11 +314,11 @@ function StakeViewV1() {
           ) : (
             <ul className="mt-3 font-mono text-[11px] text-silver">
               {(drawReads.data ?? []).map((d, i) => {
-                const x = d.status === "success" ? (d.result as unknown as Draw) : null;
+                const x = d.status === "success" ? (d.result as unknown as DrawV2) : null;
                 if (!x) return null;
                 const execAt = Number(x[2]);
-                const st = x[3] ? "executed" : x[4] ? "cancelled" : nowSec >= execAt + 3 * 86400 ? "expired" : nowSec >= execAt ? "executable" : "in delay";
-                return <li key={i}>{`#${i} · ${usd(x[1])} USDG to ${x[0].slice(0, 10)}… · executable ${when(execAt)} · ${st}`}</li>;
+                const st = x[3] ? `executed, paid ${usd(x[6])} USDG` : x[4] ? "cancelled" : nowSec >= execAt + 3 * 86400 ? "expired" : nowSec >= execAt ? "executable" : "in delay";
+                return <li key={i}>{`#${i} · up to ${usd(x[1])} USDG to ${x[0].slice(0, 10)}… · executable ${when(execAt)} · ${st}`}</li>;
               })}
             </ul>
           )}
@@ -297,15 +326,17 @@ function StakeViewV1() {
       </Stagger>
 
       <p className="mt-6 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[10px] uppercase tracking-[0.06em] text-white-60">
-        <a href={explorerAddressUrl(INSURANCE_ADDRESS)} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 underline decoration-white/20 underline-offset-2 hover:text-green-bright">
-          pool contract {INSURANCE_ADDRESS.slice(0, 10)}… <ArrowUpRight size={10} />
+        <a href={explorerAddressUrl(pool)} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 underline decoration-white/20 underline-offset-2 hover:text-green-bright">
+          pool contract {pool.slice(0, 10)}… <ArrowUpRight size={10} />
         </a>
-        <a href={`https://sourcify.dev/#/lookup/${INSURANCE_ADDRESS}`} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 underline decoration-white/20 underline-offset-2 hover:text-green-bright">
-          Sourcify: exact match <ArrowUpRight size={10} />
+        <a href={`https://sourcify.dev/#/lookup/${pool}`} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 underline decoration-white/20 underline-offset-2 hover:text-green-bright">
+          Sourcify lookup <ArrowUpRight size={10} />
         </a>
-        <a href={explorerTxUrl(INSURANCE_DEPLOY_TX)} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 underline decoration-white/20 underline-offset-2 hover:text-green-bright">
-          deployment tx <ArrowUpRight size={10} />
-        </a>
+        {deployTx && (
+          <a href={explorerTxUrl(deployTx)} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 underline decoration-white/20 underline-offset-2 hover:text-green-bright">
+            deployment tx <ArrowUpRight size={10} />
+          </a>
+        )}
         <span>{`Updated ${reads.dataUpdatedAt ? Math.round((now - reads.dataUpdatedAt) / 1000) : "—"}s ago`}</span>
       </p>
 

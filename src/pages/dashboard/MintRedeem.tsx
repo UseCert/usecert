@@ -45,7 +45,11 @@ import {
   toCollateral,
 } from "@/chain/units";
 import { cn } from "@/lib/utils";
-import { CHAIN_ID, HAS_FAUCET } from "@/chain/deployment";
+import { CHAIN_ID, HAS_FAUCET, IS_STACK5 } from "@/chain/deployment";
+import { instantPriceTooOld, markIsStale, useStack5VaultTimes } from "@/chain/useStack5";
+
+/** Unix seconds as "YYYY-MM-DD HH:MM UTC", for the stack-5 claim timeout. */
+const utcMinute = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 
 type Tab = "mint" | "redeem";
 type Busy = "approve" | "submit" | "queue" | "force" | "claim" | "recall" | "faucet" | null;
@@ -213,6 +217,14 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
   // short one mirror - "the signer is up" would then be a false positive for that mirror.
   const refreshable = attestationRefreshable(asset);
 
+  // STACK 5 ONLY (inert on stack 4: the hook reads nothing and both flags stay false). The two
+  // new clocks: the oracle's mark age, which closes mintAllowed() on an idle protocol, and the
+  // redemption price's age, which closes redeemInstant past an hour (every weekend).
+  const s5 = useStack5VaultTimes(asset);
+  const nowSec5 = Math.floor(now / 1000);
+  const markStale5 = IS_STACK5 && markIsStale(s5, nowSec5) === true;
+  const instantTooOld5 = IS_STACK5 && instantPriceTooOld(s5, nowSec5) === true;
+
   /* ---------------------------------------------------------------- quote */
 
   // Amounts sent on-chain are parsed from the input STRING, never from a float: the
@@ -353,8 +365,9 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
         setNotice({
           tone: "info",
           title: "Mint requested — escrowed, awaiting the fill",
-          body:
-            "Your collateral is escrowed and the hedge has been requested. Certificates are issued to your wallet as soon as the venue confirms the fill, at the price it filled at, usually within a minute. Nothing more is needed from you. If it is not settled within the 24-hour window, the full escrow is refunded to your wallet: the keeper does it automatically, and anyone (including you) can do it from My receipts.",
+          body: IS_STACK5
+            ? "Your collateral is escrowed and the hedge has been requested. Certificates are issued to your wallet as soon as the venue confirms the fill, at the price it filled at, usually within a minute. Nothing more is needed from you. If it is not settled within the 24-hour window, everything you deposited is refunded to your wallet, the mint fee included: the keeper does it automatically, and anyone (including you) can do it from My receipts."
+            : "Your collateral is escrowed and the hedge has been requested. Certificates are issued to your wallet as soon as the venue confirms the fill, at the price it filled at, usually within a minute. Nothing more is needed from you. If it is not settled within the 24-hour window, the full escrow is refunded to your wallet: the keeper does it automatically, and anyone (including you) can do it from My receipts.",
         });
       }
       after();
@@ -381,12 +394,16 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
     try {
       const result = await actions.redeem(amountStr);
       if (result.status === "needs-queued") {
-        // NOT a failure. The fast path declined because the hot buffer is thin.
+        // NOT a failure. The fast path declined because the hot buffer is thin - or, on stack 5,
+        // because the price is more than an hour old (CertVault_InstantPriceTooOld).
         dismissToast(toastId);
+        const priceTooOld = result.reason.name === "CertVault_InstantPriceTooOld";
         setNotice({
           tone: "info",
-          title: "Instant buffer is thin — use the queue",
-          body: `${result.reason.message} Queued redemptions take two batch round-trips (one to close, one to withdraw), then you claim the receipt.`,
+          title: priceTooOld ? "Price too old for instant redemption — use the queue" : "Instant buffer is thin — use the queue",
+          body: priceTooOld
+            ? result.reason.message
+            : `${result.reason.message} Queued redemptions take two batch round-trips (one to close, one to withdraw), then you claim the receipt.`,
           action: { label: "Send through the queue", run: onQueueRedeem },
         });
         return;
@@ -467,6 +484,35 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
         });
         return;
       }
+      if (result.status === "awaiting-price") {
+        // STACK 5. Retryable and bounded: the claim pays once a new price is observed, or in full
+        // four days after the request, whatever the feed does.
+        dismissToast(toastId);
+        setNotice({
+          tone: "warn",
+          title: "Waiting for a fresh price — retryable, not failed",
+          body:
+            result.paysInFullAt !== null
+              ? `${result.reason.message} Pays in full from ${utcMinute(result.paysInFullAt)}.`
+              : result.reason.message,
+        });
+        return;
+      }
+      if (IS_STACK5 && typeof result.outstanding === "bigint" && result.outstanding > 0n) {
+        // STACK 5: an instalment. The vault paid what it holds; the rest stays on the receipt.
+        settleToast(toastId, "Receipt part-paid", truncHash(result.hash));
+        setNotice({
+          tone: "info",
+          title: "Part-paid — the rest stays claimable",
+          body: `${fmtNum(fromCollateral(result.paid ?? 0n), 2)} ${collateralSymbol} paid now, ${fmtNum(
+            fromCollateral(result.outstanding),
+            2,
+          )} ${collateralSymbol} still outstanding on this receipt. The vault paid what it holds; claim again once more collateral is back from the venue. ${truncHash(result.hash)}`,
+          action: { label: "Call recallMargin()", run: onRecall },
+        });
+        after();
+        return;
+      }
       settleToast(toastId, "Receipt claimed", truncHash(result.hash));
       setNotice({ tone: "ok", title: "Receipt claimed", body: truncHash(result.hash) });
       after();
@@ -497,7 +543,13 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
       if (!a.staged) await actions.stageRefund(a.id);
       const hash = await actions.refundMint(a.id);
       settleToast(toastId, "Mint refunded", truncHash(hash));
-      setNotice({ tone: "ok", title: "Mint refunded", body: `Your USDG escrow is back in your wallet. ${truncHash(hash)}` });
+      setNotice({
+        tone: "ok",
+        title: "Mint refunded",
+        body: IS_STACK5
+          ? `Everything you deposited is back in your wallet, the mint fee included. ${truncHash(hash)}`
+          : `Your USDG escrow is back in your wallet. ${truncHash(hash)}`,
+      });
       after();
     } catch (err) {
       dismissToast(toastId);
@@ -584,7 +636,19 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
   const staleButRefreshable = capIsZero && onlyStale && attestationRefreshable(asset) === true;
 
   const capacityHalted = capIsZero && !staleButRefreshable;
-  const mintBlocked = tab === "mint" && (!mintAllowed || priceUnavailable || capacityHalted);
+
+  /**
+   * STACK 5: THE SAME DEFECT, ONE LAYER DOWN. `mintAllowed()` is false once the oracle's mark is
+   * older than `maxMarkAge`, which on an idle protocol is the resting state - and `mint()` relays
+   * a fresh signed mark itself. So a stale mark alone must not disable the button that refreshes
+   * it. Lifted only when the mark IS stale, the price is available and the signer covers this
+   * vault; `mint()` then re-reads `mintAllowed()` after the relay and sends nothing if anything
+   * else (a stale feed, a basis outside the band) still closes it. Always false on stack 4.
+   */
+  const markStaleButRefreshable =
+    IS_STACK5 && !mintAllowed && markStale5 && !priceUnavailable && refreshable === true;
+  const mintBlocked =
+    tab === "mint" && ((!mintAllowed && !markStaleButRefreshable) || priceUnavailable || capacityHalted);
   const submitDisabled =
     !connected ||
     wrongNetwork ||
@@ -742,6 +806,9 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
                   {priceUnavailable
                     ? " The stock feeds stop updating after Friday's US close, so this is expected every weekend: minting reopens with Monday's first price."
                     : ""}
+                  {markStale5 && !priceUnavailable && refreshable === false
+                    ? " The venue mark price is older than minting allows, and the attester is not serving a newer one for this vault right now."
+                    : ""}
                   {!attestationStale
                     ? ""
                     : refreshable === true
@@ -752,6 +819,20 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
                   Redemption is unaffected and still works.
                 </p>
               </div>
+            )}
+
+            {/* STACK 5: the stale mark the mint itself will refresh (see markStaleButRefreshable). */}
+            {tab === "mint" && markStaleButRefreshable && (
+              <p className="mt-3 font-mono text-[10px] uppercase leading-[1.7] tracking-[0.06em] text-silver">
+                Mark price idle · your mint relays a fresh one first
+              </p>
+            )}
+
+            {/* STACK 5: past an hour the instant path refuses the price; say so before the wallet. */}
+            {tab === "redeem" && instantTooOld5 && !keeperMode && route === "instant" && (
+              <p className="mt-3 font-mono text-[10px] uppercase leading-[1.7] tracking-[0.06em] text-warn">
+                The price is more than an hour old (the stock feeds stop at the weekend), so instant redemption is closed. You will be offered the queue instead; force exit is always open.
+              </p>
             )}
 
             {/* Headroom before CertVault_AtCapacity, so an over-cap amount is visible before
