@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Record the dashboard's solvency point and the venue's funding rates, so there is a history to draw.
 
-    usecert-history          take one sample, rewrite /var/www/usecert-data/history.json
+    usecert-history          take one sample, rewrite /var/www/usecert-data/history.json,
+                             stats.json and stats.csv
 
 Run every 5 minutes by usecert-history.timer on the France host. Served same-origin at
 https://use-cert.com/data/history.json.
@@ -26,9 +27,39 @@ nothing the dashboard does not already show:
     Every UseCert vault is long, so the series is published SIGNED FROM THE VAULT'S SIDE:
     negative = the vault pays, positive = the vault receives. Third-party data, labelled so.
 
+  market, per vault, every 5 min (A16) - the feed against the venue:
+    feed       = latestRoundData() on the book's `replayAggregator` address (a legacy label: on
+                 mainnet it is the Chainlink feed CertOracle reads), answer / 10^feedDecimals and
+                 its updatedAt. Read at ONE pinned block per pass, whose number and timestamp are
+                 recorded, so every feed value is re-checkable at that block with an archive node.
+    mark/index = the venue's `mark_price` / `index_price` from GET /api/v1/orderBookDetails (one
+                 call, every market). Decimal strings in USD per unit of base: the same unit as
+                 `value` in the funding history (0.0004 %/h x mark 373.59 / 100 = 0.00149, what
+                 /fundings returns for that hour). Third-party data, labelled so.
+    basisBps   = (mark - feed) / feed x 10^4, derived, never stored as an input.
+    feedFrozen = block timestamp - updatedAt > FROZEN_AFTER_SEC (1 h): the feed stops outside
+                 US market hours, so weekends and nights show as frozen windows.
+    Kept at 5-min resolution for FINE_SEC (7 days), thinned to the first sample of each hour up
+    to MARKET_KEEP_SEC (30 days), hard-capped at MAX_POINTS, in MARKET_STATE; published as the
+    "market" block of history.json at 5-min for the last 2 days and hourly before that (the
+    dashboard polls that file every minute; ~0.4 MB uncompressed at full retention, bounded by
+    MAX_POINTS regardless). Hourly funding is kept for 30 days in the same state (the
+    48 h above, backfilled from the venue's own history when short) for the averages.
+
+  stats.json / stats.csv (A16) - derived only from the above, same numbers in both:
+    per asset: the latest sample and its basis; 7- and 30-day mean hourly funding (vault's side,
+    with the number of hours it covers); and the frozen-window ("weekend gap") table: the feed
+    price at freeze, the venue mark at the last sample before the feed resumed, the gap between
+    them in bps, and the feed's first price after resuming. A window's row is fixed once it has
+    closed (computed from the 5-min samples) and kept for GAP_KEEP_SEC, so thinning never
+    rewrites it.
+
 Fails soft per vault: a read that fails leaves a gap for that vault at that time rather than a
-guessed value, and one vault's failure does not drop the others.
+guessed value, and one vault's failure does not drop the others. The A16 additions fail soft as
+a whole too: if they throw, history.json is still written with exactly the fields it had before.
 """
+import csv
+import io
 import json
 import os
 import time
@@ -42,16 +73,32 @@ OUT = "/var/www/usecert-data/history.json"
 KEEP_SEC = 7 * 86400
 ONE18 = 10 ** 18
 
+MARKET_STATE = "/var/lib/usecert-history/market.json"
+STATS_JSON = "/var/www/usecert-data/stats.json"
+STATS_CSV = "/var/www/usecert-data/stats.csv"
+INTERVAL_SEC = 300
+FROZEN_AFTER_SEC = 3600
+FINE_SEC = 7 * 86400              # 5-min resolution this far back, in the state
+PUBLIC_FINE_SEC = 2 * 86400       # and in history.json, which the dashboard polls every minute
+MARKET_KEEP_SEC = 30 * 86400      # hourly beyond FINE_SEC, dropped past this
+MAX_POINTS = 3000                 # 2016 fine + 552 hourly at full retention; a hard bound regardless
+FUNDING_KEEP_SEC = 30 * 86400
+BACKFILL_EVERY_SEC = 6 * 3600     # at most one 30-day funding fetch per market per 6 h
+GAP_KEEP_SEC = 90 * 86400
+GAP_MAX_ROWS = 100                # per asset
+RESUME_SAMPLE_SLACK_SEC = 900     # more than 3 missed samples around a resume is flagged
+
 
 # Selectors, fixed: this host has no foundry for this user, and a JSON-RPC eth_call needs none.
-#   cast sig "solvency()" / "totalSupply()" / "px()"
-SEL = {"solvency": "0x773c5049", "totalSupply": "0x18160ddd", "px": "0x922469eb"}
+#   cast sig "solvency()" / "totalSupply()" / "px()" / "latestRoundData()"
+SEL = {"solvency": "0x773c5049", "totalSupply": "0x18160ddd", "px": "0x922469eb",
+       "latestRoundData": "0xfeaf968c"}
 
 
-def eth_call(to, fn):
+def eth_call(to, fn, block="latest"):
     """The raw return data, or None when the call reverts (px() past staleness is an answer)."""
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_call",
-                       "params": [{"to": to, "data": SEL[fn]}, "latest"]}).encode()
+                       "params": [{"to": to, "data": SEL[fn]}, block]}).encode()
     for attempt in range(5):
         try:
             req = urllib.request.Request(RPC, body, {"Content-Type": "application/json", "User-Agent": "usecert-history/1.0"})
@@ -66,6 +113,22 @@ def eth_call(to, fn):
             return None
         return out["result"]
     return None
+
+
+def head_block():
+    """(number, timestamp) of the latest block: the pin for one pass of feed reads."""
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_getBlockByNumber",
+                       "params": ["latest", False]}).encode()
+    req = urllib.request.Request(RPC, body, {"Content-Type": "application/json", "User-Agent": "usecert-history/1.0"})
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                b = json.load(r)["result"]
+            return int(b["number"], 16), int(b["timestamp"], 16)
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 502, 503, 504) or attempt == 4:
+                raise
+            time.sleep(3 * 2 ** attempt)
 
 
 def words(hexdata, n):
@@ -105,15 +168,283 @@ def sample(v):
             "pxUnavailable": px18 is None}
 
 
-def funding(market):
+def funding(market, n=48):
     now = int(time.time())
-    d = venue("/api/v1/fundings?market_id=%d&resolution=1h&start_timestamp=%d&end_timestamp=%d&count_back=48"
-              % (market, now - 49 * 3600, now))
-    rows = sorted(d.get("fundings", []), key=lambda f: f["timestamp"])[-48:]
+    d = venue("/api/v1/fundings?market_id=%d&resolution=1h&start_timestamp=%d&end_timestamp=%d&count_back=%d"
+              % (market, now - (n + 1) * 3600, now, n))
+    rows = sorted(d.get("fundings", []), key=lambda f: f["timestamp"])[-n:]
     return {"hours": [int(f["timestamp"]) for f in rows],
             # signed from the long vault's side: the paying side is `direction`
             "ratePctPerHour": [(-1 if f["direction"] == "long" else 1) * float(f["rate"]) for f in rows],
             "usdPerUnit": [(-1 if f["direction"] == "long" else 1) * float(f["value"]) for f in rows]}
+
+
+# ------------------------------------------------------------------ A16: feed vs venue, stats
+
+def bps(a, ref):
+    """(a - ref) / ref in basis points, 2 dp; None when either side is missing."""
+    if a is None or ref is None or ref <= 0:
+        return None
+    return round((a - ref) / ref * 1e4, 2)
+
+
+def is_frozen(block_time, updated_at):
+    return block_time - updated_at > FROZEN_AFTER_SEC
+
+
+def read_feed(addr, block, decimals):
+    """(answer, updatedAt) from latestRoundData() at `block`, or None when it reverts."""
+    r = eth_call(addr, "latestRoundData", hex(block))
+    if not r or len(r) < 2 + 64 * 5:
+        return None
+    _round, answer, _started, updated, _answered = words(r, 5)
+    return round(signed(answer) / 10 ** decimals, decimals), updated
+
+
+def venue_marks():
+    """{market_id: (mark, index)} from one orderBookDetails call; a missing field is None."""
+    d = venue("/api/v1/orderBookDetails")
+    out = {}
+    for m in d.get("order_book_details", []):
+        f = lambda k: float(m[k]) if m.get(k) not in (None, "") else None
+        out[int(m["market_id"])] = (f("mark_price"), f("index_price"))
+    return out
+
+
+def market_point(book, now):
+    """One pass: the pinned block, and per vault [feed, updatedAt, mark, index]."""
+    number, block_time = head_block()
+    dec = book.get("parameters", {}).get("feedDecimals", 8)
+    try:
+        marks = venue_marks()
+    except Exception as e:                                       # noqa: BLE001 - feed still recorded
+        print("venue marks read failed: %s" % str(e)[:120])
+        marks = {}
+    p = {"t": now, "block": number, "blockTime": block_time, "v": {}}
+    for v in book["vaults"]:
+        try:
+            fd = read_feed(v["replayAggregator"], number, dec)
+        except Exception as e:                                   # noqa: BLE001
+            print("%s: feed read failed: %s" % (v["symbol"], str(e)[:120]))
+            fd = None
+        if fd is None:
+            continue
+        mark, index = marks.get(v["marketIndex"], (None, None))
+        p["v"][v["symbol"]] = [fd[0], fd[1], mark, index]
+    return p
+
+
+def thin(points, now, fine_sec=FINE_SEC):
+    """Every point from the last fine_sec; before that the first of each hour, to MARKET_KEEP_SEC.
+    Idempotent (thinning a thinned list changes nothing), and never more than MAX_POINTS."""
+    keep, hours = [], set()
+    for p in sorted(points, key=lambda p: p["t"]):
+        age, h = now - p["t"], p["t"] // 3600
+        if now - h * 3600 > MARKET_KEEP_SEC:        # by hour, so later passes agree with this one
+            continue
+        if age > fine_sec:
+            if h in hours:
+                continue
+            hours.add(h)
+        keep.append(p)
+    return keep[-MAX_POINTS:]
+
+
+def vault_rows(points, sym):
+    """[(t, blockTime, feed, updatedAt, mark)] for one vault, oldest first, gaps skipped."""
+    return [(p["t"], p["blockTime"], p["v"][sym][0], p["v"][sym][1], p["v"][sym][2])
+            for p in sorted(points, key=lambda p: p["t"]) if sym in p["v"]]
+
+
+def gap_windows(rows):
+    """Frozen windows from one vault's rows. A window is the run of samples on one feed round
+    (one updatedAt) in which the feed was frozen at least once; it closes at the first sample
+    on a later round. Newest first."""
+    runs = []
+    for r in rows:
+        if runs and runs[-1][0][3] == r[3]:
+            runs[-1].append(r)
+        else:
+            runs.append([r])
+    out = []
+    for i, run in enumerate(runs):
+        frozen = [r for r in run if is_frozen(r[1], r[3])]
+        if not frozen:
+            continue
+        u, feed0 = run[0][3], run[0][2]
+        marked = [r for r in run if r[4] is not None]
+        last = marked[-1] if marked else None
+        nxt = runs[i + 1][0] if i + 1 < len(runs) and runs[i + 1][0][3] > u else None
+        out.append({
+            "status": "closed" if nxt else "open",
+            "freezeUpdatedAt": u,
+            "feedAtFreeze": feed0,
+            "frozenSeenT": frozen[0][0],
+            "markSampleT": last[0] if last else None,
+            "markBeforeResume": last[4] if last else None,
+            "gapBps": bps(last[4], feed0) if last else None,
+            "resumeUpdatedAt": nxt[3] if nxt else None,
+            "resumeSeenT": nxt[0] if nxt else None,
+            "feedAfterResume": nxt[2] if nxt else None,
+            "reopenMoveBps": bps(nxt[2], feed0) if nxt else None,
+            "durationSec": (nxt[3] if nxt else run[-1][1]) - u,
+            "recordingGapAtResume": bool(nxt and last and nxt[0] - last[0] > RESUME_SAMPLE_SLACK_SEC),
+        })
+    return out[::-1]
+
+
+def merge_gaps(stored, fresh, now):
+    """A closed row is final: it was computed from 5-min samples and thinning must not rewrite
+    it. An open row is replaced by whatever the latest pass computed for that window."""
+    by = {r["freezeUpdatedAt"]: r for r in stored}
+    for r in fresh:
+        old = by.get(r["freezeUpdatedAt"])
+        if old is None or old["status"] == "open":
+            by[r["freezeUpdatedAt"]] = r
+    rows = sorted(by.values(), key=lambda r: -r["freezeUpdatedAt"])
+    return [r for r in rows if now - r["freezeUpdatedAt"] <= GAP_KEEP_SEC][:GAP_MAX_ROWS]
+
+
+def merge_funding(store, f, now):
+    """store: [[hour, ratePctPerHour, usdPerUnit]] (vault's side), deduplicated by hour, 30 days."""
+    by = {h: [h, r, u] for h, r, u in store}
+    for h, r, u in zip(f["hours"], f["ratePctPerHour"], f["usdPerUnit"]):
+        by[h] = [h, r, u]
+    return [by[h] for h in sorted(by) if now - h <= FUNDING_KEEP_SEC]
+
+
+def funding_avg(store, now, days):
+    rows = [x for x in store if now - x[0] < days * 86400]
+    n = len(rows)
+    s = sum(x[1] for x in rows)
+    return {"hours": n, "expectedHours": days * 24,
+            "avgPctPerHour": round(s / n, 8) if n else None, "sumPct": round(s, 8) if n else None}
+
+
+def record_market(book, ms, now, fund):
+    """Append this pass's point, fold in funding, thin, and refresh the gap rows. Mutates ms."""
+    try:
+        ms["points"] = ms.get("points", []) + [market_point(book, now)]
+    except Exception as e:                                       # noqa: BLE001 - no point this pass
+        print("market sample failed: %s" % str(e)[:120])
+    ms["points"] = thin(ms.get("points", []), now)
+    fs, bf = ms.setdefault("funding", {}), ms.setdefault("backfilledAt", {})
+    want = FUNDING_KEEP_SEC // 3600
+    for v in book["vaults"]:
+        sym = v["symbol"]
+        if sym in fund and not fund[sym].get("stale"):
+            fs[sym] = merge_funding(fs.get(sym, []), fund[sym], now)
+        have = len([x for x in fs.get(sym, []) if now - x[0] < FUNDING_KEEP_SEC])
+        if have < want - 24 and now - bf.get(sym, 0) > BACKFILL_EVERY_SEC:
+            bf[sym] = now
+            try:
+                fs[sym] = merge_funding(fs.get(sym, []), funding(v["marketIndex"], want), now)
+            except Exception as e:                               # noqa: BLE001
+                print("%s: funding backfill failed: %s" % (sym, str(e)[:120]))
+    gs = ms.setdefault("gaps", {})
+    for v in book["vaults"]:
+        sym = v["symbol"]
+        gs[sym] = merge_gaps(gs.get(sym, []), gap_windows(vault_rows(ms["points"], sym)), now)
+    return ms
+
+
+def market_series(book, ms, now):
+    """history.json's "market" block: one shared timeline, arrays aligned to it, null for a gap.
+    A lighter view of the state: 5-min for PUBLIC_FINE_SEC, hourly (first sample) before that."""
+    pts = thin(ms.get("points", []), now, PUBLIC_FINE_SEC)
+    out = {"frozenAfterSec": FROZEN_AFTER_SEC, "t": [p["t"] for p in pts], "block": [p["block"] for p in pts],
+           "blockTime": [p["blockTime"] for p in pts], "vaults": {}}
+    for v in book["vaults"]:
+        sym = v["symbol"]
+        col = lambda i: [p["v"][sym][i] if sym in p["v"] else None for p in pts]
+        feed, upd, mark, index = col(0), col(1), col(2), col(3)
+        out["vaults"][sym] = {
+            "market": v["marketIndex"], "feedAddress": v["replayAggregator"],
+            "feed": feed, "feedUpdatedAt": upd, "mark": mark, "index": index,
+            "basisBps": [bps(m, f) for m, f in zip(mark, feed)],
+            "feedFrozen": [None if u is None else (1 if is_frozen(p["blockTime"], u) else 0) for p, u in zip(pts, upd)],
+        }
+    return out
+
+
+SOURCES = {
+    "feed": "Chainlink price feed latestRoundData() (the book's replayAggregator address), read by the UseCert server at the recorded block every 5 min",
+    "venue": "Robinhood Chain Lighter GET /api/v1/orderBookDetails mark_price and index_price, USD per unit of base; third-party data, sampled every 5 min",
+    "funding": "Robinhood Chain Lighter GET /api/v1/fundings, hourly; rate in percent per hour, signed from the long vault's side (negative = the vault pays); third-party data",
+}
+DEFINITIONS = {
+    "basisBps": "(venue mark - feed price) / feed price x 10000, at one sample",
+    "feedFrozen": "block timestamp - feed updatedAt > %d s" % FROZEN_AFTER_SEC,
+    "gapBps": "(venue mark at the last sample before the feed resumed - feed price at freeze) / feed price at freeze x 10000",
+    "reopenMoveBps": "(first feed price after resuming - feed price at freeze) / feed price at freeze x 10000",
+    "avgPctPerHour": "mean of the hourly rates in the window; hours = how many the venue returned",
+}
+
+
+def build_stats(book, ms, now):
+    pts = ms.get("points", [])
+    assets = []
+    for v in book["vaults"]:
+        sym = v["symbol"]
+        last = next((p for p in reversed(pts) if sym in p["v"]), None)
+        cur = None
+        if last:
+            feed, upd, mark, index = last["v"][sym]
+            cur = {"t": last["t"], "block": last["block"], "blockTime": last["blockTime"], "feed": feed,
+                   "feedUpdatedAt": upd, "feedFrozen": is_frozen(last["blockTime"], upd),
+                   "mark": mark, "index": index, "basisBps": bps(mark, feed)}
+        fs = ms.get("funding", {}).get(sym, [])
+        assets.append({"symbol": sym, "market": v["marketIndex"], "feedAddress": v["replayAggregator"],
+                       "now": cur, "funding": {"d7": funding_avg(fs, now, 7), "d30": funding_avg(fs, now, 30)},
+                       "gaps": ms.get("gaps", {}).get(sym, [])})
+    return {"generatedAt": now, "chainId": book["chainId"], "intervalSec": INTERVAL_SEC,
+            "frozenAfterSec": FROZEN_AFTER_SEC, "sources": SOURCES, "definitions": DEFINITIONS, "assets": assets}
+
+
+# CSV: one header, one "now" row per asset then its gap rows. Each cell is the JSON value as JSON
+# writes it (so the numbers are the same digits), empty for null or not applicable.
+CSV_NOW = [("sample_t", "t"), ("block", "block"), ("block_time", "blockTime"), ("feed_price", "feed"),
+           ("feed_updated_at", "feedUpdatedAt"), ("feed_frozen", "feedFrozen"), ("venue_mark", "mark"),
+           ("venue_index", "index"), ("basis_bps", "basisBps")]
+CSV_FUND = [("funding_%s_%s" % (w, c), "d" + w[:-1], k) for w in ("7d", "30d")
+            for c, k in (("hours", "hours"), ("avg_pct_per_hour", "avgPctPerHour"), ("sum_pct", "sumPct"))]
+CSV_GAP = [("gap_status", "status"), ("freeze_updated_at", "freezeUpdatedAt"), ("feed_at_freeze", "feedAtFreeze"),
+           ("frozen_seen_t", "frozenSeenT"), ("mark_sample_t", "markSampleT"), ("mark_before_resume", "markBeforeResume"),
+           ("gap_bps", "gapBps"), ("resume_updated_at", "resumeUpdatedAt"), ("resume_seen_t", "resumeSeenT"),
+           ("feed_after_resume", "feedAfterResume"), ("reopen_move_bps", "reopenMoveBps"), ("duration_sec", "durationSec"),
+           ("recording_gap_at_resume", "recordingGapAtResume")]
+CSV_HEADER = (["row", "asset", "venue_market", "generated_at"] + [c for c, _ in CSV_NOW]
+              + [c for c, _, _ in CSV_FUND] + [c for c, _ in CSV_GAP])
+
+
+def cell(x):
+    if x is None:
+        return ""
+    return x if isinstance(x, str) else json.dumps(x)
+
+
+def stats_csv(st):
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, CSV_HEADER, lineterminator="\n")
+    w.writeheader()
+    for a in st["assets"]:
+        base = {"asset": a["symbol"], "venue_market": cell(a["market"]), "generated_at": cell(st["generatedAt"])}
+        row = dict(base, row="now")
+        for c, k in CSV_NOW:
+            row[c] = cell((a["now"] or {}).get(k))
+        for c, win, k in CSV_FUND:
+            row[c] = cell(a["funding"][win][k])
+        w.writerow(row)
+        for g in a["gaps"]:
+            w.writerow(dict(base, row="gap", **{c: cell(g[k]) for c, k in CSV_GAP}))
+    return buf.getvalue()
+
+
+def write_atomic(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    os.replace(path + ".tmp", path)
 
 
 def main():
@@ -151,6 +482,19 @@ def main():
             if v["symbol"] in prev:
                 fund[v["symbol"]] = dict(prev[v["symbol"]], stale=True)
 
+    ms, market = None, None
+    try:
+        try:
+            ms = json.load(open(MARKET_STATE))
+        except (OSError, ValueError):
+            ms = {}
+        record_market(book, ms, now, fund)
+        write_atomic(MARKET_STATE, json.dumps(ms, separators=(",", ":")))
+        market = market_series(book, ms, now)
+    except Exception as e:                                       # noqa: BLE001 - old fields still written
+        print("market step failed: %s" % str(e)[:160])
+        ms, market = None, None
+
     series = {}
     for v in book["vaults"]:
         sym = v["symbol"]
@@ -167,9 +511,20 @@ def main():
         "solvency": series,
         "funding": fund,
     }
+    if market is not None:
+        out["marketSource"] = "%s. %s. basisBps = (mark - feed) / feed x 10000; feedFrozen = block time - updatedAt > %d s" % (
+            SOURCES["feed"], SOURCES["venue"], FROZEN_AFTER_SEC)
+        out["market"] = market
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     json.dump(out, open(OUT + ".tmp", "w"), separators=(",", ":"))
     os.replace(OUT + ".tmp", OUT)
+    if ms is not None:
+        try:
+            stats = build_stats(book, ms, now)
+            write_atomic(STATS_JSON, json.dumps(stats, separators=(",", ":")))
+            write_atomic(STATS_CSV, stats_csv(stats))
+        except Exception as e:                                   # noqa: BLE001
+            print("stats write failed: %s" % str(e)[:160])
     print("sampled %d/%d vaults, funding %d/%d, %d samples kept"
           % (len(point["vaults"]), len(book["vaults"]), len(fund), len(book["vaults"]), len(st["samples"])))
 
