@@ -256,6 +256,7 @@ contract BackingInvariantTest is VaultFixture {
 
         // Attest that dangling notional truthfully. This is the state the fix is about.
         uint256 notional18 = uint256(dangling) * PX / (10 ** 4); // sizeDecimals = 4
+        _pastVenueLag(); // stack 5, H-5: observed after the mint's order
         vm.prank(attester);
         reg.attest(address(vault), 2, notional18, 3_600e18, 1_190_000e18);
         assertEq(
@@ -283,6 +284,7 @@ contract BackingInvariantTest is VaultFixture {
         uint64 batchId = 3;
         for (uint256 i = 0; i < 8 && lighter.positionBase(MARKET) != 0; ++i) {
             uint256 remaining18 = uint256(lighter.positionBase(MARKET)) * PX / (10 ** 4);
+            _nextRebalanceWindow(); // stack 5, H-5
             vm.prank(attester);
             reg.attest(address(vault), batchId++, remaining18, 3_600e18, 1_190_000e18);
             vm.prank(makeAddr("danglingTrimmer"));
@@ -298,6 +300,7 @@ contract BackingInvariantTest is VaultFixture {
 
         // And once flat, a truthful attestation puts the vault back in band: it stops, it does
         // not keep selling into a short.
+        _nextRebalanceWindow(); // stack 5, H-5
         vm.prank(attester);
         reg.attest(address(vault), 99, 0, 3_600e18, 1_190_000e18);
         assertEq(vault.solvency().deltaBps, 10_000);
@@ -445,6 +448,7 @@ contract BackingInvariantTest is VaultFixture {
     function test_rebalanceAlreadyThisBatchIsReachable() public {
         handler.mintInstant(5_000e6);
         assertGt(cert.totalSupply(), 0);
+        // (stack 5, H-5: handler.attest lets the venue lag pass before it attests)
         handler.attest(type(uint256).max, 0, 0); // fresh batch, notional 0 -> far out of band
 
         assertEq(handler.rebalanceAlreadyThisBatchCount(), 0);

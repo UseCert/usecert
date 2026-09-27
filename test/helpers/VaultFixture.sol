@@ -150,6 +150,20 @@ abstract contract VaultFixture is Test {
         vm.warp(t0);
     }
 
+    /// @dev Stack 5, H-5: rebalance() acts only on an attestation OBSERVED more than
+    ///      REBALANCE_VENUE_LAG after the vault's last order. SolvencyRegistry.attest stamps
+    ///      block.timestamp, so a test that orders and then attests must let the lag pass first -
+    ///      acting on an attestation from the same block as an order is exactly H-5.
+    function _pastVenueLag() internal {
+        vm.warp(block.timestamp + vault.REBALANCE_VENUE_LAG() + 1);
+    }
+
+    /// @dev Stack 5, H-5: consecutive rebalances are at least REBALANCE_MIN_INTERVAL apart (which
+    ///      is also longer than the venue lag).
+    function _nextRebalanceWindow() internal {
+        vm.warp(block.timestamp + vault.REBALANCE_MIN_INTERVAL());
+    }
+
     /// @dev Stack 5, H-4: keeper-mode settlement belongs to a settler that is not the attester.
     ///      Tests that used the attester as the settling keeper name this address instead.
     address internal settler = makeAddr("settler");

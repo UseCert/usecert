@@ -202,6 +202,22 @@ contract CertVault {
     ///      basis the vault pays is absorbed by the buffer, exactly as the basis already was.
     uint256 public constant HEDGE_PRICE_BAND_BPS = 100;
 
+    /// @notice How far below the oracle price a CLOSING (reduce-only) sell may fill, in bps.
+    /// @dev M-6 (stack 5). Every sell this vault sends is a close of its own long hedge (exits,
+    ///      refunds, rebalance trims), and on this venue L1 orders are reduce-only, so a sell that
+    ///      does not fill is KILLED - but _recordOrder had already booked it, and closeAll()/
+    ///      retire() then saw a flat book while the vault was still long. At the 1% band a move of
+    ///      just over 1% between the oracle print and the venue (the weekend gap H-1 describes is
+    ///      far larger) was enough. A close is the side where refusing to fill is the worse
+    ///      outcome - it leaves unwanted exposure, whereas an unfilled OPEN only fails a mint - so
+    ///      closes take a 5% band and opens keep 1%. A market order still fills at the book, so in
+    ///      ordinary markets this changes nothing but the worst accepted price.
+    ///      RECONCILIATION OF RECORD: venuePositionBase remains a record of orders SUBMITTED. What
+    ///      the venue actually holds is the attested notional in SolvencyRegistry, and rebalance()
+    ///      acts on that figure - so a close the venue killed anyway shows up as over-hedge in the
+    ///      next attestation and is trimmed by rebalance(), permissionlessly.
+    uint256 public constant CLOSE_PRICE_BAND_BPS = 500;
+
     /// @notice Ceiling on the venue minimum governance may configure, so the setter cannot be
     ///         used to price every mint out.
     uint256 public constant MAX_VENUE_MIN_NOTIONAL_18 = 1_000e18;
@@ -1828,7 +1844,19 @@ contract CertVault {
         // because the venue fulfils min(request, available) and _sweepPending reconciles what
         // actually arrives.
         uint256 want = need > marginPendingRecall ? need : marginPendingRecall;
+        // M-9 (stack 5): never ask for more than the venue account was last attested to hold.
+        // The books size a recall from what was POSTED, and they do not see funding or trading
+        // losses; on all six mainnet vaults the books said 12.24 USDG while the account held about
+        // 2.06, and the venue refuses an over-sized withdrawal ENTIRELY, so recallMargin() asked
+        // for too much and got nothing. Capped at the latest attested margin18 (cash, or equity if
+        // lower), across both requests this call makes. An attested zero carries no information -
+        // it is what a never-attested vault and every fixture read - and over-asking only costs a
+        // refused request, so zero is read as unknown, not as empty.
+        uint256 m18 = registry.latest(address(this)).margin18;
+        uint256 room = m18 == 0 ? type(uint256).max : _from18(m18);
+        if (want > room) want = room;
         if (want > 0) _requestWithdraw(want);
+        room -= want;
 
         // M-4: the second sizing term, and the only one that can see margin freed by an INSTANT
         // redemption. It is a separate step from the request above, not folded into `want`, for
@@ -1874,7 +1902,8 @@ contract CertVault {
         //
         // Fail-open like everything else here: a refused request leaves marginExcess untouched
         // and anyone may retry.
-        if (marginExcess > 0 && _requestWithdraw(marginExcess)) _sweepPending();
+        uint256 excess = marginExcess < room ? marginExcess : room;
+        if (excess > 0 && _requestWithdraw(excess)) _sweepPending();
     }
 
     /// @dev Ask the venue for `amount` of collateral back. Fail-open: returns false rather than
@@ -1959,6 +1988,7 @@ contract CertVault {
                 lighterAccountIndex(), cfg.marketIndex, 0, oracle.toTickPrice(_limitPx18(px18, side)), side, ORDER_TYPE_MARKET
             );
             venuePositionBase = 0;
+            lastOrderAt = block.timestamp; // H-5: this order bypasses _recordOrder
             emit ClosedAll(side, known);
         }
         // C1: a wind-down must also repatriate. Without this, closeAll() closed the position and
@@ -1982,6 +2012,51 @@ contract CertVault {
 
     /// @notice The newest attestation batchId rebalance() has already acted on.
     uint64 public lastRebalancedBatch;
+
+    /// @notice When this vault last submitted an order to the venue (any hedge or close).
+    /// @dev H-5 (stack 5). An attestation observed before an order does not include that order's
+    ///      effect, so acting on it acts twice: forceExit(X) sells X, and a bundle signed BEFORE the
+    ///      exit still carries X in its notional, so rebalance() would sell X again - and in keeper
+    ///      mode nothing permissionless can buy it back. rebalance() therefore requires the
+    ///      attestation's observation time to be later than this plus REBALANCE_VENUE_LAG.
+    uint256 public lastOrderAt;
+
+    /// @notice When rebalance() last placed an order.
+    uint256 public lastRebalanceAt;
+
+    /// @notice The rolling rebalance budget's current level, in 18-decimal notional, as of
+    ///         rebalanceBucketAt. See REBALANCE_DAILY_BUDGET_18.
+    uint256 public rebalanceBucket18;
+    uint256 public rebalanceBucketAt;
+
+    /// @notice How long after the vault's last order an attestation must have been OBSERVED for
+    ///         rebalance() to act on it, in seconds.
+    /// @dev H-5. Covers the venue executing the order in a later batch and the signer observing the
+    ///      result. The registry stores the SIGNED observation time (attestSigned's observedAt), so
+    ///      a relayer holding an old bundle cannot make it look newer.
+    uint256 public constant REBALANCE_VENUE_LAG = 60;
+
+    /// @notice The least wall-clock time between two rebalance() orders, in seconds.
+    /// @dev H-4/H-5 (stack 5). lastRebalancedBatch limits rebalance() to once per attested batch,
+    ///      but batches are the attester's to mint: a compromised attester signing a fresh inflated
+    ///      notional every batch could walk the whole hedge off in minutes, $10k at a time. With
+    ///      this floor and the daily budget below, it cannot move more than the budget in a day,
+    ///      whatever it signs, and the vault's watchers have that long to react.
+    uint256 public constant REBALANCE_MIN_INTERVAL = 15 minutes;
+
+    /// @notice The most notional rebalance() may move in any rolling 24 hours, in 18 decimals.
+    /// @dev H-4/H-5 (stack 5). A leaky bucket of capacity BUDGET / 2 that refills at BUDGET / 2 per
+    ///      day: at most BUDGET / 2 in a burst, and in ANY 24-hour window at most the level at its
+    ///      start (<= BUDGET / 2) plus one day's refill (BUDGET / 2), i.e. BUDGET. A trim larger
+    ///      than the room left is shrunk to fit, so rebalance() keeps converging, only slower.
+    uint256 public constant REBALANCE_DAILY_BUDGET_18 = 100_000e18;
+
+    /// @dev H-5: the latest attestation was observed no later than lastOrderAt + REBALANCE_VENUE_LAG.
+    error CertVault_AttestationPredatesLastOrder();
+    /// @dev H-5: rebalance() inside REBALANCE_MIN_INTERVAL of the last one.
+    error CertVault_RebalanceTooSoon();
+    /// @dev H-5: the rolling budget has no room left; it refills continuously.
+    error CertVault_RebalanceBudgetSpent();
 
     /// @dev Delta tolerance in bps, and the maximum notional a single rebalance() call may move.
     ///      Bounding the latter is what keeps rebalance() permissionless without letting any
@@ -2082,7 +2157,15 @@ contract CertVault {
         // dishonesty. At a clamped price the trim it feeds sizes a certEquivalent that floors to
         // zero and rebalance() reverts CertVault_InBand, i.e. a named error rather than an
         // anonymous 0x11, which is what a permissionless entry point owes its caller.
-        required = _value18(s.supply, px18);
+        // Stack 5 (M-10 follow-on): certificates promised to OPEN mint receipts count as owed.
+        // Their hedge is already at the venue - requestMint submitted it (or, in keeper mode, the
+        // keeper opened it) - and the attested notional includes it, so leaving them out read a
+        // legitimate pending hedge as over-hedge, and a permissionless rebalance() would sell it
+        // just before settleMint minted the certificates against it. Once a receipt is staged for
+        // refund its reservation is released, so an orphan hedge left behind by a keeper that never
+        // settled DOES read as over-hedge, and rebalance() trims it (M-10). s.supply itself is
+        // still certificate supply, as published before.
+        required = _value18(s.supply + pendingMintCerts, px18);
         if (required == 0) {
             // required == 0 (no supply, or px18 == 0) means the vault owes no delta at all. What
             // that implies depends entirely on whether it is nonetheless carrying one:
@@ -2120,10 +2203,26 @@ contract CertVault {
     ///      the bound. Requiring a batchId strictly newer than the last one acted on keeps this
     ///      permissionless (anyone may still call it, Law 6 — deliberately NO access-control
     ///      gate) while making the per-call bound the real per-batch bound it was meant to be.
+    /// @dev H-5 (stack 5): three more bounds, none of them an access gate (Law 6 - anyone may still
+    ///      call): the attestation must have been observed after the vault's last order plus the
+    ///      venue lag (so it cannot double-close an exit it predates), REBALANCE_MIN_INTERVAL must
+    ///      have passed since the last rebalance order, and the trim must fit the rolling
+    ///      REBALANCE_DAILY_BUDGET_18. Every revert is retryable later, and none touches a
+    ///      redemption path (Law 2).
+    /// @dev M-10 (stack 5): in keeper mode an orphan hedge - opened by the keeper for a receipt it
+    ///      never settled - is in no ledger, so closeAll() sees a flat book. It IS in the attested
+    ///      notional, and once the receipt is staged its reservation leaves `required`, so this
+    ///      trims it (sells are allowed in keeper mode; they are what reduce-only means). The
+    ///      vault's own ledger never recorded that position, so a trim beyond the recorded long is
+    ///      booked as reaching flat, not as a short that does not exist. No separate closeExcess
+    ///      is needed.
     function rebalance() external {
-        uint64 batchId = registry.latest(address(this)).batchId;
-        if (batchId <= lastRebalancedBatch) revert CertVault_AlreadyRebalancedThisBatch();
-        lastRebalancedBatch = batchId;
+        ISolvencyRegistry.Attestation memory a = registry.latest(address(this));
+        if (a.batchId <= lastRebalancedBatch) revert CertVault_AlreadyRebalancedThisBatch();
+        if (a.attestedAt <= lastOrderAt + REBALANCE_VENUE_LAG) revert CertVault_AttestationPredatesLastOrder();
+        if (block.timestamp < lastRebalanceAt + REBALANCE_MIN_INTERVAL) revert CertVault_RebalanceTooSoon();
+        lastRebalancedBatch = a.batchId;
+        lastRebalanceAt = block.timestamp;
 
         (Solvency memory s, uint256 required, uint256 px18) = _solvency();
 
@@ -2155,6 +2254,16 @@ contract CertVault {
         uint256 gap18 = underHedged ? required - s.notional18 : s.notional18 - required;
         if (gap18 > MAX_REBALANCE_NOTIONAL_18) gap18 = MAX_REBALANCE_NOTIONAL_18;
 
+        // H-5: the rolling budget (see REBALANCE_DAILY_BUDGET_18). The level leaks at half the
+        // budget per day; `room` is what is left under the half-budget ceiling.
+        uint256 half = REBALANCE_DAILY_BUDGET_18 / 2;
+        uint256 level = _floorSub(rebalanceBucket18, (block.timestamp - rebalanceBucketAt) * half / 1 days);
+        uint256 room = half - level;
+        if (room == 0) revert CertVault_RebalanceBudgetSpent();
+        if (gap18 > room) gap18 = room;
+        rebalanceBucket18 = level + gap18;
+        rebalanceBucketAt = block.timestamp;
+
         uint256 certEquivalent = gap18 * 1e18 / px18;
         // Finding 1a (Task 10 review): either this division or the size-decimals conversion
         // inside _hedge can floor a small-but-real gap to a baseAmount of 0 — Lighter's
@@ -2162,7 +2271,12 @@ contract CertVault {
         // wind-down (outstanding notional a few cents wide at sizeDecimals = 4). Treat a
         // dust-sized gap as already in-band rather than ever submitting a zero-amount order.
         if (_baseAmount(certEquivalent) == 0) revert CertVault_InBand();
+        int256 ledgerBefore = venuePositionBase;
         _hedge(certEquivalent, px18, underHedged ? SIDE_BID : SIDE_ASK);
+        // M-10: see above. Only a trim that starts from a recorded long (or flat) and would cross
+        // below zero is clamped; a recorded short is left exactly as it was
+        // (test_zeroSupplyTrimCannotCloseADanglingShort keeps that gap visible).
+        if (!underHedged && ledgerBefore >= 0 && venuePositionBase < 0) venuePositionBase = 0;
     }
 
     /// @notice Relay accrued funding, execution variance and realised basis into the buffer.
@@ -2526,10 +2640,11 @@ contract CertVault {
 
     /// @dev The worst fill a hedge order will accept: HEDGE_PRICE_BAND_BPS above the oracle for a
     ///      buy, below it for a sell. See HEDGE_PRICE_BAND_BPS for why a point price never fills.
+    /// @dev M-6 (stack 5): a sell is a close and takes CLOSE_PRICE_BAND_BPS.
     function _limitPx18(uint256 px18, uint8 side) internal pure returns (uint256) {
         return side == SIDE_BID
             ? Math.mulDiv(px18, 10_000 + HEDGE_PRICE_BAND_BPS, 10_000)
-            : Math.mulDiv(px18, 10_000 - HEDGE_PRICE_BAND_BPS, 10_000);
+            : Math.mulDiv(px18, 10_000 - CLOSE_PRICE_BAND_BPS, 10_000);
     }
 
     /// @dev True when an order of `base` venue units at `px18` is below what the venue accepts.
@@ -2550,7 +2665,10 @@ contract CertVault {
     ///      bookkeeping counter — the exact class of mistake Finding 1 is about. `base` is bounded
     ///      by type(uint48).max in both callers (SafeCast in _hedge, an explicit range check in
     ///      _tryHedge), so wrapping an int256 needs ~4e62 consecutive maximum-size orders.
+    /// @dev H-5 (stack 5): also stamps lastOrderAt, a plain store, so no revert is added to the
+    ///      fail-open exit path.
     function _recordOrder(uint256 base, uint8 side) internal {
+        lastOrderAt = block.timestamp;
         unchecked {
             venuePositionBase =
                 side == SIDE_ASK ? venuePositionBase - int256(base) : venuePositionBase + int256(base);

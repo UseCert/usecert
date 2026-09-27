@@ -525,6 +525,7 @@ contract CertVaultRefundTest is VaultFixture {
         uint256 rebalances;
         for (uint256 i = 0; i < 12 && lighter.positionBase(MARKET) != 0; ++i) {
             uint256 remaining18 = uint256(lighter.positionBase(MARKET)) * PX / (10 ** 4);
+            _nextRebalanceWindow(); // stack 5, H-5: one trim per interval, after the venue lag
             vm.prank(attester);
             reg.attest(address(vault), batchId++, remaining18, 0, 1_190_000e18);
             assertEq(vault.solvency().deltaBps, vault.DELTA_UNBOUNDED_BPS(), "still reported as in band");
@@ -587,6 +588,7 @@ contract CertVaultRefundTest is VaultFixture {
         // The attester can only report the MAGNITUDE, so the vault reads this identically to the
         // dangling long above and sells again.
         uint256 magnitude18 = uint256(HEDGE_TICKS) * PX / (10 ** 4);
+        _pastVenueLag(); // stack 5, H-5
         vm.prank(attester);
         reg.attest(address(vault), 2, magnitude18, 0, 1_190_000e18);
         assertEq(vault.solvency().deltaBps, vault.DELTA_UNBOUNDED_BPS());
