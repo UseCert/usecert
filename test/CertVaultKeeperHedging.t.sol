@@ -240,7 +240,7 @@ contract CertVaultKeeperHedgingTest is VaultFixture {
         _enable();
         vm.prank(alice);
         uint256 held = vault.requestMint(50_000e6);
-        vm.prank(attester);
+        vm.prank(settler); // stack 5 (H-4 split): settlement is the settler's, not the attester's
         vault.settleMint(held, PX);
         vm.prank(alice);
         uint256 pending = vault.requestMint(10_000e6);
@@ -249,8 +249,9 @@ contract CertVaultKeeperHedgingTest is VaultFixture {
         reg.disableAttester();
         oracle.disableAttester();
 
+        // The attester could never settle in stack 5, disabled or not.
         vm.prank(attester);
-        vm.expectRevert(CertVault.CertVault_OnlyAttester.selector);
+        vm.expectRevert(CertVault.CertVault_OnlySettler.selector);
         vault.settleMint(pending, PX);
 
         vm.prank(attester);
