@@ -1112,7 +1112,8 @@
   "Insurance pool v1 · exit only": "保险池 v1 · 仅可退出",
   "This pool is replaced by v2 above. Deposits are closed here; withdrawals stay open: request, wait out the cooldown, then withdraw in the window.": "此池已由上方的 v2 取代。这里不再接受存款；提款仍然开放：先申请，等待冷却期结束，然后在提款窗口内提取。",
   "Staking · insurance pool v1 (exit only)": "质押 · 保险池 v1（仅可退出）",
-  "CERT staking v1 · exit only: withdraw and claim here, stake in v2 above": "CERT 质押 v1 · 仅可退出：在此提取和领取奖励，请在上方的 v2 中质押"
+  "CERT staking v1 · exit only: withdraw and claim here, stake in v2 above": "CERT 质押 v1 · 仅可退出：在此提取和领取奖励，请在上方的 v2 中质押",
+  "The vaults that pay these fees are opening now; until they do, income is zero.": "支付这些费用的金库正在开放中；在它们开放之前，收入为零。"
  },
  "tpl": {
   "(EST. {#} · VERSION {#}.{#})": "（创立于 {0} · 版本 {1}.{2}）",

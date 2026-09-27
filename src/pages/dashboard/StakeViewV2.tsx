@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { formatUnits, parseUnits } from "viem";
 import { usePublicClient, useReadContracts, useWriteContract } from "wagmi";
 import { ArrowUpRight, Loader2 } from "lucide-react";
-import { CHAIN_ID } from "@/chain/deployment";
+import { CHAIN_ID, IS_STACK5 } from "@/chain/deployment";
 import { SHARED, TestUSDGABI } from "@/chain/contracts";
 import { Stack5InsuranceStakingABI } from "@/chain/contracts.stack5";
 import { explorerAddressUrl, explorerTxUrl } from "@/chain/config";
@@ -295,6 +295,7 @@ export default function StakeViewV2({ pool, deployTx }: { pool: `0x${string}`; d
             The pool&apos;s income is its 70% share of the vaults&apos; fees, paid in through the fee vault. Income vests over 7
             days before it counts in the value per share, so nobody can deposit just before a payment and leave with it. There
             are no token emissions. The pool&apos;s return is only real income, minus any draw.
+            {IS_STACK5 ? "" : " The vaults that pay these fees are opening now; until they do, income is zero."}
           </p>
           <p className="mt-3 font-mono text-[11px] leading-[1.6] text-silver">
             {unvested === undefined

@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { formatUnits, parseUnits } from "viem";
 import { usePublicClient, useReadContracts, useWriteContract } from "wagmi";
 import { ArrowUpRight, Loader2 } from "lucide-react";
-import { CHAIN_ID } from "@/chain/deployment";
+import { CHAIN_ID, IS_STACK5 } from "@/chain/deployment";
 import { CertificateABI, SHARED, TestUSDGABI } from "@/chain/contracts";
 import { Stack5CertStakingABI } from "@/chain/contracts.stack5";
 import { explorerAddressUrl, explorerTxUrl } from "@/chain/config";
@@ -261,6 +261,7 @@ export default function CertStakePanelV2({ pool, deployTx }: { pool: `0x${string
             and anyone can add to it. No annual rate is shown, because it would be a forecast, not a fact. There are no token
             emissions. Reward funded while nobody is staked is not lost: it is carried into the next stream
             {unallocated !== undefined && unallocated > 0n ? ` (${usd(unallocated, 4)} USDG carried now)` : ""}.
+            {IS_STACK5 ? "" : " The vaults that pay these fees are opening now; until they do, income is zero."}
           </p>
         </Panel>
       </Stagger>
