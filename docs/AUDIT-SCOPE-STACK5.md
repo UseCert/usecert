@@ -9,7 +9,7 @@ stack 5.
 | Repository | https://github.com/UseCert/usecert, branch **`feat/stack5`** |
 | Chain | Robinhood Chain mainnet, chain id 4663 (not yet deployed) |
 | Tooling | Solidity 0.8.24, Foundry, OpenZeppelin v5.7.0, optimizer 200 runs, `via_ir` off |
-| Tests | 678 in total: 675 pass. 3 fail by design, in `test/AuditPoC.t.sol` from the 2026-09-08 audit |
+| Tests | 685 in total: 682 pass. 3 fail by design, in `test/AuditPoC.t.sol` from the 2026-09-08 audit. `test/script/DeployMainnetStack5.t.sol` runs the whole stack-5 deploy, the Safe phases A and B, and a first keeper-mode mint |
 | Largest contract | CertVault, 23,458 B runtime (EIP-170 limit 24,576) |
 | What changed vs stack 4 | 9 source files changed, +1,815 / −211 lines (`git diff a057c8b feat/stack5 -- src/`) |
 
@@ -76,3 +76,19 @@ Stack-5 behaviour is switched on with `STACK=5`.
   up to the rolling cap, but only after a public registration delay.
 - **CertStaking:** a late-period funding pays out over the short time left.
 - **CERT staking cap:** no per-address cap, because splitting across addresses defeats one.
+
+## Deployment scripts (in scope for review)
+
+- **`script/DeployMainnet.s.sol`:** deploys stack 5 and writes `deployments/4663.stack5.json`,
+  marked `"stack": 5`.
+- **`script/SafeBatches.s.sol`:** the Safe's batches, in this order:
+  1. `batch1`: the registry and the oracles.
+  2. `phaseA` (day 0): registration, wiring, and the delayed-change proposals.
+  3. `phaseB` (day ≥ 2): the applies. They must match phase A byte for byte, and are refused if
+     early or missing.
+  4. `openMinting`: sets the capacity cap, one vault first.
+  5. `retireStack4`.
+- **Runbook:** `docs/STACK5-DEPLOY-RUNBOOK.md`.
+- **Known limit:** CapacityOracle has a single `maxAbsoluteCap` ceiling, so per-asset caps (for
+  example uTSLA 0k against uSPY M) are enforced by the scripts, not on chain. The Safe could
+  raise any vault to the largest row.
