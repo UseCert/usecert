@@ -438,7 +438,7 @@ contract CertVaultFeesTest is VaultFixture {
         FeesMockRegistry registry = new FeesMockRegistry();
         registry.set(address(vault));
         InsuranceStaking pool = new InsuranceStaking(
-            IERC20(address(usdg)), registry, gov, 10 days, 2 days, 1 days, 3_000, "UseCert Insurance", "sUSDG"
+            IERC20(address(usdg)), registry, gov, 10 days, 2 days, 1 days, 3_000, 10_000e6, "UseCert Insurance", "sUSDG"
         );
         address staker = makeAddr("staker");
         usdg.mint(staker, 10_000e6);
