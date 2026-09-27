@@ -564,6 +564,7 @@ contract InsuranceStakingTest is Test {
         vm.startPrank(eve);
         uint256 fresh = pool.deposit(1_000e6, eve);
         fv.distribute();
+        fv.claim(address(pool)); // FeeVault v2 is pull-based; claim is permissionless, so the attacker bundles it too
         vm.expectRevert(); // the fresh shares are not the request: they are not redeemable at all
         pool.redeem(armed + fresh, eve, eve);
         uint256 back = pool.redeem(armed, eve, eve);
