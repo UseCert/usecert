@@ -28,6 +28,17 @@ restricted regions (code 20558) and that is not to be routed around.
 
 Usage:  usecert-keeper.py CONFIG.json            (loop)
         usecert-keeper.py CONFIG.json --once     (one pass, for testing)
+
+KEYS. Stack 4 (the default): every send is made with the attester key (config "attester_pk" or
+KEEPER_ATTESTER_PK), because the stack-4 vault accepts settleMint only from the oracle's attester.
+Stack 5 ("stack": 5 in the config, or STACK=5; pre-audit H-4): settleMint and stageRefund are the
+vault's SETTLER's, a key separate from the attester. The keeper then loads ONLY the settler key -
+config "settler_pk", else KEEPER_SETTLER_PK, else the file named by config "settler_key_file" or
+KEEPER_SETTLER_KEY_FILE (the hex key, alone) - and uses it for every send, the permissionless
+recall and refund included. The attester key is never read in stack-5 mode: it is refused if
+identical to the settler key and dropped from the environment so no cast child inherits it. At
+start-up the settler is checked against the vault's "settler_getter" (default settler()(address);
+"" skips the check) so a wrong key fails loudly instead of as reverted settlements.
 """
 import asyncio
 import json
@@ -50,7 +61,17 @@ def log(*a):
     print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), *a, flush=True)
 
 
+def _norm_key(k):
+    k = (k or "").strip().lower()
+    return k[2:] if k.startswith("0x") else k
+
+
 class Keeper:
+    # Class defaults, so a Keeper built without __init__ (the tests) is a stack-4 keeper.
+    stack = 4
+    settler_pk = None
+    attester_pk = None
+
     def __init__(self, cfg_path):
         with open(cfg_path) as f:
             c = json.load(f)
@@ -67,10 +88,49 @@ class Keeper:
         self.settle_window = None                       # read from the vault on first use
         with open(c["api_key_file"]) as f:
             self.key = json.load(f)
-        self.attester_pk = c["attester_pk"] if "attester_pk" in c else os.environ["KEEPER_ATTESTER_PK"]
         self.cast = c.get("cast", "cast")
+        self.stack = int(c.get("stack", os.environ.get("STACK", "4")))
+        self._load_keys(c)
         self.topic = self._cast("keccak", "HedgeRequested(uint256,uint256,uint8,uint256)").strip()
         self.state = self._load_state(c.get("start_block"))
+
+    # ------------------------------------------------------------------ keys
+    def _load_keys(self, c, env=None):
+        env = os.environ if env is None else env
+        if self.stack < 5:
+            self.attester_pk = c["attester_pk"] if "attester_pk" in c else env["KEEPER_ATTESTER_PK"]
+            if (c.get("settler_pk") or env.get("KEEPER_SETTLER_PK") or c.get("settler_key_file")
+                    or env.get("KEEPER_SETTLER_KEY_FILE")):
+                log("a settler key is configured but this is a stack-4 keeper: ignored "
+                    "(the stack-4 vault settles only from the attester)")
+            return
+        pk = c.get("settler_pk") or env.get("KEEPER_SETTLER_PK")
+        path = c.get("settler_key_file") or env.get("KEEPER_SETTLER_KEY_FILE")
+        if not pk and path:
+            with open(path) as f:
+                pk = f.read().strip()
+        if not pk:
+            raise SystemExit("stack 5: no settler key (settler_pk, KEEPER_SETTLER_PK or KEEPER_SETTLER_KEY_FILE)")
+        att = c.get("attester_pk") or env.get("KEEPER_ATTESTER_PK")
+        if att and _norm_key(att) == _norm_key(pk):
+            raise SystemExit("stack 5: the settler key IS the attester key; H-4 needs two keys")
+        env.pop("KEEPER_ATTESTER_PK", None)
+        self.settler_pk, self.attester_pk = pk, None
+        getter = c.get("settler_getter", "settler()(address)")
+        if getter:
+            want = self._cast("call", self.vault, getter, "--rpc-url", self.rpc).split()[0].lower()
+            have = self._cast("wallet", "address", "--private-key", pk).split()[0].lower()
+            if want != have:
+                raise SystemExit("stack 5: the vault's settler is %s, the settler key derives %s" % (want, have))
+
+    def _key(self, purpose):
+        """The key a send is made with. Stack 5: the settler, for everything; the attester key is
+        not even loaded. Stack 4: the attester, as always."""
+        if self.stack >= 5:
+            if not self.settler_pk:
+                raise RuntimeError("stack 5 keeper has no settler key for %s" % purpose)
+            return self.settler_pk
+        return self.attester_pk
 
     # ------------------------------------------------------------------ plumbing
     def _cast(self, *args):
@@ -184,7 +244,7 @@ class Keeper:
 
     def settle(self, rid, fill_px18):
         out = self._cast("send", self.vault, "settleMint(uint256,uint256)", str(rid), str(fill_px18),
-                         "--gas-limit", "1500000", "--private-key", self.attester_pk, "--rpc-url", self.rpc)
+                         "--gas-limit", "1500000", "--private-key", self._key("settleMint"), "--rpc-url", self.rpc)
         ok = any(l.split()[:2] == ["status", "1"] for l in out.split("\n") if l.strip())
         h = next((l.split()[1] for l in out.split("\n") if l.startswith("transactionHash")), "?")
         if not ok:
@@ -330,7 +390,7 @@ class Keeper:
         if cap == 0:
             return
         out = self._cast("send", self.vault, "recallMarginUpTo(uint256)", str(cap),
-                         "--gas-limit", "1500000", "--private-key", self.attester_pk, "--rpc-url", self.rpc)
+                         "--gas-limit", "1500000", "--private-key", self._key("recallMarginUpTo"), "--rpc-url", self.rpc)
         self.state["last_recall"] = time.time()
         self._save()
         log("recall: owed %d, vault holds %d, venue available %d -> recallMarginUpTo(%d) sent (%s)"
@@ -363,7 +423,7 @@ class Keeper:
             # an expected "not yet" (window, funding), so it is reported as a failed send.
             try:
                 return self._cast("send", self.vault, *args, "--gas-limit", "1500000",
-                                  "--private-key", self.attester_pk, "--rpc-url", self.rpc)
+                                  "--private-key", self._key(args[0]), "--rpc-url", self.rpc)
             except RuntimeError as e:
                 log("send %s failed: %s" % (args[0], str(e)[:200]))
                 return ""
@@ -420,8 +480,9 @@ class Keeper:
 
 def main():
     k = Keeper(sys.argv[1])
-    log("keeper up: vault %s market %d account %d from block %d"
-        % (k.vault, k.market, k.key["account_index"], k.state["next_block"]))
+    log("keeper up: vault %s market %d account %d from block %d, stack %d, sends with the %s key"
+        % (k.vault, k.market, k.key["account_index"], k.state["next_block"], k.stack,
+           "settler" if k.stack >= 5 else "attester"))
     if "--once" in sys.argv:
         k.run_once()
         return

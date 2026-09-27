@@ -2,7 +2,7 @@
 # Run: python deploy/tests/test_keeper_recall.py  (exit code = number of failures)
 import importlib.util, sys, types, os
 sys.modules.setdefault("lighter", types.ModuleType("lighter"))
-spec = importlib.util.spec_from_file_location("k", r"D:\cert\deploy\bin\usecert-keeper.py"); k = importlib.util.module_from_spec(spec); spec.loader.exec_module(k)
+spec = importlib.util.spec_from_file_location("k", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "usecert-keeper.py")); k = importlib.util.module_from_spec(spec); spec.loader.exec_module(k)
 def mk(owed, have, avail):
     K = k.Keeper.__new__(k.Keeper); K.vault="0xV"; K.rpc="r"; K.attester_pk="pk"; K.auto_recall=True
     K.state={"last_recall":0,"receipts":{}}; K._save=lambda:None; K.calls=[]; K.sent=[]

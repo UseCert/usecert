@@ -1,0 +1,71 @@
+{
+ "code": 200,
+ "total": 1,
+ "accounts": [
+  {
+   "code": 0,
+   "account_type": 0,
+   "index": 33556,
+   "l1_address": "0x6330B3C6612DBbf5D81A6BafB6319F39D46Df4B0",
+   "cancel_all_time": 0,
+   "total_order_count": 0,
+   "total_isolated_order_count": 0,
+   "pending_order_count": 0,
+   "available_balance": "2.056581",
+   "status": 1,
+   "collateral": "2.056581",
+   "transaction_time": 1790394524934322,
+   "account_trading_mode": 1,
+   "account_index": 33556,
+   "name": "",
+   "description": "",
+   "can_invite": true,
+   "referral_points_percentage": "",
+   "can_rfq": true,
+   "can_rfq_market_ids": [],
+   "agent_enabled": false,
+   "created_at": 0,
+   "metadata": {
+    "color": ""
+   },
+   "positions": [
+    {
+     "market_id": 16,
+     "symbol": "TSLA",
+     "initial_margin_fraction": "50.00",
+     "open_order_count": 0,
+     "pending_order_count": 0,
+     "position_tied_order_count": 0,
+     "sign": 1,
+     "position": "0.0000",
+     "avg_entry_price": "0.00",
+     "position_value": "-0.000000",
+     "unrealized_pnl": "0.000000",
+     "realized_pnl": "0.000000",
+     "liquidation_price": "0",
+     "margin_mode": 0,
+     "margin_set_flag": 1,
+     "allocated_margin": "0.000000"
+    }
+   ],
+   "assets": [
+    {
+     "symbol": "USDG",
+     "asset_id": 3,
+     "balance": "0.000000",
+     "locked_balance": "0.000000",
+     "margin_mode": "enabled",
+     "margin_balance": "2.056581",
+     "multiplier": "1.000000000000000000"
+    }
+   ],
+   "total_asset_value": "2.056581",
+   "cross_asset_value": "2.056581",
+   "cross_initial_margin_requirement": "0.000000",
+   "cross_maintenance_margin_requirement": "0.000000",
+   "shares": [],
+   "pending_unlocks": []
+  }
+ ],
+ "_recorded": "GET https://api.rh.lighter.xyz/api/v1/account?by=l1_address&value=<uTSLA vault>, 2026-09-27, unchanged"
+}

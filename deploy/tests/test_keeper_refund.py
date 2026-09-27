@@ -2,7 +2,7 @@
 # Run: python deploy/tests/test_keeper_refund.py  (exit code = number of failures)
 import importlib.util, time, sys
 import types; sys_ = __import__("sys"); sys_.modules.setdefault("lighter", types.ModuleType("lighter"))
-spec = importlib.util.spec_from_file_location("k", r"D:\cert\deploy\bin\usecert-keeper.py"); k = importlib.util.module_from_spec(spec); spec.loader.exec_module(k)
+import os; spec = importlib.util.spec_from_file_location("k", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "usecert-keeper.py")); k = importlib.util.module_from_spec(spec); spec.loader.exec_module(k)
 def mk(receipt, have, owed, avail, revert=()):
     K = k.Keeper.__new__(k.Keeper)
     K.vault, K.rpc, K.attester_pk, K.settle_window = "0xV", "rpc", "pk", None
