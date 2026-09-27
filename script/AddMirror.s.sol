@@ -197,6 +197,15 @@ contract AddMirror is Script {
     /// @dev TESTNET REACHABILITY VALUE. Mainnet is 93_600 (`docs/TESTNET-PLAN.md` §1). Must not be
     ///      carried over. See `DeployTestnet`'s constant for the full argument.
     uint256 internal constant STALENESS_SECONDS = 900;
+    /// @dev Mainnet staleness (`DeployMainnet.MAINNET_STALENESS_SECONDS`). The Chainlink RH feeds
+    ///      are market-hours feeds, so 900 s would close minting within minutes of every session.
+    uint256 internal constant MAINNET_STALENESS_SECONDS = 93_600;
+
+    /// @dev Pre-audit L-5: the constant above used to be written into, and checked against, EVERY
+    ///      book, mainnet included, although every mainnet oracle was built with 93,600.
+    function _staleness() internal view returns (uint256) {
+        return block.chainid == 4663 ? MAINNET_STALENESS_SECONDS : STALENESS_SECONDS;
+    }
     uint256 internal constant POKE_CONFIRMATION_SECONDS = 300;
     /// @dev H-6 / L-12: CertOracle's `maxMarkAge` - how old the mark may be and still open
     ///      minting. Bounded on chain to [30, 3600]. 300 s matches `maxAttestationAgeSec`: the signer
@@ -398,7 +407,7 @@ contract AddMirror is Script {
                 newAggregator,
                 attesterAddr,
                 a.priceDecimals,
-                STALENESS_SECONDS,
+                _staleness(),
                 DEVIATION_BPS,
                 BASIS_BAND_BPS,
                 POKE_CONFIRMATION_SECONDS,
@@ -844,7 +853,7 @@ contract AddMirror is Script {
         require(vm.parseJsonUint(j, ".parameters.settleBandBps") == SETTLE_BAND_BPS, "PARAM: settleBandBps");
         require(vm.parseJsonUint(j, ".parameters.mintFeeBps") == MINT_FEE_BPS, "PARAM: mintFeeBps");
         require(vm.parseJsonUint(j, ".parameters.redeemFeeBps") == REDEEM_FEE_BPS, "PARAM: redeemFeeBps");
-        require(vm.parseJsonUint(j, ".parameters.stalenessSeconds") == STALENESS_SECONDS, "PARAM: stalenessSeconds");
+        require(vm.parseJsonUint(j, ".parameters.stalenessSeconds") == _staleness(), "PARAM: stalenessSeconds");
         require(
             vm.parseJsonUint(j, ".parameters.pokeConfirmationSeconds") == POKE_CONFIRMATION_SECONDS,
             "PARAM: pokeConfirmationSeconds"
@@ -931,7 +940,7 @@ contract AddMirror is Script {
         CertOracle o = CertOracle(bookMirrors[0].certOracle);
         require(o.governance() == govAddr, "CHAIN: mirror0 oracle.governance != GOV - wrong key set entirely");
         require(o.attester() == attesterAddr, "CHAIN: mirror0 oracle.attester != ATTESTER");
-        require(o.stalenessSeconds() == STALENESS_SECONDS, "CHAIN: mirror0 oracle.stalenessSeconds != ours");
+        require(o.stalenessSeconds() == _staleness(), "CHAIN: mirror0 oracle.stalenessSeconds != ours");
         require(o.deviationBps() == DEVIATION_BPS, "CHAIN: mirror0 oracle.deviationBps != ours");
         require(o.basisBandBps() == BASIS_BAND_BPS, "CHAIN: mirror0 oracle.basisBandBps != ours");
         require(
@@ -1048,7 +1057,7 @@ contract AddMirror is Script {
         require(o.singleSource() == SINGLE_SOURCE, "S9: oracle.singleSource != declared mode");
         require(o.deviationBps() == DEVIATION_BPS, "S9: oracle.deviationBps wrong");
         require(o.deviationBps() != 0, "S9: deviationBps == 0 locks minting shut on the first tick");
-        require(o.stalenessSeconds() == STALENESS_SECONDS, "S9: oracle.stalenessSeconds wrong");
+        require(o.stalenessSeconds() == _staleness(), "S9: oracle.stalenessSeconds wrong");
         require(o.pokeConfirmationSeconds() == POKE_CONFIRMATION_SECONDS, "S9: pokeConfirmationSeconds wrong");
         require(o.pokeConfirmationSeconds() != 0, "S9: pokeConfirmationSeconds == 0");
         require(o.basisBandBps() == BASIS_BAND_BPS, "S9: oracle.basisBandBps wrong");
@@ -1376,7 +1385,7 @@ contract AddMirror is Script {
     ///      imported because importing `DeployTestnet` into this file would pull its
     ///      full-bootstrap `run()` into the same compilation unit and make it one `forge script`
     ///      contract-selection mistake away from being invoked.
-    function _parametersJson() internal pure returns (string memory) {
+    function _parametersJson() internal view returns (string memory) {
         return string.concat(
             '    "targetMarginBps": 9000,\n',
             '    "instantCap18": "1000000000000000000000",\n',
@@ -1384,8 +1393,8 @@ contract AddMirror is Script {
             '    "settleBandBps": 500,\n',
             '    "mintFeeBps": 10,\n',
             '    "redeemFeeBps": 10,\n',
-            '    "stalenessSeconds": 900,\n',
-            '    "_stalenessSecondsNote": "TESTNET REACHABILITY VALUE. Mainnet is 93600 (TESTNET-PLAN.md S1). Must not be carried over.",\n',
+            '    "stalenessSeconds": ', vm.toString(_staleness()), ',\n',
+            '    "_stalenessSecondsNote": "The value every CertOracle in this book was constructed with (_staleness(): 900 on testnet, 93600 on mainnet). Pre-audit L-5: this used to be the literal 900 on every chain.",\n',
             '    "pokeConfirmationSeconds": 300,\n',
             '    "deviationBps": 500,\n',
             '    "basisBandBps": 500,\n',

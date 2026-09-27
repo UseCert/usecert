@@ -132,7 +132,7 @@ contract VerifyFixture is DeployTestnet {
     ///      script's own generators rather than a copy. If a parameter is added to the book, these
     ///      tests parse the same text an operator's book carries — a copy here would drift and the
     ///      drift would look like a passing test.
-    function parametersJson() external pure returns (string memory) {
+    function parametersJson() external view returns (string memory) {
         return _parametersJson();
     }
 

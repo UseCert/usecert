@@ -1304,7 +1304,7 @@ contract DeployTestnet is Script {
         return string.concat(pad, '"', k, '": "', vm.toString(v), '"\n');
     }
 
-    function _parametersJson() internal pure returns (string memory) {
+    function _parametersJson() internal view returns (string memory) {
         return string.concat(
             '    "targetMarginBps": 9000,\n',
             '    "instantCap18": "1000000000000000000000",\n',
@@ -1312,8 +1312,8 @@ contract DeployTestnet is Script {
             '    "settleBandBps": 500,\n',
             '    "mintFeeBps": 10,\n',
             '    "redeemFeeBps": 10,\n',
-            '    "stalenessSeconds": 900,\n',
-            '    "_stalenessSecondsNote": "TESTNET REACHABILITY VALUE. Mainnet is 93600 (TESTNET-PLAN.md S1). Must not be carried over.",\n',
+            '    "stalenessSeconds": ', vm.toString(_stalenessSeconds()), ',\n',
+            '    "_stalenessSecondsNote": "The value every CertOracle in this book was constructed with (_stalenessSeconds(): 900 on testnet, 93600 on mainnet). Pre-audit L-5: this used to be the literal 900 on every chain.",\n',
             '    "pokeConfirmationSeconds": 300,\n',
             '    "deviationBps": 500,\n',
             '    "basisBandBps": 500,\n',
