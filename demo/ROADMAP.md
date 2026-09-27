@@ -1951,7 +1951,7 @@ so every read failed. It now uses `cast`'s checksum.
   holds 0 USDG.
 
 **J: use-cert.com mail moves to France.**
-* **The DNS trap.** qwilon.com and orion-safe.com also use `mail.use-cert.com` as their MX, and
+* **The DNS trap.** the two other domains Montréal hosts also use `mail.use-cert.com` as their MX, and
   Montréal's reverse DNS is that name. Repointing `mail.use-cert.com` would have moved all three
   domains. Instead, France takes a **new name, `mx.use-cert.com`**, and only use-cert.com's MX
   changes. Montréal and the other two domains are untouched.
@@ -1964,7 +1964,7 @@ so every read failed. It now uses `cast`'s checksum.
   * Ports 25, 465, 587 and 993 are open. A renewal hook reloads mail when the certificate renews.
 * **Proven on France, before any DNS change.**
   * Montréal delivered to France on port 25, and the message landed in support@'s INBOX.
-  * Relay to example.org was refused (454), and so was qwilon.com (454).
+  * Relay to example.org was refused (454), and so was one of the other two domains (454).
   * A local message came out signed, and rspamd verified it against the published key
     (`R_DKIM_ALLOW`).
   * The Maildir layout matches Montréal (`.INBOX`).
@@ -1983,7 +1983,7 @@ so every read failed. It now uses `cast`'s checksum.
     visibly instead of reading a frozen copy.
 * **Proven.** A message sent to Montréal arrived on France
   (`relay=mx.use-cert.com … status=sent`). An unknown address got 550 at Montréal.
-  qwilon.com and orion-safe.com recipients were still accepted, checked at RCPT only, with no
+  The other two domains' recipients were still accepted, checked at RCPT only, with no
   mail delivered. Nothing had landed on Montréal since the copy (12 = 12).
 * **Health.** `usecert-health-mainnet` now checks mail every 5 minutes:
   * SMTP greets as `mx.use-cert.com`, and STARTTLS verifies for that name with more than 14
@@ -1995,8 +1995,8 @@ so every read failed. It now uses `cast`'s checksum.
   hosts had a `use-cert.com` certificate listing `use-cert.com`, `www` and `mail`, while
   the names now point at different hosts. So each host's HTTP-01 renewal failed for the names
   that live on the other.
-  * Unfixed, **the site's HTTPS would have expired on 13 December**, and so would the TLS for
-    qwilon.com and orion-safe.com mail.
+  * Unfixed, **the site's HTTPS would have expired on 13 December**, and so would the mail TLS for
+    the two other domains on Montréal.
   * France now holds `use-cert.com` + `www` and a separate `mx.use-cert.com`. Montréal holds
     `mail.use-cert.com` alone.
   * All four pass `certbot renew --dry-run`, and all eight mail ports verify with the hostname
@@ -2004,10 +2004,10 @@ so every read failed. It now uses `cast`'s checksum.
   * Each host has a `reload-mail` deploy hook, so mail picks up a renewed certificate.
   * **Retired:** Montréal's old `use-cert.com` certificate and nginx site, archived first to
     `/root/usecert-site-and-cert.retired-*.tgz`.
-    * Before removing it, I checked its `/supabase/` route: every caller uses
-      `qwilon.com/supabase` or `orion-safe.com/supabase`, and use-cert.com's A and AAAA
+    * Before removing it, I checked its `/supabase/` route: every caller goes
+      through the other two domains' own sites, and use-cert.com's A and AAAA
       records point only at France.
-    * qwilon.com, orion-safe.com, both Supabase routes and monitor.use-cert.com return the same
+    * The other two sites, their Supabase routes and monitor.use-cert.com return the same
       codes before and after.
     * The mail and monitor certificates still pass the renewal dry run.
 * **MX switched (owner, 2026-09-26):** `10 mx.use-cert.com.`, confirmed on both OVH

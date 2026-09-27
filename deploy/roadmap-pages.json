@@ -1036,6 +1036,49 @@
      "The contract source on GitHub"
     ]
    ]
+  },
+  "6.31": {
+   "commits": [
+    "22955a7",
+    "7ddf020",
+    "1488156",
+    "d185481",
+    "16a8f62",
+    "c23d9f2"
+   ],
+   "shots": [
+    [
+     "r631-mail",
+     "use-cert.com mail on France, proven before and after the DNS switch"
+    ],
+    [
+     "r631-certs",
+     "Two certificates that would have expired in December, caught by a renewal dry-run and fixed"
+    ],
+    [
+     "r631-transfers",
+     "Test funds returned and the retired governance key emptied, signed by the owner"
+    ]
+   ]
+  },
+  "6.32": {
+   "commits": [
+    "973a724"
+   ],
+   "shots": [
+    [
+     "r632-books",
+     "Mainnet address books can no longer go unrecorded"
+    ],
+    [
+     "r632-history",
+     "The three history books, now on GitHub"
+    ],
+    [
+     "r632-staking",
+     "Both staking pools watched every 5 minutes, each alert proven by faking the chain"
+    ]
+   ]
   }
  }
 }
