@@ -40,6 +40,15 @@ STACK 5 (all off by default, so a stack-4 signer behaves exactly as before):
   ORDER_EVENT_LOOKBACK_BLOCKS how far before the last signed notional an order event still
                               explains a jump (20000); ORDER_EVENT_SIGS (';'-separated event
                               signatures) overrides the event list
+  MULTIPLIER_CHECKS=0|1       option A (default 1 under STACK=5; needs the stack-5 CertOracle).
+                              The venue marks SHARES and the feed prices one stock TOKEN, which is
+                              multiplier18() shares (ERC-8056 uiMultiplier; SPY 1.0017, x10 after a
+                              10:1 split). So the mark-vs-feed check compares mark x multiplier18
+                              with the feed - read from the oracle in the same multicall - and a
+                              split no longer makes it refuse every mark. It also refuses to sign a
+                              vault while its oracle reports corporateActionWindow() or its stock
+                              token reports oraclePaused(), and when either, or the multiplier,
+                              cannot be read. Read-only checks; each refusal names its reason.
   Under STACK=5 an attestation whose observedAt is not strictly after the registry's latest,
   or a mark whose observedAt is before the oracle's markAt, is not signed: the stack-5
   contracts would revert it.
@@ -112,6 +121,7 @@ class Config:
         if 0 < self.jump_factor <= 1 or self.jump_factor < 0:
             raise ValueError("NOTIONAL_JUMP_FACTOR must be > 1, or 0 to disable")
         self.lookback = int(e.get("ORDER_EVENT_LOOKBACK_BLOCKS", "20000"))
+        self.mult_checks = e.get("MULTIPLIER_CHECKS", "1" if s5 else "0") == "1"
         sigs = e.get("ORDER_EVENT_SIGS")
         self.order_events = (tuple(x.strip() for x in sigs.split(";") if x.strip())
                              if sigs else DEFAULT_ORDER_EVENTS)
@@ -155,6 +165,10 @@ SEL_LATEST = bytes.fromhex("4a4aac1a")       # SolvencyRegistry.latest(address)
 SEL_MARK_NONCE = bytes.fromhex("714e5939")   # CertOracle.markNonce()
 SEL_MARK_AT = bytes.fromhex("9fce1418")      # CertOracle.markAt()             (stack 5)
 SEL_LATEST_ROUND = bytes.fromhex("feaf968c") # AggregatorV3.latestRoundData()
+SEL_MULT = bytes.fromhex("05a3a104")         # CertOracle.multiplier18()        (stack 5, option A)
+SEL_CA_WINDOW = bytes.fromhex("5548eb81")    # CertOracle.corporateActionWindow()
+SEL_ORACLE_PAUSED = bytes.fromhex("7706ba52")  # stock token (ERC-8056) oraclePaused()
+ZERO_ADDRESS = "0x" + "00" * 20
 
 
 def rpc(method, params):
@@ -239,13 +253,34 @@ def open_interest18(market, mark):
     return int(oi * Decimal(mark) * E18)
 
 
-def check_mark_vs_feed(mark18, feed_px18, max_bps):
-    """F6: the venue mark must sit within max_bps of the vault's own Chainlink feed."""
+def check_mark_vs_feed(mark18, feed_px18, max_bps, mult18=None):
+    """F6: the venue mark must sit within max_bps of the vault's own Chainlink feed.
+
+    Option A (mult18 given): the mark is a SHARE price and the feed a TOKEN price, one token being
+    mult18 / 1e18 shares, so the mark is compared as mark x multiplier18 - exactly what
+    CertOracle's basis band does with markPx18 x multiplier18()."""
     if feed_px18 <= 0:
         raise Refuse("feed price %d is not positive" % feed_px18)
-    if abs(mark18 - feed_px18) * 10_000 > max_bps * feed_px18:
-        raise Refuse("mark %d is %.1f bps from feed %d (max %d)" % (
-            mark18, abs(mark18 - feed_px18) * 10_000 / feed_px18, feed_px18, max_bps))
+    mk = mark18 if mult18 is None else mark18 * mult18 // 10 ** 18
+    if abs(mk - feed_px18) * 10_000 > max_bps * feed_px18:
+        how = "" if mult18 is None else " (share mark %d x multiplier %d)" % (mark18, mult18)
+        raise Refuse("mark %d%s is %.1f bps from feed %d (max %d)" % (
+            mk, how, abs(mk - feed_px18) * 10_000 / feed_px18, feed_px18, max_bps))
+
+
+def check_corporate_action(ch):
+    """Option A: refuse while the oracle closes minting for a corporate action, or the token says
+    its own oracle is paused, or either cannot be read (the oracle treats that as paused too)."""
+    if ch.get("mult18") is None:
+        raise Refuse("oracle multiplier18() unreadable")
+    if ch.get("ca_window") is None:
+        raise Refuse("oracle corporateActionWindow() unreadable")
+    if ch["ca_window"]:
+        raise Refuse("oracle reports a corporate action window (multiplier %d)" % ch["mult18"])
+    if ch.get("token_paused") is None:
+        raise Refuse("stock token oraclePaused() unreadable")
+    if ch["token_paused"]:
+        raise Refuse("stock token reports oraclePaused()")
 
 
 def jumped(prev, new, factor):
@@ -315,6 +350,15 @@ class Signer:
                 if self.oracle[o] != want:
                     sys.exit("CertOracle %s is not a v2 mark oracle (domain or typehash differ); "
                              "MARK_SIG_VERSION=2 needs the stack-5 oracle" % o)
+        self.token = {}
+        if self.cfg.mult_checks:
+            for v in self.vaults:
+                o = v["certOracle"]
+                try:
+                    self.token[o] = call(o, "stockToken()(address)")[0]
+                except RuntimeError as e:
+                    sys.exit("CertOracle %s has no stockToken() - MULTIPLIER_CHECKS=1 needs the stack-5 "
+                             "(option A) oracle: %s" % (o, e))
         self.feed = {}
         if self.cfg.sanity:
             for v in self.vaults:
@@ -326,9 +370,9 @@ class Signer:
                 self.feed[o] = (f, int(call(f, "decimals()(uint8)")[0]))
         self.guard = NotionalGuard(self.cfg.jump_factor, self.cfg.lookback, self.order_event_since)
         self.order_topics = ["0x" + keccak(text=e).hex() for e in self.cfg.order_events]
-        log("signer for %s: %d vaults, attester %s, stack %d, mark v%d, OI from %s, sanity %s"
+        log("signer for %s: %d vaults, attester %s, stack %d, mark v%d, OI from %s, sanity %s, multiplier checks %s"
             % (self.registry, len(self.vaults), self.addr, self.cfg.stack, self.cfg.mark_sig_version,
-               self.cfg.oi_source, "on" if self.cfg.sanity else "off"))
+               self.cfg.oi_source, "on" if self.cfg.sanity else "off", "on" if self.cfg.mult_checks else "off"))
 
     def chain_reads(self):
         """registry.latest(vault) and oracle.markNonce() for every vault, as ONE eth_call.
@@ -338,38 +382,68 @@ class Signer:
         Multicall3 aggregate3 reads the same twelve values in a single request, all at one
         block; allowFailure is false, so any failed read fails the whole cycle and the previous
         bundle keeps being served, exactly as a failed cast call did. Stack 5 adds the oracle's
-        markAt and, with the sanity checks, the feed's latestRoundData, to the same request."""
-        calls, per = [], None
+        markAt and, with the sanity checks, the feed's latestRoundData, to the same request.
+        MULTIPLIER_CHECKS adds the oracle's multiplier18() and corporateActionWindow() and the
+        stock token's oraclePaused(), with allowFailure: an unreadable one refuses that vault
+        (see check_corporate_action) instead of failing every vault's cycle."""
+        calls, spans = [], []
         for v in self.vaults:
-            calls.append((self.registry, False, SEL_LATEST + encode(["address"], [v["vault"]])))
-            calls.append((v["certOracle"], False, SEL_MARK_NONCE))
-            if self.cfg.mark_v2:
-                calls.append((v["certOracle"], False, SEL_MARK_AT))
-            if self.cfg.sanity:
-                calls.append((self.feed[v["certOracle"]][0], False, SEL_LATEST_ROUND))
-            per = per or len(calls)
+            c = self.vault_calls(v)
+            spans.append((len(calls), len(c)))
+            calls += c
         data = "0x" + (SEL_AGGREGATE3 + encode(["(address,bool,bytes)[]"], [calls])).hex()
         raw = bytes.fromhex(rpc("eth_call", [{"to": MULTICALL3, "data": data}, "latest"])[2:])
         results = decode(["(bool,bytes)[]"], raw)[0]
-        out = {}
-        for i, v in enumerate(self.vaults):
-            r = list(results[per * i: per * (i + 1)])
-            if not all(ok for ok, _ in r):
-                raise RuntimeError("multicall read failed for %s" % v["symbol"])
-            parts = decode(["uint256", "uint256", "uint256", "uint64", "uint64"], r[0][1])
-            ch = {"notional": int(parts[0]), "oi": int(parts[2]), "batch": int(parts[3]) + 1,
-                  "latest_at": int(parts[4]), "nonce": int(decode(["uint64"], r[1][1])[0]) + 1}
-            k = 2
-            if self.cfg.mark_v2:
-                ch["mark_at"] = int(decode(["uint256"], r[k][1])[0])
-                k += 1
-            if self.cfg.sanity:
-                _rid, answer, _st, updated, _ans = decode(["uint80", "int256", "uint256", "uint256", "uint80"], r[k][1])
-                dec = self.feed[v["certOracle"]][1]
-                ch["feed_px18"] = int(answer) * 10 ** (18 - dec) if dec <= 18 else int(answer) // 10 ** (dec - 18)
-                ch["feed_at"] = int(updated)
-            out[v["vault"]] = ch
-        return out
+        return {v["vault"]: self.parse_vault(v, list(results[a:a + n]))
+                for v, (a, n) in zip(self.vaults, spans)}
+
+    def vault_calls(self, v):
+        """The multicall entries for one vault, in the order parse_vault reads them."""
+        o = v["certOracle"]
+        c = [(self.registry, False, SEL_LATEST + encode(["address"], [v["vault"]])),
+             (o, False, SEL_MARK_NONCE)]
+        if self.cfg.mark_v2:
+            c.append((o, False, SEL_MARK_AT))
+        if self.cfg.sanity:
+            c.append((self.feed[o][0], False, SEL_LATEST_ROUND))
+        if self.cfg.mult_checks:
+            c += [(o, True, SEL_MULT), (o, True, SEL_CA_WINDOW)]
+            token = self.token.get(o, ZERO_ADDRESS)
+            if int(token, 16):
+                c.append((token, True, SEL_ORACLE_PAUSED))
+        return c
+
+    def parse_vault(self, v, r):
+        """One vault's (success, returnData) pairs -> its chain figures."""
+        need = 2 + self.cfg.mark_v2 + self.cfg.sanity
+        if not all(ok for ok, _ in r[:need]):
+            raise RuntimeError("multicall read failed for %s" % v["symbol"])
+        parts = decode(["uint256", "uint256", "uint256", "uint64", "uint64"], r[0][1])
+        ch = {"notional": int(parts[0]), "oi": int(parts[2]), "batch": int(parts[3]) + 1,
+              "latest_at": int(parts[4]), "nonce": int(decode(["uint64"], r[1][1])[0]) + 1}
+        k = 2
+        if self.cfg.mark_v2:
+            ch["mark_at"] = int(decode(["uint256"], r[k][1])[0])
+            k += 1
+        if self.cfg.sanity:
+            _rid, answer, _st, updated, _ans = decode(["uint80", "int256", "uint256", "uint256", "uint80"], r[k][1])
+            dec = self.feed[v["certOracle"]][1]
+            ch["feed_px18"] = int(answer) * 10 ** (18 - dec) if dec <= 18 else int(answer) // 10 ** (dec - 18)
+            ch["feed_at"] = int(updated)
+            k += 1
+        if self.cfg.mult_checks:
+            def word(i):
+                ok, b = r[i] if i < len(r) else (False, b"")
+                return int(decode(["uint256"], b)[0]) if ok and len(b) >= 32 else None
+            ch["mult18"] = word(k)
+            ca = word(k + 1)
+            ch["ca_window"] = None if ca is None else ca != 0
+            if int(self.token.get(v["certOracle"], ZERO_ADDRESS), 16):
+                p = word(k + 2)
+                ch["token_paused"] = None if p is None else p != 0
+            else:
+                ch["token_paused"] = False                 # no token (testnet): M is 1e18, nothing to pause
+        return ch
 
     def head(self):
         """(number, timestamp) of the latest block - the one request the timestamp read always was."""
@@ -409,8 +483,11 @@ class Signer:
             raise Refuse("observedAt %d is not after the registry's latest %d" % (observed_at, ch["latest_at"]))
         if self.cfg.mark_v2 and observed_at < ch["mark_at"]:
             raise Refuse("observedAt %d is before the oracle's markAt %d" % (observed_at, ch["mark_at"]))
+        if self.cfg.mult_checks:
+            check_corporate_action(ch)
         if self.cfg.sanity:
-            check_mark_vs_feed(mark18, ch["feed_px18"], self.cfg.max_dev_bps)
+            check_mark_vs_feed(mark18, ch["feed_px18"], self.cfg.max_dev_bps,
+                               ch["mult18"] if self.cfg.mult_checks else None)
             self.guard.check(vault, notional18, head_block, ch["notional"])
         return {"v": v, "notional18": notional18, "margin18": margin18, "mark18": mark18, "oi18": oi18,
                 "batch": ch["batch"], "nonce": ch["nonce"]}
