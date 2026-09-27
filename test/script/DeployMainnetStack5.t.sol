@@ -210,6 +210,17 @@ contract DeployMainnetStack5Test is Test {
     string[6] internal SYMS = ["uTSLA", "uSPY", "uQQQ", "uNVDA", "uAAPL", "uMSFT"];
     uint256[6] internal PX = [372.58e18, 769.82e18, 742.79e18, 224.908e18, 339.336e18, 514.46e18];
     uint256[6] internal CAPS = [90_000e18, 5_000_000e18, 3_050_000e18, 311_000e18, 500_000e18, 500_000e18];
+    /// @dev Option A: the Robinhood stock tokens (script/DeployMainnet.s.sol), etched with
+    ///      MockUIMultiplierToken. SPY carries its real 2026-09-27 multiplier, TSLA exactly 1.
+    address[6] internal TOKENS = [
+        0x322F0929c4625eD5bAd873c95208D54E1c003b2d,
+        0x117cc2133c37B721F49dE2A7a74833232B3B4C0C,
+        0xD5f3879160bc7c32ebb4dC785F8a4F505888de68,
+        0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC,
+        0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9,
+        0xe93237C50D904957Cf27E7B1133b510C669c2e74
+    ];
+    uint256[6] internal MULTS = [uint256(1e18), 1.001717991187472003e18, 1.0015e18, 1.0002e18, 1.0011e18, 1.0019e18];
 
     address internal safe = makeAddr("safe2of3");
     address internal deployer = vm.addr(DEPLOYER_PK);
@@ -252,6 +263,7 @@ contract DeployMainnetStack5Test is Test {
 
         for (uint256 i = 0; i < 6; ++i) {
             feeds.push(new ReplayAggregator(address(this), 8, SYMS[i], int256(PX[i] / 1e10)));
+            deployCodeTo("MockUIMultiplierToken.sol:MockUIMultiplierToken", abi.encode(MULTS[i]), TOKENS[i]);
         }
         vm.deal(deployer, 100 ether);
         vm.deal(attester, 100 ether);
@@ -323,6 +335,7 @@ contract DeployMainnetStack5Test is Test {
             oracles[i] = _createAs(safe, inits[i + 1]);
             assertEq(CertOracle(oracles[i]).governance(), safe, "batch 1: oracle governance is not the Safe");
             assertEq(CertOracle(oracles[i]).maxMarkAge(), 300, "batch 1: oracle maxMarkAge");
+            assertTrue(CertOracle(oracles[i]).stockToken() != address(0), "batch 1: oracle has no stock token");
         }
         assertEq(SolvencyRegistry(reg).governance(), safe, "batch 1: registry governance is not the Safe");
 
@@ -552,6 +565,10 @@ contract DeployMainnetStack5Test is Test {
         assertEq(CapacityOracle(capacity).maxAbsoluteCap(), 5_000_000e18, "maxAbsoluteCap = largest row");
         for (uint256 i = 0; i < 6; ++i) {
             assertEq(CertOracle(d.deploymentOf(i).oracle).stalenessSeconds(), 93_600, "real staleness");
+            // Option A: each oracle reads its own asset's Robinhood token, live.
+            assertEq(CertOracle(d.deploymentOf(i).oracle).stockToken(), TOKENS[i], "oracle stock token = table");
+            assertEq(d.paramsOf(i).stockToken, TOKENS[i], "asset table stock token");
+            assertEq(CertOracle(d.deploymentOf(i).oracle).multiplier18(), MULTS[i], "oracle multiplier = token's");
             assertEq(d.paramsOf(i).absoluteCap18, CAPS[i], "stack-4 per-asset cap carried over");
         }
     }

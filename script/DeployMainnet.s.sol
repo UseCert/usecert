@@ -72,6 +72,16 @@ contract DeployMainnet is DeployTestnet {
 
     uint256 internal constant MAINNET_CHAIN_ID = 4663;
 
+    // Option A: the Robinhood stock tokens (ERC-8056, 18 decimals) each feed prices, verified on
+    // chain 4663 on 2026-09-27. One token is uiMultiplier() shares; the oracle reads it and the
+    // vault hedges supply x M shares. S9 checks each oracle's stockToken() and multiplier18().
+    address internal constant TSLA_TOKEN = 0x322F0929c4625eD5bAd873c95208D54E1c003b2d;
+    address internal constant SPY_TOKEN = 0x117cc2133c37B721F49dE2A7a74833232B3B4C0C;
+    address internal constant QQQ_TOKEN = 0xD5f3879160bc7c32ebb4dC785F8a4F505888de68;
+    address internal constant NVDA_TOKEN = 0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC;
+    address internal constant AAPL_TOKEN = 0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9;
+    address internal constant MSFT_TOKEN = 0xe93237C50D904957Cf27E7B1133b510C669c2e74;
+
     /// @dev 26 hours. The parent's 900 is a testnet reachability value and its own note says it
     ///      must not be carried over — long enough here to span a weekend close plus a holiday.
     uint256 internal constant MAINNET_STALENESS_SECONDS = 93_600;
@@ -362,7 +372,8 @@ contract DeployMainnet is DeployTestnet {
                 openInterest18: 900_000e18,
                 bufferFloor18: 100_000e18,
                 bufferFeeOn18: 60_000e18,
-                bufferMintSlow18: 30_000e18
+                bufferMintSlow18: 30_000e18,
+                stockToken: TSLA_TOKEN
             })
         );
         assets.push(
@@ -378,7 +389,8 @@ contract DeployMainnet is DeployTestnet {
                 openInterest18: 50_000_000e18,
                 bufferFloor18: 100_000e18,
                 bufferFeeOn18: 60_000e18,
-                bufferMintSlow18: 30_000e18
+                bufferMintSlow18: 30_000e18,
+                stockToken: SPY_TOKEN
             })
         );
         assets.push(
@@ -394,7 +406,8 @@ contract DeployMainnet is DeployTestnet {
                 openInterest18: 30_500_000e18,
                 bufferFloor18: 100_000e18,
                 bufferFeeOn18: 60_000e18,
-                bufferMintSlow18: 30_000e18
+                bufferMintSlow18: 30_000e18,
+                stockToken: QQQ_TOKEN
             })
         );
         assets.push(
@@ -411,7 +424,8 @@ contract DeployMainnet is DeployTestnet {
                 openInterest18: 3_110_000e18,
                 bufferFloor18: 100_000e18,
                 bufferFeeOn18: 60_000e18,
-                bufferMintSlow18: 30_000e18
+                bufferMintSlow18: 30_000e18,
+                stockToken: NVDA_TOKEN
             })
         );
         assets.push(
@@ -428,7 +442,8 @@ contract DeployMainnet is DeployTestnet {
                 openInterest18: 5_000_000e18,
                 bufferFloor18: 100_000e18,
                 bufferFeeOn18: 60_000e18,
-                bufferMintSlow18: 30_000e18
+                bufferMintSlow18: 30_000e18,
+                stockToken: AAPL_TOKEN
             })
         );
         assets.push(
@@ -444,7 +459,8 @@ contract DeployMainnet is DeployTestnet {
                 openInterest18: 5_000_000e18,
                 bufferFloor18: 100_000e18,
                 bufferFeeOn18: 60_000e18,
-                bufferMintSlow18: 30_000e18
+                bufferMintSlow18: 30_000e18,
+                stockToken: MSFT_TOKEN
             })
         );
 
@@ -470,6 +486,7 @@ contract DeployMainnet is DeployTestnet {
                 assets[i].absoluteCap18 <= _maxAbsoluteCapOf(assets[i].symbol),
                 "M-8: asset absoluteCap18 above its reviewed ceiling"
             );
+            require(assets[i].stockToken != address(0), "OPTION A: a mainnet asset has no stock token");
         }
     }
 

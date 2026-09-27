@@ -222,7 +222,8 @@ contract SafeBatches is DeployMainnet {
                     BASIS_BAND_BPS,
                     POKE_CONFIRMATION_SECONDS,
                     _singleSource(),
-                    MAX_MARK_AGE
+                    MAX_MARK_AGE,
+                    assets[i].stockToken
                 )
             );
         }

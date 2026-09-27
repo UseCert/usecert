@@ -8,6 +8,14 @@ import {ECDSA} from "openzeppelin-contracts/utils/cryptography/ECDSA.sol";
 /// @notice Price source for one asset. Chainlink is the holder-facing price; the Lighter mark
 ///         price is a cross-check. Guard breaches pause MINTING only — pxUnguarded() always
 ///         answers so redemption can never be trapped (Law 2).
+/// @notice Option A: the four ERC-8056 views of a Robinhood stock token that CertOracle reads.
+interface IUIMultiplierToken {
+    function uiMultiplier() external view returns (uint256);
+    function newUIMultiplier() external view returns (uint256);
+    function effectiveAt() external view returns (uint256);
+    function oraclePaused() external view returns (bool);
+}
+
 contract CertOracle is ICertOracle {
     error CertOracle_StalePrice();
     error CertOracle_NonPositivePrice();
@@ -87,6 +95,13 @@ contract CertOracle is ICertOracle {
     /// @dev H-4 kill switch: governance has disabled the mark attester and no replacement has been
     ///      installed through the rotation yet. Both mark setters refuse until one is.
     error CertOracle_AttesterDisabled();
+    /// @dev Option A: at construction, the stock token's multiplier is unreadable or outside
+    ///      [MIN_MULTIPLIER_18, MAX_MULTIPLIER_18], or one of its ERC-8056 views does not answer.
+    ///      After construction nothing reverts on it: minting fails closed instead.
+    error CertOracle_MultiplierOutOfRange();
+    /// @dev Option A: a zero stock token (multiplier fixed at 1e18) is for testnet and simulation.
+    ///      Refused on Robinhood Chain mainnet (chain id 4663), where every feed prices a token.
+    error CertOracle_StockTokenRequired();
 
     /// @dev M-5 (Law 3): a rotation is a public commitment with a published effective time.
     event AttesterRotationProposed(address indexed attester, uint256 effectiveAt);
@@ -146,6 +161,31 @@ contract CertOracle is ICertOracle {
     ///      "the perp agrees with the index" is a claim about some earlier moment, not about now.
     uint256 public constant MIN_MAX_MARK_AGE = 30;
     uint256 public constant MAX_MAX_MARK_AGE = 3600;
+
+    /// @notice Option A (total return): the feed prices ONE ROBINHOOD STOCK TOKEN, and one token is
+    ///         `uiMultiplier()` shares (ERC-8056, 1e18-scaled). Dividends are reinvested by
+    ///         raising it slightly; a split multiplies it. The venue trades and marks SHARES, so the
+    ///         hedge of one certificate is M shares and the venue mark is compared to the feed as
+    ///         mark x M. Zero means "no token": M is 1e18 (testnet and simulation only, see
+    ///         CertOracle_StockTokenRequired).
+    address public immutable stockToken;
+    /// @notice Sanity bounds on the multiplier: 0.01 (a 1:100 reverse split) to 1000. Outside them
+    ///         the live reading is treated as unreadable (minting fails closed, sizing falls back).
+    uint256 public constant MIN_MULTIPLIER_18 = 1e16;
+    uint256 public constant MAX_MULTIPLIER_18 = 1e21;
+    /// @notice Minting closes this long before a staged multiplier change takes effect ...
+    uint256 public constant MULTIPLIER_PRE_WINDOW = 1 hours;
+    /// @notice ... and stays closed this long after it, and in any case until the feed has
+    ///         published a round after `effectiveAt`.
+    uint256 public constant MULTIPLIER_POST_WINDOW = 1 hours;
+    /// @notice The most the live multiplier may differ from the one recorded with the current mark
+    ///         before minting needs a new mark: 1%. A split (x10, x2, x0.1) always trips it; a
+    ///         dividend step below it is priced correctly by the basis band, which scales the mark
+    ///         by the LIVE multiplier.
+    uint256 public constant MAX_MULTIPLIER_DRIFT_BPS = 100;
+    /// @dev Gas given to each read of the token. Bounded so a misbehaving (upgradeable) token
+    ///      cannot burn the caller's gas; the reads are plain storage getters.
+    uint256 internal constant TOKEN_READ_GAS = 50_000;
 
     IAggregatorV3 public immutable feed;
     /// @notice The rotation authority. Immutable, bound to the deployer at construction.
@@ -232,6 +272,13 @@ contract CertOracle is ICertOracle {
     ///      twice is legitimate, so the value cannot carry its own ordering.
     uint64 public markNonce;
 
+    /// @notice The stock token's multiplier when the current mark was stored (1e18 without a token;
+    ///         the construction-time reading until the first mark). Always inside the bounds.
+    /// @dev Option A. Two uses: mintAllowed() refuses a mark taken under a different multiplier
+    ///      (MAX_MULTIPLIER_DRIFT_BPS), and multiplier18() falls back to it when the live reading
+    ///      fails, so a close on the exit path is still sized with the last multiplier seen.
+    uint256 public markMult18;
+
     /// @dev EIP-712 domain, built inline rather than inherited. OpenZeppelin's EIP712 base reaches
     ///      ShortStrings, which compiles to the Cancun `mcopy`, and this project targets `shanghai`
     ///      - raising evm_version for every audited contract to import one helper is not a trade
@@ -298,7 +345,8 @@ contract CertOracle is ICertOracle {
         uint256 _basisBandBps,
         uint256 _pokeConfirmationSeconds,
         bool _singleSource,
-        uint256 _maxMarkAge
+        uint256 _maxMarkAge,
+        address _stockToken
     ) {
         // L-3: no constructor in src/ validated its dependencies, so a mistyped address deployed
         // silently and failed later at an arbitrary call site. A zero feed is the sharpest case —
@@ -347,6 +395,21 @@ contract CertOracle is ICertOracle {
         singleSource = _singleSource;
         maxMarkAge = _maxMarkAge;
 
+        // Option A: the token must answer all four ERC-8056 views and carry an in-bounds
+        // multiplier, so a wrong address fails here rather than as a vault that never mints.
+        stockToken = _stockToken;
+        if (_stockToken == address(0)) {
+            if (block.chainid == 4663) revert CertOracle_StockTokenRequired();
+            markMult18 = 1e18;
+        } else {
+            (bool ok, uint256 m) = _liveMult();
+            (bool ok1,) = _readToken(IUIMultiplierToken.newUIMultiplier.selector);
+            (bool ok2,) = _readToken(IUIMultiplierToken.effectiveAt.selector);
+            (bool ok3,) = _readToken(IUIMultiplierToken.oraclePaused.selector);
+            if (!(ok && ok1 && ok2 && ok3)) revert CertOracle_MultiplierOutOfRange();
+            markMult18 = m;
+        }
+
         // L-4: the constructor checked positivity but not staleness, so a vault could be deployed
         // against an already-dead feed and start life with a reference price nobody had quoted for
         // days. Same guard shape as px(), future-timestamp half FIRST so it short-circuits the
@@ -368,6 +431,7 @@ contract CertOracle is ICertOracle {
         if (msg.sender != a) revert CertOracle_OnlyAttester();
         markPx18 = px18;
         markAt = uint64(block.timestamp);
+        _recordMarkMult();
         emit MarkSet(px18, markNonce, uint64(block.timestamp));
     }
 
@@ -414,6 +478,7 @@ contract CertOracle is ICertOracle {
         markNonce = nonce;
         markPx18 = px18;
         markAt = observedAt;
+        _recordMarkMult();
         emit MarkSet(px18, nonce, observedAt);
     }
 
@@ -534,7 +599,7 @@ contract CertOracle is ICertOracle {
     }
 
     /// @notice Never reverts on guard state. The published last-good-price path for redemption.
-    function pxUnguarded() external view returns (uint256, uint256) {
+    function pxUnguarded() public view returns (uint256, uint256) {
         (bool ok, uint256 p, uint256 t,) = _tryFeed();
         if (ok) return (p, t);
         return (lastGoodPx18, lastGoodAt);
@@ -643,8 +708,10 @@ contract CertOracle is ICertOracle {
         // distinguishable by a caller, and that they were not is the bug being closed.
         if (singleSource) return (false, 0);
         (bool ok, uint256 p,,) = _tryFeed();
-        if (!ok || p == 0 || markPx18 == 0) return (false, 0);
-        uint256 diff = markPx18 > p ? markPx18 - p : p - markPx18;
+        if (!ok || p == 0 || markPx18 == 0 || markPx18 > type(uint128).max) return (false, 0);
+        // Option A: the mark is a SHARE price, the feed a TOKEN price; compare mark x M.
+        uint256 mk = markPx18 * multiplier18() / 1e18;
+        uint256 diff = mk > p ? mk - p : p - mk;
         return (true, diff * 10_000 / p);
     }
 
@@ -688,9 +755,15 @@ contract CertOracle is ICertOracle {
     ///
     ///      Nothing above changes ANY dual-source behaviour: the `singleSource == false` branch is
     ///      the previous body, in the previous order, with the previous short-circuits.
+    /// @dev Option A adds, in both modes: the multiplier must be readable and in bounds, and no
+    ///      corporate action may be pending (corporateActionWindow()). In dual-source mode the mark
+    ///      must have been taken under (almost) the live multiplier, and the band compares the
+    ///      feed against mark x M, so an ordinary multiplier (SPY's 1.0017) never trips it.
     function mintAllowed() external view returns (bool) {
-        (bool ok, uint256 p,,) = _tryFeed();
+        (bool ok, uint256 p, uint256 t,) = _tryFeed();
         if (!ok || p == 0) return false;
+        (bool mok, uint256 m) = _liveMult();
+        if (!mok || _corporateAction(m, t)) return false;
         if (singleSource) {
             // The deviation clamp is the only remaining defence, so its reference must exist.
             if (lastGoodPx18 == 0) return false;
@@ -700,7 +773,12 @@ contract CertOracle is ICertOracle {
             // signed path refuses a future observation, the direct path writes block time), so the
             // subtraction cannot underflow and this function still never reverts.
             if (block.timestamp - markAt > maxMarkAge) return false;
-            uint256 diff = markPx18 > p ? markPx18 - p : p - markPx18;
+            // Option A: a mark taken before a multiplier change (a split) must be replaced.
+            uint256 mm = markMult18;
+            if ((m > mm ? m - mm : mm - m) * 10_000 / mm > MAX_MULTIPLIER_DRIFT_BPS) return false;
+            if (markPx18 > type(uint128).max) return false;
+            uint256 mk = markPx18 * m / 1e18;
+            uint256 diff = mk > p ? mk - p : p - mk;
             if (diff * 10_000 / p > basisBandBps) return false;
         }
         if (lastGoodPx18 != 0) {
@@ -708,6 +786,76 @@ contract CertOracle is ICertOracle {
             if (dev * 10_000 / lastGoodPx18 > deviationBps) return false;
         }
         return true;
+    }
+
+    /// @notice Option A: how many shares one stock token (one certificate) represents, 1e18-scaled -
+    ///         the token's live uiMultiplier() when it reads inside the bounds, else markMult18
+    ///         (the last multiplier seen with a mark). 1e18 when there is no stock token.
+    /// @dev NEVER reverts: CertVault sizes every order with it, the exit path's close included
+    ///      (Law 2). Always inside [MIN_MULTIPLIER_18, MAX_MULTIPLIER_18].
+    function multiplier18() public view returns (uint256) {
+        (bool ok, uint256 m) = _liveMult();
+        return ok ? m : markMult18;
+    }
+
+    /// @notice Option A: the SHARE price the venue quotes, pxUnguarded() / multiplier18(). For
+    ///         sizing and display; the holder-facing price is px()/pxUnguarded(), the token's.
+    function sharePx18() external view returns (uint256) {
+        (uint256 p,) = pxUnguarded();
+        return p * 1e18 / multiplier18();
+    }
+
+    /// @notice Option A: true while a corporate action closes minting - the token reports its
+    ///         oracle paused (or cannot say), a staged multiplier change is within
+    ///         MULTIPLIER_PRE_WINDOW of `effectiveAt`, or `effectiveAt` passed less than
+    ///         MULTIPLIER_POST_WINDOW ago or not before the feed's latest round. Minting only.
+    function corporateActionWindow() external view returns (bool) {
+        (, uint256 m) = _liveMult();
+        (,, uint256 t,) = _tryFeed();
+        return _corporateAction(m, t);
+    }
+
+    function _liveMult() internal view returns (bool ok, uint256 m) {
+        if (stockToken == address(0)) return (true, 1e18);
+        (ok, m) = _readToken(IUIMultiplierToken.uiMultiplier.selector);
+        ok = ok && m >= MIN_MULTIPLIER_18 && m <= MAX_MULTIPLIER_18;
+    }
+
+    /// @dev `feedT` is the feed's latest round time (0 when unreadable, which keeps the window
+    ///      closed after an `effectiveAt`). A token that cannot answer counts as paused.
+    function _corporateAction(uint256 m, uint256 feedT) internal view returns (bool) {
+        if (stockToken == address(0)) return false;
+        (bool ok, uint256 paused) = _readToken(IUIMultiplierToken.oraclePaused.selector);
+        if (!ok || paused != 0) return true;
+        (bool okN, uint256 next) = _readToken(IUIMultiplierToken.newUIMultiplier.selector);
+        (bool okE, uint256 at) = _readToken(IUIMultiplierToken.effectiveAt.selector);
+        if (!okN || !okE) return true;
+        // A change is staged (uiMultiplier switches to `next` at `at`): closed from PRE before.
+        if (next != 0 && next != m && block.timestamp + MULTIPLIER_PRE_WINDOW >= at) return true;
+        // After `at`: closed for POST, and until the feed has re-published under the new M.
+        if (at != 0 && block.timestamp >= at && (block.timestamp - at <= MULTIPLIER_POST_WINDOW || feedT <= at)) {
+            return true;
+        }
+        return false;
+    }
+
+    function _recordMarkMult() internal {
+        (bool ok, uint256 m) = _liveMult();
+        if (ok) markMult18 = m;
+    }
+
+    /// @dev One 32-byte word from a no-argument view of the stock token. Never reverts: a bounded
+    ///      staticcall, only the first word copied (no return bomb), and `ok` false on a revert, on
+    ///      a short answer, or on an address with no code.
+    function _readToken(bytes4 selector) internal view returns (bool ok, uint256 v) {
+        address token = stockToken;
+        assembly ("memory-safe") {
+            mstore(0x00, selector)
+            ok := staticcall(TOKEN_READ_GAS, token, 0x00, 0x04, 0x00, 0x20)
+            ok := and(ok, gt(returndatasize(), 0x1f))
+            v := mload(0x00)
+        }
+        if (!ok) v = 0;
     }
 
     /// @notice Encode an 18-decimal price into Lighter's uint32 tick domain.

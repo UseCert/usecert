@@ -105,7 +105,7 @@ contract VerifyFixture is DeployTestnet {
                     BASIS_BAND_BPS,
                     POKE_CONFIRMATION_SECONDS,
                     SINGLE_SOURCE,
-                    MAX_MARK_AGE
+                    MAX_MARK_AGE, address(0)
                 )
             );
         }

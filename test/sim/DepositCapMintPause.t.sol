@@ -70,7 +70,7 @@ contract DepositCapMintPauseTest is Test {
         sim = new LighterSim(IERC20(address(usdg)), ASSET_IDX, SIZE_DECIMALS, SIM_IMF, address(this));
         reg = new SolvencyRegistry(attester);
         cap = new CapacityOracle(address(reg), gov, 1000, 100, 3000, 300, MAX_ABSOLUTE_CAP);
-        oracle = new CertOracle(address(feed), attester, 2, 3600, 500, 100, 3600, false, 3600);
+        oracle = new CertOracle(address(feed), attester, 2, 3600, 500, 100, 3600, false, 3600, address(0));
 
         vault = new CertVault(
             CertVault.Deps({

@@ -412,7 +412,9 @@ contract AddMirror is Script {
                 BASIS_BAND_BPS,
                 POKE_CONFIRMATION_SECONDS,
                 SINGLE_SOURCE,
-                MAX_MARK_AGE
+                MAX_MARK_AGE,
+                // Option A: testnet mirrors price no Robinhood stock token (multiplier 1e18).
+                address(0)
             )
         );
 
@@ -1063,6 +1065,9 @@ contract AddMirror is Script {
         require(o.basisBandBps() == BASIS_BAND_BPS, "S9: oracle.basisBandBps wrong");
         require(o.priceDecimals() == a.priceDecimals, "S9: oracle.priceDecimals != venue price_decimals");
         require(o.lastGoodPx18() != 0, "S9: oracle.lastGoodPx18 == 0, mintAllowed fails closed");
+        // Option A: a testnet mirror carries no stock token, so the multiplier is exactly 1.
+        require(o.stockToken() == address(0), "S9: oracle.stockToken != 0 on a testnet mirror");
+        require(o.multiplier18() == 1e18, "S9: oracle.multiplier18 != 1e18 on a testnet mirror");
 
         // The aggregator is this mirror's own and carries this mirror's description — the string
         // `FeedKeeper`'s operator reads to confirm which market they are pushing.

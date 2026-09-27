@@ -7,4 +7,5 @@ interface ICertOracle {
     function mintAllowed() external view returns (bool);
     function basisBps() external view returns (uint256);
     function toTickPrice(uint256 px18) external view returns (uint32);
+    function multiplier18() external view returns (uint256);
 }

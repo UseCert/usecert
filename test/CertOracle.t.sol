@@ -27,7 +27,7 @@ contract CertOracleTest is Test {
     function setUp() public {
         vm.warp(1_800_000_000);
         feed = new MockAggregatorV3(8, 355_86000000); // 8 decimals
-        oracle = new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600);
+        oracle = new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600, address(0));
         vm.prank(attester);
         oracle.setMarkPrice(PX);
     }
@@ -148,7 +148,7 @@ contract CertOracleTest is Test {
     /// first, then flip the SAME feed to the absurd decimals afterward via the mock's setter).
     function test_pxUnguardedSurvivesAbsurdFeedDecimals() public {
         MockAggregatorV3 absurdFeed = new MockAggregatorV3(8, 355_86000000);
-        CertOracle absurdOracle = new CertOracle(address(absurdFeed), attester, 2, 3600, 500, 100, POKE_WINDOW, false, 3600);
+        CertOracle absurdOracle = new CertOracle(address(absurdFeed), attester, 2, 3600, 500, 100, POKE_WINDOW, false, 3600, address(0));
         (uint256 lastGoodP,) = absurdOracle.pxUnguarded();
         assertEq(lastGoodP, PX); // sane construction established a real last-good price
 
@@ -222,7 +222,7 @@ contract CertOracleTest is Test {
     ///         Same treatment as every other unusable feed: fall back, never panic.
     function test_pxUnguardedSurvivesAnAnswerTooLargeToNormalise() public {
         MockAggregatorV3 hugeFeed = new MockAggregatorV3(8, 355_86000000);
-        CertOracle hugeOracle = new CertOracle(address(hugeFeed), attester, 2, 3600, 500, 100, POKE_WINDOW, false, 3600);
+        CertOracle hugeOracle = new CertOracle(address(hugeFeed), attester, 2, 3600, 500, 100, POKE_WINDOW, false, 3600, address(0));
         (uint256 lastGoodP,) = hugeOracle.pxUnguarded();
         assertEq(lastGoodP, PX); // sane construction established a real last-good price
 
@@ -408,7 +408,7 @@ contract CertOracleTest is Test {
     ///         check when lastGoodPx18 == 0 — and poisoned pxUnguarded()'s fallback with a zero.
     function test_H1_pokeRejectsAPriceThatNormalisesToZero() public {
         MockAggregatorV3 tinyFeed = new MockAggregatorV3(19, 1); // 1 / 10 == 0
-        CertOracle tinyOracle = new CertOracle(address(tinyFeed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600);
+        CertOracle tinyOracle = new CertOracle(address(tinyFeed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600, address(0));
         vm.prank(attester);
         tinyOracle.setMarkPrice(PX);
 
@@ -445,7 +445,7 @@ contract CertOracleTest is Test {
         returns (CertOracle o, MockAggregatorV3 f)
     {
         f = new MockAggregatorV3(8, 355_86000000);
-        o = new CertOracle(address(f), attester, 2, staleness, DEVIATION_BPS, 100, window, false, 3600);
+        o = new CertOracle(address(f), attester, 2, staleness, DEVIATION_BPS, 100, window, false, 3600, address(0));
         vm.prank(attester);
         o.setMarkPrice(PX);
     }
@@ -602,11 +602,11 @@ contract CertOracleTest is Test {
         MockAggregatorV3 f = new MockAggregatorV3(8, 355_86000000);
 
         vm.expectRevert(CertOracle.CertOracle_ConfigOutOfBounds.selector);
-        new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, 0, false, 3600);
+        new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, 0, false, 3600, address(0));
 
         // The identical deployment with a one-second window is accepted, so the refusal above is
         // about the zero and not about anything else in the argument list.
-        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, 1, false, 3600);
+        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, 1, false, 3600, address(0));
         assertEq(o.pokeConfirmationSeconds(), 1);
     }
 
@@ -654,7 +654,7 @@ contract CertOracleTest is Test {
     function test_L4_lastGoodAtIsTheFeedRoundTimestampNotBlockTime() public {
         MockAggregatorV3 lagging = new MockAggregatorV3(8, 355_86000000);
         lagging.set(355_86000000, block.timestamp - 100); // fresh, but 100s behind the block
-        CertOracle o = new CertOracle(address(lagging), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600);
+        CertOracle o = new CertOracle(address(lagging), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600, address(0));
 
         assertEq(o.lastGoodAt(), block.timestamp - 100, "constructor recorded block time, not the round");
         assertTrue(o.lastGoodAt() != block.timestamp, "the two clocks must be distinguishable here");
@@ -681,7 +681,7 @@ contract CertOracleTest is Test {
         vm.warp(block.timestamp + STALENESS + 1);
 
         vm.expectRevert(CertOracle.CertOracle_StalePrice.selector);
-        new CertOracle(address(dead), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600);
+        new CertOracle(address(dead), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600, address(0));
     }
 
     function test_L4_constructorRejectsAFutureTimestampedFeed() public {
@@ -690,7 +690,7 @@ contract CertOracleTest is Test {
 
         // Named error, not the arithmetic panic an unguarded `block.timestamp - t` would give.
         vm.expectRevert(CertOracle.CertOracle_StalePrice.selector);
-        new CertOracle(address(ahead), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600);
+        new CertOracle(address(ahead), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600, address(0));
     }
 
     // =======================================================================================
@@ -728,7 +728,7 @@ contract CertOracleTest is Test {
 
     function test_L5_basisIsUnknownBeforeAnyMarkIsAttested() public {
         MockAggregatorV3 f = new MockAggregatorV3(8, 355_86000000);
-        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600);
+        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600, address(0));
 
         assertEq(o.markPx18(), 0);
         assertEq(o.basisBps(), 0);
@@ -740,7 +740,7 @@ contract CertOracleTest is Test {
         // 19 feed decimals with answer = 1 truncates to px18 = 1 / 10 = 0 on normalisation,
         // while _tryFeed() still reports ok = true. mintAllowed() must not divide by that zero.
         MockAggregatorV3 tinyFeed = new MockAggregatorV3(19, 1);
-        CertOracle tinyOracle = new CertOracle(address(tinyFeed), attester, 2, 3600, 500, 100, POKE_WINDOW, false, 3600);
+        CertOracle tinyOracle = new CertOracle(address(tinyFeed), attester, 2, 3600, 500, 100, POKE_WINDOW, false, 3600, address(0));
         vm.prank(attester);
         tinyOracle.setMarkPrice(PX);
 
@@ -830,10 +830,10 @@ contract CertOracleTest is Test {
     /// @notice L-3: the constructor names a bad dependency instead of failing later somewhere else.
     function test_constructorRejectsZeroDependencies() public {
         vm.expectRevert(CertOracle.CertOracle_ZeroAddress.selector);
-        new CertOracle(address(0), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600);
+        new CertOracle(address(0), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600, address(0));
 
         vm.expectRevert(CertOracle.CertOracle_ZeroAddress.selector);
-        new CertOracle(address(feed), address(0), 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600);
+        new CertOracle(address(feed), address(0), 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600, address(0));
     }
 
     // =======================================================================================
@@ -863,7 +863,7 @@ contract CertOracleTest is Test {
     ///      number, not because two independent sources concur.
     function _deploySingleSource(uint256 devBps) internal returns (CertOracle o, MockAggregatorV3 f) {
         f = new MockAggregatorV3(8, 355_86000000);
-        o = new CertOracle(address(f), attester, 2, STALENESS, devBps, 100, POKE_WINDOW, true, 3600);
+        o = new CertOracle(address(f), attester, 2, STALENESS, devBps, 100, POKE_WINDOW, true, 3600, address(0));
         vm.prank(attester);
         o.setMarkPrice(PX);
     }
@@ -981,18 +981,18 @@ contract CertOracleTest is Test {
         MockAggregatorV3 f = new MockAggregatorV3(8, 355_86000000);
 
         vm.expectRevert(CertOracle.CertOracle_DeviationTooWideForSingleSource.selector);
-        new CertOracle(address(f), attester, 2, STALENESS, SS_DEVIATION_BPS + 1, 100, POKE_WINDOW, true, 3600);
+        new CertOracle(address(f), attester, 2, STALENESS, SS_DEVIATION_BPS + 1, 100, POKE_WINDOW, true, 3600, address(0));
 
         // The bound is inclusive: exactly 200 deploys.
         CertOracle atBound =
-            new CertOracle(address(f), attester, 2, STALENESS, SS_DEVIATION_BPS, 100, POKE_WINDOW, true, 3600);
+            new CertOracle(address(f), attester, 2, STALENESS, SS_DEVIATION_BPS, 100, POKE_WINDOW, true, 3600, address(0));
         assertEq(atBound.deviationBps(), SS_DEVIATION_BPS);
         assertTrue(atBound.singleSource());
 
         // And the check is conditional on the MODE, not on the number: the identical 201 bps is
         // accepted for a dual-source deployment, where the basis band still stands behind it.
         CertOracle dual =
-            new CertOracle(address(f), attester, 2, STALENESS, SS_DEVIATION_BPS + 1, 100, POKE_WINDOW, false, 3600);
+            new CertOracle(address(f), attester, 2, STALENESS, SS_DEVIATION_BPS + 1, 100, POKE_WINDOW, false, 3600, address(0));
         assertEq(dual.deviationBps(), SS_DEVIATION_BPS + 1);
         assertFalse(dual.singleSource());
     }
@@ -1004,7 +1004,7 @@ contract CertOracleTest is Test {
     ///         that single-source mode drops and dual-source mode must keep.
     function test_dualSourceBehaviourUnchanged() public {
         MockAggregatorV3 f = new MockAggregatorV3(8, 355_86000000);
-        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600);
+        CertOracle o = new CertOracle(address(f), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600, address(0));
         assertFalse(o.singleSource());
 
         // --- markPx18 == 0: basis unknown, and minting REFUSED. Both are pre-Task-2 behaviour.
@@ -1072,12 +1072,12 @@ contract CertOracleTest is Test {
     function test_singleSourceFailsClosedWithoutADeviationReference() public {
         MockAggregatorV3 ssFeed = new MockAggregatorV3(19, 1); // 1 / 10 == 0 on normalisation
         CertOracle ss =
-            new CertOracle(address(ssFeed), attester, 2, STALENESS, SS_DEVIATION_BPS, 100, POKE_WINDOW, true, 3600);
+            new CertOracle(address(ssFeed), attester, 2, STALENESS, SS_DEVIATION_BPS, 100, POKE_WINDOW, true, 3600, address(0));
         assertEq(ss.lastGoodPx18(), 0, "precondition: construction normalised to a zero reference");
 
         MockAggregatorV3 dualFeed = new MockAggregatorV3(19, 1);
         CertOracle dual =
-            new CertOracle(address(dualFeed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600);
+            new CertOracle(address(dualFeed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600, address(0));
         assertEq(dual.lastGoodPx18(), 0);
 
         // Both feeds recover to a real, readable price, so `p != 0` while the reference stays 0.
@@ -1146,7 +1146,7 @@ contract CertOracleTest is Test {
         // already-stale feed.
         MockAggregatorV3 born = new MockAggregatorV3(96, 355_86000000);
         vm.expectRevert(CertOracle.CertOracle_FeedDecimalsOutOfRange.selector);
-        new CertOracle(address(born), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600);
+        new CertOracle(address(born), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600, address(0));
     }
 
     // =======================================================================================
@@ -1159,7 +1159,7 @@ contract CertOracleTest is Test {
     // `_readFeed` — which px() and the constructor use, and therefore both mint paths — never did,
     // so a feed reporting `decimals() <= 17` with a large enough answer panicked (0x11) instead of
     // reverting by name. Confirmed by execution before this fix landed: `MockAggregatorV3(0, 2e59)`
-    // made both `oracle.px()` and `new CertOracle(...)` panic uncaught.
+    // made both `oracle.px()` and `new CertOracle(..., address(0))` panic uncaught.
     // =======================================================================================
 
     /// @notice px() is allowed to refuse a malfunctioning feed — it backs minting, which must be
@@ -1194,7 +1194,7 @@ contract CertOracleTest is Test {
     function test_constructorRevertsNamedOnAnswerNotNormalisable() public {
         MockAggregatorV3 born = new MockAggregatorV3(0, 2e59);
         vm.expectRevert(CertOracle.CertOracle_AnswerNotNormalisable.selector);
-        new CertOracle(address(born), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600);
+        new CertOracle(address(born), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600, address(0));
     }
 
     /// @notice The exact edge of the new guard: at `d == 18` the multiplier `10 ** (18 - d)` is 1,

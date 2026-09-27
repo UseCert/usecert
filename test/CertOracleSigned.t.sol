@@ -29,7 +29,7 @@ contract CertOracleSignedTest is Test {
         attester = vm.addr(attesterPk);
         feed = new MockAggregatorV3(8, int256(PX / 1e10)); // 8 decimals, priced at PX
         oracle =
-            new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, MARK_AGE);
+            new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, MARK_AGE, address(0));
     }
 
     function _sign(uint256 pk, uint256 px18, uint64 nonce, uint64 observedAt, uint64 deadline)
@@ -283,7 +283,7 @@ contract CertOracleSignedTest is Test {
         bytes memory sig = _sign(attesterPk, PX, 1, obs, obs + 60);
 
         CertOracle twin =
-            new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, MARK_AGE);
+            new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, MARK_AGE, address(0));
         vm.prank(relayer);
         vm.expectRevert(CertOracle.CertOracle_BadSignature.selector);
         twin.setMarkPriceSigned(PX, 1, obs, obs + 60, sig);
@@ -357,7 +357,7 @@ contract CertOracleSignedTest is Test {
     ///      there would be a pause-by-silence for the attester).
     function test_H6_singleSourceDoesNotAgeTheMark() public {
         MockAggregatorV3 f = new MockAggregatorV3(8, int256(PX / 1e10));
-        CertOracle ss = new CertOracle(address(f), attester, 2, STALENESS, 200, 100, POKE_WINDOW, true, MARK_AGE);
+        CertOracle ss = new CertOracle(address(f), attester, 2, STALENESS, 200, 100, POKE_WINDOW, true, MARK_AGE, address(0));
         vm.warp(block.timestamp + 2 * MARK_AGE);
         f.set(int256(PX / 1e10), block.timestamp);
         assertTrue(ss.mintAllowed(), "no mark, no age gate in single-source mode");
@@ -365,15 +365,15 @@ contract CertOracleSignedTest is Test {
 
     function test_H6_maxMarkAgeIsBoundedAtConstruction() public {
         vm.expectRevert(CertOracle.CertOracle_ConfigOutOfBounds.selector);
-        new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 29);
+        new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 29, address(0));
         vm.expectRevert(CertOracle.CertOracle_ConfigOutOfBounds.selector);
-        new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3601);
+        new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3601, address(0));
         vm.expectRevert(CertOracle.CertOracle_ConfigOutOfBounds.selector);
-        new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 0);
+        new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 0, address(0));
 
-        CertOracle lo = new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 30);
+        CertOracle lo = new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 30, address(0));
         CertOracle hi =
-            new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600);
+            new CertOracle(address(feed), attester, 2, STALENESS, DEVIATION_BPS, 100, POKE_WINDOW, false, 3600, address(0));
         assertEq(lo.maxMarkAge(), 30);
         assertEq(hi.maxMarkAge(), 3600);
     }

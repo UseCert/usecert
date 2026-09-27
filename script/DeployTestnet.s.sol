@@ -5,7 +5,7 @@ import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
 import {CertVault} from "../src/CertVault.sol";
 import {Certificate} from "../src/Certificate.sol";
-import {CertOracle} from "../src/CertOracle.sol";
+import {CertOracle, IUIMultiplierToken} from "../src/CertOracle.sol";
 import {CertFactory} from "../src/CertFactory.sol";
 import {SolvencyRegistry} from "../src/SolvencyRegistry.sol";
 import {CapacityOracle} from "../src/CapacityOracle.sol";
@@ -302,6 +302,10 @@ contract DeployTestnet is Script {
         uint256 bufferFloor18;
         uint256 bufferFeeOn18;
         uint256 bufferMintSlow18;
+        /// @dev Option A: the Robinhood stock token (ERC-8056) the feed prices, passed to the
+        ///      oracle as `stockToken`. address(0) on testnet and in simulation (multiplier 1e18);
+        ///      the oracle refuses zero on mainnet (4663). S9 reads it back.
+        address stockToken;
     }
 
     /// @dev Deployed addresses per mirror, kept in storage rather than in locals: `run()` would be
@@ -431,7 +435,8 @@ contract DeployTestnet is Script {
                 // and `BufferBook.configure` requires them non-increasing.
                 bufferFloor18: 9_000e18,
                 bufferFeeOn18: 5_400e18,
-                bufferMintSlow18: 2_700e18
+                bufferMintSlow18: 2_700e18,
+                stockToken: address(0)
             })
         );
 
@@ -452,7 +457,8 @@ contract DeployTestnet is Script {
                 openInterest18: 50_000_000e18,
                 bufferFloor18: 500_000e18,
                 bufferFeeOn18: 300_000e18,
-                bufferMintSlow18: 150_000e18
+                bufferMintSlow18: 150_000e18,
+                stockToken: address(0)
             })
         );
     }
@@ -601,7 +607,8 @@ contract DeployTestnet is Script {
                         BASIS_BAND_BPS,
                         POKE_CONFIRMATION_SECONDS,
                         _singleSource(),
-                        MAX_MARK_AGE
+                        MAX_MARK_AGE,
+                        assets[i].stockToken
                     )
                 );
         }
@@ -1056,6 +1063,20 @@ contract DeployTestnet is Script {
         _verifyAssetGate(i);
     }
 
+    /// @dev Option A, S9: multiplier18() is inside the oracle's bounds and is the LIVE reading
+    ///      (the token's own uiMultiplier(), not the last-good fallback); exactly 1e18 without a
+    ///      token. Shared with SafeBatches, whose batch-1 oracles DeployMainnet re-checks here.
+    function _verifyMultiplier(CertOracle o, address token) internal view {
+        uint256 m = o.multiplier18();
+        require(m >= o.MIN_MULTIPLIER_18() && m <= o.MAX_MULTIPLIER_18(), "S9: oracle.multiplier18 out of bounds");
+        if (token == address(0)) {
+            require(m == 1e18, "S9: oracle.multiplier18 != 1e18 without a stock token");
+        } else {
+            require(token.code.length > 0, "S9: stock token has no code");
+            require(IUIMultiplierToken(token).uiMultiplier() == m, "S9: oracle.multiplier18 is not the token's live uiMultiplier");
+        }
+    }
+
     function _verifyAssetOracle(uint256 i) internal view {
         AssetParams memory a = assets[i];
         AssetDeployment memory d = deployed[i];
@@ -1084,6 +1105,9 @@ contract DeployTestnet is Script {
         require(o.maxMarkAge() == MAX_MARK_AGE, "S9: oracle.maxMarkAge wrong");
         require(o.priceDecimals() == a.priceDecimals, "S9: oracle.priceDecimals != venue price_decimals");
         require(o.lastGoodPx18() != 0, "S9: oracle.lastGoodPx18 == 0, mintAllowed fails closed");
+        // Option A: the stock token the feed prices, and a multiplier the vault can size with.
+        require(o.stockToken() == a.stockToken, "S9: oracle.stockToken != the asset table's token");
+        _verifyMultiplier(o, a.stockToken);
 
         // ---- §9: `absoluteCap18(vault)` is set. Zero means NO CAPACITY, not unbounded.
         //      The `!= 0` assertion comes FIRST deliberately: it is the failure that actually
