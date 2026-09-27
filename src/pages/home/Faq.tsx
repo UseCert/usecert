@@ -18,6 +18,12 @@ export const FAQ_ROWS: AccordionRow[] = [
     ],
   },
   {
+    title: "When is minting open?",
+    body: [
+      "Minting follows the price feeds. The Chainlink stock feeds update during US market sessions and stop after Friday's close, so minting pauses from about Saturday evening (UTC) until Monday's first price. Redemption is not paused: requestRedeem and forceExit stay open at all times.",
+    ],
+  },
+  {
     title: "What happens in sustained negative funding?",
     body: [
       "Funding accrues to a per-asset buffer first. Positive funding grows it; sustained negative funding draws it down. Past a published threshold, the remainder passes through as a transparent holding fee. It is buffered, then fee'd, never hidden, and every parameter is on chain.",

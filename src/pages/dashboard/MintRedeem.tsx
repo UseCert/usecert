@@ -739,6 +739,9 @@ function MintRedeemForm({ preset }: { preset: MintPreset }) {
                   {priceUnavailable
                     ? "oracle.px() reverted: the feed is stale, deviant or badly fed. That is designed behaviour, not an outage."
                     : "oracle.mintAllowed() is false."}
+                  {priceUnavailable
+                    ? " The stock feeds stop updating after Friday's US close, so this is expected every weekend: minting reopens with Monday's first price."
+                    : ""}
                   {!attestationStale
                     ? ""
                     : refreshable === true
