@@ -27,8 +27,8 @@
     "settleBandBps": 500,
     "mintFeeBps": 10,
     "redeemFeeBps": 10,
-    "stalenessSeconds": 900,
-    "_stalenessSecondsNote": "TESTNET REACHABILITY VALUE. Mainnet is 93600 (TESTNET-PLAN.md S1). Must not be carried over.",
+    "stalenessSeconds": 93600,
+    "_stalenessSecondsNote": "Corrected by hand 2026-09-27 (pre-audit L-5): the book writer in script/AddMirror.s.sol hard-coded the testnet value 900 into every book. On chain all six stack-4 CertOracles read stalenessSeconds() = 93600 (checked 2026-09-27). Only this parameter was changed; no address was touched.",
     "pokeConfirmationSeconds": 300,
     "deviationBps": 500,
     "basisBandBps": 500,
@@ -134,5 +134,6 @@
       "absoluteCap18": "500000000000000000000000",
       "seedOpenInterest18": "5000000000000000000000000"
     }
-  ]
+  ],
+  "_feedNote": "Each vault's \"replayAggregator\" field is a LEGACY LABEL: on mainnet it holds the real Chainlink feed (EACAggregatorProxy, e.g. RHTSLA / USD, version 6, owned by Chainlink's 4-of-9 Safe 0xeE27D5Ae494300902D90454e8630A3F1C68c9C52), not src/sim/ReplayAggregator. Kept under the old key because readers depend on it (pre-audit L-6)."
 }
