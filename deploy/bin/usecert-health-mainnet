@@ -52,6 +52,7 @@ MANIFEST = "/var/www/usecert-data/manifest.json"
 INSURANCE_BOOK = "/opt/usecert-history/4663.insurance.json"
 SIDE_BOOKS = "/opt/usecert-history/4663.*.json"
 CERT_STAKING_BOOK = "/opt/usecert-history/4663.certstaking.json"
+STACK5_SHARED_BOOK = "/opt/usecert-history/4663.stack5.shared.json"
 HOST_BOOKS = ["/opt/keeper/book-stack4.json", "/opt/usecert-history/4663.json"]
 MAIL_HOST = "mx.use-cert.com"
 UA = {"User-Agent": "usecert-health/1.0", "Content-Type": "application/json"}
@@ -227,6 +228,22 @@ def checks():
     # a problem: rewards are funded by hand until K2, so "nothing streaming" is the normal state.
     word = lambda to, data: int(rpc("eth_call", [{"to": to, "data": data}, "latest"]), 16)
     bal = lambda token, who: word(token, "0x70a08231" + "0" * 24 + who[2:].lower())
+    def cert_staking(label, cs):
+        try:
+            cert_t = "0x" + ("%064x" % word(cs, "0x72f702f3"))[-40:]
+            usdg_t = "0x" + ("%064x" % word(cs, "0xf7c618c1"))[-40:]
+            staked, cap = word(cs, "0x817b1cd2"), word(cs, "0xba28fd2e")
+            owed = word(cs, "0xe1c4c9fe") + word(cs, "0xdf1c455c")      # still to stream + carried
+            held_cert, held_usdg = bal(cert_t, cs), bal(usdg_t, cs)
+            if held_cert < staked:
+                P.append("%s: INSOLVENT - holds %.2f CERT but %.2f is staked (%s)" % (label, held_cert / 1e18, staked / 1e18, cs))
+            if held_usdg < owed:
+                P.append("%s: reward stream underfunded - holds %.6f USDG, owes %.6f still to stream (%s)" % (label, held_usdg / 1e6, owed / 1e6, cs))
+            if cap and staked * 10 >= cap * 9:
+                P.append("%s: %.0f%% of the %.0f CERT stake cap is used - raising it means a new pool" % (label, 100.0 * staked / cap, cap / 1e18))
+        except Exception as e:                                   # noqa: BLE001
+            P.append("%s: pool unreadable (%s)" % (label, str(e)[:80]))
+
     try:
         cs = json.load(open(CERT_STAKING_BOOK))["address"]
     except FileNotFoundError:
@@ -235,20 +252,38 @@ def checks():
         cs = None
         P.append("cert staking: book unreadable (%s)" % str(e)[:80])
     if cs:
+        cert_staking("cert staking v1", cs)
+
+    # Stack 5's staking side (deployed 2026-09-27 ahead of the vaults): CertStaking v2 with the same
+    # solvency checks as v1, InsuranceStaking v2 (its cap counts deposited principal, and a pending
+    # draw pauses exits, so both are reported), and FeeVault (pull-based: everything it has credited
+    # must still be in its balance).
+    try:
+        shared = json.load(open(STACK5_SHARED_BOOK))["contracts"]
+    except FileNotFoundError:
+        shared = None
+    except Exception as e:                                       # noqa: BLE001
+        shared = None
+        P.append("stack 5: shared book unreadable (%s)" % str(e)[:80])
+    if shared:
+        cert_staking("cert staking v2", shared["CertStaking"]["address"])
         try:
-            cert_t = "0x" + ("%064x" % word(cs, "0x72f702f3"))[-40:]
-            usdg_t = "0x" + ("%064x" % word(cs, "0xf7c618c1"))[-40:]
-            staked, cap = word(cs, "0x817b1cd2"), word(cs, "0xba28fd2e")
-            owed = word(cs, "0xe1c4c9fe") + word(cs, "0xdf1c455c")      # still to stream + carried
-            held_cert, held_usdg = bal(cert_t, cs), bal(usdg_t, cs)
-            if held_cert < staked:
-                P.append("cert staking: INSOLVENT - holds %.2f CERT but %.2f is staked (%s)" % (held_cert / 1e18, staked / 1e18, cs))
-            if held_usdg < owed:
-                P.append("cert staking: reward stream underfunded - holds %.6f USDG, owes %.6f still to stream (%s)" % (held_usdg / 1e6, owed / 1e6, cs))
-            if cap and staked * 10 >= cap * 9:
-                P.append("cert staking: %.0f%% of the %.0f CERT stake cap is used - raising it means a new pool" % (100.0 * staked / cap, cap / 1e18))
+            ins = shared["InsuranceStaking"]["address"]
+            principal, cap = word(ins, "0x641ee8ab"), word(ins, "0xdbd5edc7")
+            if word(ins, "0x6060ffaa") != 0:
+                P.append("insurance v2: a draw is PENDING on %s - exits and deposits are paused" % ins)
+            if cap and principal * 10 >= cap * 9:
+                P.append("insurance v2: %.0f%% of the %.0f USDG principal cap is used - raising it means a new pool" % (100.0 * principal / cap, cap / 1e6))
         except Exception as e:                                   # noqa: BLE001
-            P.append("cert staking: pool unreadable (%s)" % str(e)[:80])
+            P.append("insurance v2: pool unreadable (%s)" % str(e)[:80])
+        try:
+            fv = shared["FeeVault"]["address"]
+            asset = "0x" + ("%064x" % word(fv, "0x38d52e0f"))[-40:]
+            owed, held = word(fv, "0xe7fa9f7d"), bal(asset, fv)
+            if held < owed:
+                P.append("fee vault: holds %.6f USDG but has credited %.6f to recipients (%s)" % (held / 1e6, owed / 1e6, fv))
+        except Exception as e:                                   # noqa: BLE001
+            P.append("fee vault: unreadable (%s)" % str(e)[:80])
     try:
         pool = json.load(open(INSURANCE_BOOK))["address"]
         held, cap = word(pool, "0x01e1d114"), word(pool, "0xdbd5edc7")
