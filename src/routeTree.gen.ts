@@ -16,6 +16,7 @@ import { Route as ContractsRouteImport } from './routes/contracts'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as RoadmapRouteImport } from './routes/roadmap'
 import { Route as RolesRouteImport } from './routes/roles'
+import { Route as StatsRouteImport } from './routes/stats'
 import { Route as LearnIndexRouteImport } from './routes/learn/index'
 import { Route as LearnSlugRouteImport } from './routes/learn/$slug'
 import { Route as LegalPrivacyPolicyRouteImport } from './routes/legal/privacy-policy'
@@ -58,6 +59,11 @@ const RolesRoute = RolesRouteImport.update({
   path: '/roles',
   getParentRoute: () => rootRouteImport,
 } as any)
+const StatsRoute = StatsRouteImport.update({
+  id: '/stats',
+  path: '/stats',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const LearnIndexRoute = LearnIndexRouteImport.update({
   id: '/learn/',
   path: '/learn/',
@@ -97,6 +103,7 @@ export interface FileRoutesByFullPath {
   '/dashboard': typeof DashboardRoute
   '/roadmap': typeof RoadmapRoute
   '/roles': typeof RolesRoute
+  '/stats': typeof StatsRoute
   '/learn/$slug': typeof LearnSlugRoute
   '/legal/privacy-policy': typeof LegalPrivacyPolicyRoute
   '/legal/terms-of-service': typeof LegalTermsOfServiceRoute
@@ -112,6 +119,7 @@ export interface FileRoutesByTo {
   '/dashboard': typeof DashboardRoute
   '/roadmap': typeof RoadmapRoute
   '/roles': typeof RolesRoute
+  '/stats': typeof StatsRoute
   '/learn/$slug': typeof LearnSlugRoute
   '/legal/privacy-policy': typeof LegalPrivacyPolicyRoute
   '/legal/terms-of-service': typeof LegalTermsOfServiceRoute
@@ -128,6 +136,7 @@ export interface FileRoutesById {
   '/dashboard': typeof DashboardRoute
   '/roadmap': typeof RoadmapRoute
   '/roles': typeof RolesRoute
+  '/stats': typeof StatsRoute
   '/learn/$slug': typeof LearnSlugRoute
   '/legal/privacy-policy': typeof LegalPrivacyPolicyRoute
   '/legal/terms-of-service': typeof LegalTermsOfServiceRoute
@@ -145,6 +154,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/roadmap'
     | '/roles'
+    | '/stats'
     | '/learn/$slug'
     | '/legal/privacy-policy'
     | '/legal/terms-of-service'
@@ -160,6 +170,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/roadmap'
     | '/roles'
+    | '/stats'
     | '/learn/$slug'
     | '/legal/privacy-policy'
     | '/legal/terms-of-service'
@@ -175,6 +186,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/roadmap'
     | '/roles'
+    | '/stats'
     | '/learn/$slug'
     | '/legal/privacy-policy'
     | '/legal/terms-of-service'
@@ -191,6 +203,7 @@ export interface RootRouteChildren {
   DashboardRoute: typeof DashboardRoute
   RoadmapRoute: typeof RoadmapRoute
   RolesRoute: typeof RolesRoute
+  StatsRoute: typeof StatsRoute
   LearnSlugRoute: typeof LearnSlugRoute
   LegalPrivacyPolicyRoute: typeof LegalPrivacyPolicyRoute
   LegalTermsOfServiceRoute: typeof LegalTermsOfServiceRoute
@@ -250,6 +263,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RolesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/stats': {
+      id: '/stats'
+      path: '/stats'
+      fullPath: '/stats'
+      preLoaderRoute: typeof StatsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/learn/': {
       id: '/learn/'
       path: '/learn'
@@ -303,6 +323,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardRoute: DashboardRoute,
   RoadmapRoute: RoadmapRoute,
   RolesRoute: RolesRoute,
+  StatsRoute: StatsRoute,
   LearnSlugRoute: LearnSlugRoute,
   LegalPrivacyPolicyRoute: LegalPrivacyPolicyRoute,
   LegalTermsOfServiceRoute: LegalTermsOfServiceRoute,
