@@ -107,6 +107,25 @@ contract CertFactoryTest is Test {
         assertEq(Certificate(CertVault(v).certificate()).symbol(), "uTSLA");
     }
 
+    /// @notice Pre-audit H-3: the registration time is published, once, so InsuranceStaking can
+    ///         refuse draws to a vault until the public has had a full exit's time to react.
+    function test_registerVaultRecordsRegistrationTime() public {
+        CertVault vault = _deployDirect(address(oracle), "uTSLA");
+        address certificate = address(vault.certificate());
+        assertEq(factory.registeredAt(address(vault)), 0, "0 before registration");
+        vm.warp(block.timestamp + 123);
+        vm.prank(gov);
+        factory.registerVault(address(vault), certificate);
+        assertEq(factory.registeredAt(address(vault)), block.timestamp);
+        uint256 at = block.timestamp;
+        vm.warp(block.timestamp + 30 days);
+        vm.prank(gov);
+        vm.expectRevert(CertFactory.CertFactory_AlreadyRegistered.selector);
+        factory.registerVault(address(vault), certificate);
+        assertEq(factory.registeredAt(address(vault)), at, "never refreshed");
+        assertEq(factory.registeredAt(eve), 0, "0 for an address never registered");
+    }
+
     function test_vaultStartsDisabled() public {
         address v = _deploy();
         assertFalse(factory.enabled(v));

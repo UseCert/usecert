@@ -4,6 +4,12 @@ Status: **K1 and K2 written and tested, neither deployed.** Mainnet deployment n
 legal read (a yield-bearing stake is the most security-like thing UseCert would offer) and the
 Safe's 2-of-3.
 
+**`InsuranceStaking` v2 (stack 5)** fixes the internal pre-audit's insurance findings (H-3, H-9,
+M-2, M-14, L-3's unclaimable fees, L-14, L-16). It is a new contract for a new deploy; the pool
+deployed with stack 4 is immutable and keeps v1's behaviour. The last section of this document,
+"v2 (stack 5): what changed, and what a compromised Safe can still do", is the authoritative
+statement; the K1 table is updated to match it.
+
 ## What it is for
 
 The whitepaper's loss order is fixed: **vault buffer → insurance → (never) holder backing.** In
@@ -18,6 +24,13 @@ which is the `buffer18` figure the solvency math reads (`hotBuffer()` is `balanc
 So insurance can pay out **without changing a single deployed vault.** The insurance contract
 transfers USDG to the vault, and that USDG backs holders from that moment.
 
+v2 no longer relies on this. A plain transfer lands as spare balance, which a K2 vault can sweep
+out as fees (K2-M-13) and a retired vault sweeps to governance (H-3). v2 therefore pays only
+through the vault's own `receiveInsurance(amount)`, which must book it as capital that can never
+be swept. The pool needs three functions from a vault (`IInsurableVault`): `retired()`,
+`insuranceShortfall()` and `receiveInsurance(uint256)`. The stack-5 `CertVault` implements them;
+no earlier vault does, so **a v2 pool can only pay stack-5 vaults.**
+
 The reverse is not true. Today fees stay inside each vault as collateral, and no function can
 route them out, apart from `retire()` on an empty vault. **Fee-funded staker yield therefore
 needs a new vault version** (phase K2, below).
@@ -29,21 +42,29 @@ needs a new vault version** (phase K2, below).
 | **What is staked** | **USDG**: an ERC-4626 vault over the collateral itself | A draw must deliver collateral. Staked CERT would first have to be *sold* for USDG, in a crisis, into a market that is falling because of that crisis. That is the reflexive loop that ends insurance funds. A CERT tranche can sit *behind* this one later, with a swap route. |
 | **How losses are taken** | A **draw** moves USDG from the pool to a registered vault, and every share loses value pro rata | There is no per-user slashing logic to get wrong. The share price is the whole state. |
 | **Who can draw** | **Governance (the 2-of-3 Safe) proposes**; anyone executes after a delay | There is no objective on-chain loss oracle yet: the accrual ledger is attester-relayed. A human decision, delayed and published, is the honest trigger until K3. |
-| **Draw safety rails** | A draw may only go to `CertFactory.isVault` addresses. Each draw is capped at `maxDrawBps` of pool assets, checked at proposal *and* at execution. It becomes executable after `drawDelay` and expires `DRAW_EXECUTION_WINDOW` after that. | A compromised or mistaken Safe can take at most one capped slice, only to a vault (where the USDG backs holders), and only after a public delay. |
-| **Withdrawals** | `requestWithdraw` → wait `cooldown` → redeem within `withdrawWindow` | An instant exit makes the stake worthless as insurance: stakers leave the moment a loss looks likely. |
+| **Draw safety rails** | A draw may only go to a `CertFactory.isVault` address **registered at least `registrationDelay` ago** (at least cooldown + window) that is **not retired**. It pays the smaller of the proposal and the vault's **declared `insuranceShortfall()`** (none declared: it reverts), **through `receiveInsurance`**, with an exact allowance and an exact balance check. Executed draws in **any 30 days** total at most `maxDrawBps` of the assets at the start of those 30 days. The checks run at proposal and again at execution. The draw becomes executable after `drawDelay` and expires `DRAW_EXECUTION_WINDOW` after that. | v1's version of this row said a compromised Safe gets "at most one capped slice, only to a vault where it backs holders". That was false (H-3): it could draw into an empty vault, retire it and sweep the draw to itself, weekly. What v2 guarantees instead is in the v2 section below. |
+| **Withdrawals** | `requestWithdraw` **moves the shares into escrow** → wait `cooldown` → redeem them within `withdrawWindow`. `cancelWithdraw` returns them at any time, including after the window has closed. Escrowed shares cannot be transferred, and nothing can be sent into the escrow. | An instant exit makes the stake worthless as insurance: stakers leave the moment a loss looks likely. v1 attached a request to an address while the shares stayed transferable, so rotating shares across staggered requests gave an instant exit (H-9). Escrowed shares still count, earn and absorb draws. |
 | **Running from a draw** | While any draw is pending (proposed, not executed, cancelled or expired), **redeems and deposits are paused** | Otherwise a staker whose window happens to be open sees the proposal and leaves before it executes, while a new depositor walks into a loss already announced. The pause is bounded by the draw's expiry, so governance cannot trap stakers indefinitely. |
-| **No trapping stakers** | At least `MIN_PROPOSAL_GAP` (7 days) between two draw proposals, and `drawDelay + 3 days + 1 day ≤ 7 days` is enforced at construction | Exits pause while a draw is pending. Without a gap, governance could re-propose forever and hold every staker in place. With it, exits reopen for at least a day between cycles. |
-| **Yield** | Any USDG transferred to the pool raises the share price for every staker, including those in cooldown | The contract needs no reward logic. The cooldown blunts a deposit-before-reward sandwich: the sandwicher carries the draw risk for at least `cooldown`. |
+| **No trapping stakers** | At least `MIN_PROPOSAL_GAP` (7 days) between two draw proposals; `drawDelay + 3 days + 1 day ≤ 7 days`; and **`withdrawWindow ≥ drawDelay + 3 days + 1 day`**, all enforced at construction | Exits pause while a draw is pending. Without a gap, governance could re-propose forever and hold every staker in place. With it, exits reopen for at least a day between cycles. v1 let a pause (5 days) outlast a window (3 days), so a 1-unit proposal timed before a chosen staker's window closed it every time (M-2). Now every window has at least a day unpaused, wherever a proposal lands. |
+| **Yield** | Any USDG that reaches the pool other than as a deposit (fees, donations) **vests linearly into the share price over `VESTING_PERIOD` (7 days)**, for every staker including those in cooldown. An arrival nobody has synced counts as wholly unvested. `sync()` starts it vesting; it is permissionless, and every deposit, exit and draw runs it too. A new arrival rolls the unvested remainder into one fresh 7-day schedule. While there are no shares, nothing vests: income waits, then vests to the first stakers. | The contract needs no reward logic. v1 stepped the price on arrival, and the arrival is caller-timed, so deposit → distribute → redeem in one transaction took a share of the fees with no risk (M-14). Fees sent while nobody was staked were absorbed by the virtual shares (L-3). Because of the roll, anyone can stretch vesting by sending dust: income then vests with a time constant of about a week instead of in exactly a week. That moves income later, to stakers who stay, never out of the pool. |
+| **Deposit cap** | `depositCap` bounds **net principal**: deposits in, minus principal withdrawn. A withdrawal of `shares` removes `netPrincipal × shares / totalSupply` (rounded down); the last shares out remove the rest. A draw does not reduce it. | The cap bounds what anyone can lose to a bug in an unaudited pool, so it should count money put in, not money earned. v1 capped `totalAssets()`, so income and donations closed the pool to new stakers (L-16). |
+| **Transfers during a pause** | Shares that are **not** in escrow stay transferable while a draw is pending | Accepted (L-14). A transfer moves exposure between two stakers and takes nothing out of the pool, and the receiver cannot redeem without its own request and cooldown. |
 | **Inflation attack** | OZ ERC-4626 virtual shares, `_decimalsOffset() = 6` | The standard mitigation for the first-depositor donation attack. It is tested. |
 | **Upgradeability** | None. Governance, registry, asset and every parameter are immutable. | This matches the rest of the protocol. |
 
-Constructor bounds, so no deployment can misconfigure it:
+Constructor (v2): `(asset, registry, governance, cooldown, withdrawWindow, drawDelay, maxDrawBps,
+depositCap, registrationDelay, name, symbol)`. The bounds, so no deployment can misconfigure it:
 
 * `cooldown > drawDelay`, so a staker who has not already requested a withdrawal cannot finish
   one inside a draw's delay;
-* `withdrawWindow ≥ 1 day`;
-* `0 < maxDrawBps ≤ 5000`;
+* `withdrawWindow ≥ 1 day`, and `withdrawWindow ≥ drawDelay + DRAW_EXECUTION_WINDOW + 1 day` (M-2);
+* `drawDelay + DRAW_EXECUTION_WINDOW + 1 day ≤ MIN_PROPOSAL_GAP`, so `drawDelay ≤ 3 days`;
+* `registrationDelay ≥ cooldown + withdrawWindow` (H-3);
+* `0 < maxDrawBps ≤ 5000`, and `depositCap > 0`;
 * no zero addresses.
+
+v2 refuses the stack-4 parameters (window 3 days, delay 2 days). A valid set: cooldown 10 days,
+delay 2 days, window 6 days, registration delay 16 days.
 
 ## Where yield comes from — honestly
 
@@ -168,13 +189,14 @@ transfer into it is not credited, and nothing could ever stream it.
 
 ### Interplay with K1 draws — for K3
 
-`InsuranceStaking.executeDraw` pays a vault by plain transfer. That lands in the balance and in
-no reserve. If the loss behind the draw was **declared** (through `accrueFunding`), the deficit
-term already holds back fees against it. A draw then frees only the fees above the deficit, which
-matches the loss order: fees absorb first, insurance absorbs next. If the loss was **not**
-declared, the draw can free previously held fees, which then flow back out through the split. So
-governance should have the attester declare a loss before it proposes a draw. K3 should make the
-draw pay through `seedBuffer`, so drawn capital is `bufferCapital` and can never be swept.
+v1's `InsuranceStaking.executeDraw` paid a vault by plain transfer. That lands in the balance and
+in no reserve, so a permissionless `sweepFees()` in the same block could take it out as "fees"
+(K2-M-13; in the PoC, 10.50 USDG of a draw was swept, 3.15 of it out of the loss waterfall). v2
+pays only through `receiveInsurance`. The stack-5 vault must book what it receives as
+non-sweepable capital (the role `bufferCapital` plays) and keep it out of `sweepRetired`. That half
+of the fix is in `CertVault`, not in the pool: the pool can only check that exactly the drawn
+amount left it. Governance should still have the attester declare the loss before proposing, so
+that `insuranceShortfall()` reflects it.
 
 ### Deploying K2 is a new stack, not an upgrade
 
@@ -188,3 +210,60 @@ Every contract here is immutable, so there is no upgrade path. Deploying K2 mean
    redemption indefinitely (Law 2), but its fees stay inside it forever apart from `retire()`.
 
 The deploy script does not do step 3 yet. K2 is code and tests only.
+
+## v2 (stack 5): what changed, and what a compromised Safe can still do
+
+For each fix, a test in `test/InsuranceStaking.t.sol` replays the attack and asserts that it no
+longer works. The tests are named after the finding, and after the K2 PoCs `H01`, `H02`, `M01`
+and `L01`. Removing any one fix makes at least one of them fail; this was checked by mutation.
+
+| Finding | v1 | v2 |
+|---|---|---|
+| **H-9** cooldown bypass | A request was a number per address; shares stayed transferable | Requested shares are escrowed in the pool; redeem burns from the escrow; `cancelWithdraw` returns them, also after expiry |
+| **M-14** atomic sandwich | Income stepped the share price on arrival | Income vests over 7 days; an unsynced arrival is wholly unvested |
+| **L-3** fees with no stakers | Absorbed by the virtual shares | Held unvested until there are shares, then vests to them |
+| **M-2** window lapses in a pause | Pause 5 days, window 3 days | `withdrawWindow ≥ drawDelay + 3 days + 1 day` |
+| **H-3** drain through a vault | Any registered vault, any time, plain transfer, 30% per draw | Registered at least `registrationDelay` ago, not retired, capped at the declared shortfall, paid via `receiveInsurance` with an exact balance check, 30% per rolling 30 days |
+| **L-14** `isVault` not re-checked | Checked at proposal only | Re-checked at execution, with the registration age and `retired()` |
+| **L-16** income fills the cap | Cap on `totalAssets()` | Cap on net principal |
+
+**The rolling cap, precisely.**
+
+* At every proposal and every execution, the pool sums what executed draws paid in the trailing
+  30 days (`drawnInPeriod()`).
+* It then allows `drawCap() = maxDrawBps × (totalAssets() + drawn) / 10 000 − drawn`.
+* `totalAssets() + drawn` is the pool as it stood at the start of the period, adjusted for the
+  deposits, exits and income since then. A percentage cap should follow those.
+* It bounds every 30-day window, not just fixed epochs. Take any window: the check at its last
+  draw counted every earlier draw in it.
+* With no other flows, the draws in any 30 days total at most `maxDrawBps` of the pool at the
+  start of those 30 days.
+
+**A compromised Safe can still:**
+
+* register a contract of its own in `CertFactory` (any contract with a matching `certificate()`),
+  wait `registrationDelay` in public, and then propose draws to it. That contract can claim any
+  shortfall and keep what it pulls. The worst case is therefore `maxDrawBps` of the pool per
+  30 days. Before the first such draw there is a public registration at least
+  `cooldown + withdrawWindow` old, and each draw waits a public `drawDelay`. Every staker who
+  watches `VaultRegistered` has time to request and complete an exit first.
+* pause exits and deposits for up to `drawDelay + 3 days` once every 7 days, by proposing draws
+  and leaving them to expire. It cannot close any window this way: each keeps at least a day
+  unpaused.
+* cancel draws, including honest ones.
+
+**It can no longer:**
+
+* draw to a vault registered less than `registrationDelay` ago, to a retired vault, or to a vault
+  that declares no shortfall;
+* draw more than the vault declares it needs, or more than the rolling cap;
+* receive a draw itself through `retire()` and `sweepRetired()` of a stack-5 vault, provided the
+  vault keeps insurance capital out of that sweep (the vault's half of H-3);
+* hold a staker in place across a whole window;
+* touch escrowed shares, the vesting schedule, the deposit cap or any parameter. It has no role in
+  the pool besides proposing and cancelling draws.
+
+**Residual, by design.** A staker can still stagger requests across several addresses, each with
+its own escrowed shares, so that part of the stake is always inside a window. Those shares did
+wait their full cooldown, they absorb every draw until they leave, and a pending draw pauses them
+like any other. What escrow removes is using the same shares for every request.

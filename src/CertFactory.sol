@@ -82,6 +82,16 @@ contract CertFactory {
     address[] public vaults;
     mapping(address => bool) public isVault;
     mapping(address => bool) public enabled;
+    /// @notice When each vault was registered, as a block timestamp; 0 for an address this factory
+    ///         never registered.
+    /// @dev H-3 (internal pre-audit 2026-09-27). The registration time is published so that a
+    ///      consumer holding other people's money can refuse to act on a registration until the
+    ///      public has had time to react to it. InsuranceStaking reads it: a draw may only go to a
+    ///      vault registered at least `registrationDelay` ago, a delay longer than a staker's full
+    ///      cooldown plus window, so a registration the governance Safe makes and then abuses is
+    ///      always one every staker could have exited ahead of. Written once, in registerVault,
+    ///      and never changed: there is no unregister, so it cannot be refreshed or rewound.
+    mapping(address => uint64) public registeredAt;
 
     constructor(address _lighter, address _registry, address _capacity, address _governance) {
         if (
@@ -122,6 +132,7 @@ contract CertFactory {
         if (address(CertVault(vault).certificate()) != certificate) revert CertFactory_CertificateMismatch();
 
         isVault[vault] = true;
+        registeredAt[vault] = uint64(block.timestamp);
         vaults.push(vault);
 
         (,,, uint16 marketIndex,,,,,,) = CertVault(vault).cfg();

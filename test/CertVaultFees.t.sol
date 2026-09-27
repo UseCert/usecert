@@ -12,9 +12,11 @@ import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 
 contract FeesMockRegistry is IVaultRegistry {
     mapping(address => bool) public isVault;
+    mapping(address => uint64) public registeredAt;
 
     function set(address v) external {
         isVault[v] = true;
+        registeredAt[v] = uint64(block.timestamp);
     }
 }
 
@@ -437,8 +439,20 @@ contract CertVaultFeesTest is VaultFixture {
     function test_endToEnd_mintFeeRaisesTheStakersSharePrice() public {
         FeesMockRegistry registry = new FeesMockRegistry();
         registry.set(address(vault));
+        // v2 bounds (pre-audit M-2, H-3, M-14): window 5d > delay 1d + 3d execution window + 1d,
+        // registration delay 15d >= cooldown + window. Income vests over VESTING_PERIOD.
         InsuranceStaking pool = new InsuranceStaking(
-            IERC20(address(usdg)), registry, gov, 10 days, 2 days, 1 days, 3_000, 10_000e6, "UseCert Insurance", "sUSDG"
+            IERC20(address(usdg)),
+            registry,
+            gov,
+            10 days,
+            5 days,
+            1 days,
+            3_000,
+            10_000e6,
+            15 days,
+            "UseCert Insurance",
+            "sUSDG"
         );
         address staker = makeAddr("staker");
         usdg.mint(staker, 10_000e6);
@@ -466,6 +480,10 @@ contract CertVaultFeesTest is VaultFixture {
         vm.stopPrank();
 
         assertEq(usdg.balanceOf(address(pool)), 10_000e6 + 4e6, "the pool's 80% did not arrive");
+        // Pre-audit M-14: income vests, it does not step the price in the transaction it lands.
+        assertEq(pool.convertToAssets(shares), valueBefore, "income stepped the share price");
+        pool.sync();
+        vm.warp(block.timestamp + pool.VESTING_PERIOD());
         uint256 valueAfter = pool.convertToAssets(shares);
         assertGt(valueAfter, valueBefore, "the share price did not rise");
         assertApproxEqAbs(valueAfter - valueBefore, 4e6, 2, "the staker did not get the pool's share");
