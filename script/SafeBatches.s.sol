@@ -177,10 +177,15 @@ contract SafeBatches is DeployMainnet {
         uint256 to = inits.length;
         if (ph == keccak256("registry")) {
             to = 1;
-        } else if (ph == keccak256("oracles")) {
-            from = 1;
+        } else if (ph == keccak256("oracles") || ph == keccak256("oracles-a") || ph == keccak256("oracles-b")) {
+            // oracles-a / oracles-b: the six oracles in two halves (three each), because with the
+            // stock token in each constructor one batch's calldata exceeds the 128 KiB a single
+            // command-line argument may be (Linux MAX_ARG_STRLEN), so it could not be sent. The
+            // halves run in order; every address is unchanged.
+            from = ph == keccak256("oracles-b") ? 1 + inits.length / 2 : 1;
+            if (ph == keccak256("oracles-a")) to = 1 + inits.length / 2;
             address reg = vm.computeCreateAddress(safe, nonce - 1);
-            require(reg.code.length > 0, "SafeBatches: BATCH1_PART=oracles needs the registry batch executed first");
+            require(reg.code.length > 0, "SafeBatches: this BATCH1_PART needs the previous batch-1 part executed first");
         } else {
             require(ph == keccak256(""), "SafeBatches: BATCH1_PART must be registry, oracles or unset");
         }
@@ -188,7 +193,13 @@ contract SafeBatches is DeployMainnet {
         for (uint256 k = from; k < to; ++k) {
             packed = _entry(packed, inits[k]);
             string memory what = k == 0 ? "registry" : string.concat("oracle ", assets[k - 1].symbol);
-            console2.log(string.concat("CREATE ", what, " ->"), vm.computeCreateAddress(safe, nonce + uint64(k - from)));
+            // BATCH1_AHEAD: creations queued ahead of this part but not yet executed (3 when
+            // oracles-b is built for signing before oracles-a has run), so the addresses printed
+            // are the ones it will create. Printing only: the data does not depend on it.
+            console2.log(
+                string.concat("CREATE ", what, " ->"),
+                vm.computeCreateAddress(safe, nonce + uint64(vm.envOr("BATCH1_AHEAD", uint256(0))) + uint64(k - from))
+            );
         }
 
         bytes memory data = abi.encodeWithSelector(MULTI_SEND, packed);
