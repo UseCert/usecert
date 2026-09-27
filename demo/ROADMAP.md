@@ -2022,6 +2022,42 @@ so every read failed. It now uses `cast`'s checksum.
 
 ---
 
+### 6.32 Address books can no longer go unrecorded, and both staking pools are watched — ✅ 2026-09-27
+
+**B: address books.**
+* **The gap.** `deployments/.gitignore` ignored every `*.json`, so that a test-written fake book
+  can't be committed. The side effect: a *new* mainnet book stayed invisible to `git status`
+  until someone remembered `git add -f`.
+* **Found while doing it.** Three history books (`4663.1`, `.2`, `.3`), each the only record of
+  retired mainnet contracts, had never been committed, although `history/README.md` described
+  them. They are committed now.
+* **The rule now.** Mainnet books (`4663.json`, `4663.*.json`, `history/4663.*.json`) are never
+  ignored. No test writes one: the only suite that switches to chain 4663 calls the commit guard
+  and never runs the script. Test books stay ignored; `git check-ignore` confirms `46630.json`
+  and `31337.json` are ignored and `4663.json` is not.
+* **The health check covers every side book.** Every `4663.<x>.json` the France host runs
+  (insurance, CERT staking, and any future K2 book) is compared, address by address, with the
+  copy on GitHub. A book the host has but GitHub doesn't (a 404) is reported as "deployed but
+  never committed".
+
+**C: staking alerts**, read from the chain every 5 minutes, token addresses included:
+* **CERT staking insolvent:** the pool holds less CERT than is staked.
+* **Reward stream underfunded:** the pool holds less USDG than it still has to stream plus what
+  it carries.
+* **A cap 90% full:** CERT staking (10,000,000 CERT) or insurance (10,000 USDG). Raising either
+  means a new pool.
+* **Not alerted:** a stream that has simply ended. Rewards are funded by hand until K2, so
+  "nothing streaming" is normal. (The insurance pool's `totalAssets()` is its own balance, so a
+  solvency check there would be meaningless; the pending-draw alert from 6.29 stays.)
+
+**Proven three ways on the France host.**
+* Live: clean.
+* A side book with a changed address, and one missing from GitHub: both reported.
+* Faked chain answers (staked above what is held, a stream above the balance, caps nearly
+  full): all four alerts fired.
+
+---
+
 ## Keeping the public page in sync
 
 **This file is not the only roadmap.** `/roadmap` on use-cert.com publishes a reader-facing

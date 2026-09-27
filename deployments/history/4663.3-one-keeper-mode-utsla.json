@@ -1,0 +1,69 @@
+{
+  "_generatedBy": "script/DeployTestnet.s.sol",
+  "_warning": "GENERATED PER DEPLOYMENT. NEVER HAND-EDIT: each mirror is a new vault AND a new certificate token, and an edited map repoints a UI at a new token while balances sit in the old one. Re-run the script.",
+  "chainId": 4663,
+  "blockNumber": 26057777,
+  "timestamp": 1790379269,
+  "commit": "UNKNOWN - COMMIT env unset; record it by hand before publishing",
+  "senders": {
+    "deployer": "0x6381577a72266E6b89eE9E96dF604CC3cd3f8e92",
+    "governance": "0x0E315779a25c124B7C94a43E7C57636949ca5ff7",
+    "attester": "0x021EeE925f9a7F0e9de1dBB5211D62466404f681",
+    "_note": "governance deployed SolvencyRegistry and every CertOracle itself (checklist S4); those bindings are immutable"
+  },
+  "shared": {
+    "collateral": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "collateralDecimals": 6,
+    "testFaucet": "0x0000000000000000000000000000000000000000",
+    "_testFaucetNote": "Deployed by this script alongside the collateral token (Task 10). Holds an opening float the deployer minted; has no owner and no sweep, so its balance plus its Dripped event stream is a closed account - see TestFaucet's NatSpec",
+    "faucetDripAmount": 10000000000,
+    "faucetIntervalSeconds": 86400,
+    "faucetOpeningFloat": 1000000000000,
+    "lighterSim": "0x94bAB9693Ba2f6358507eFfcbd372b0660AFfF9d",
+    "solvencyRegistry": "0x93eac54AcF1E9245a6f76fBAaf91B2793eC74039",
+    "capacityOracle": "0xf0D0B90350928d3d5C7BE3287a07E03329936025",
+    "batchKeeper": "0x0000000000000000000000000000000000000000",
+    "_batchKeeperNote": "Task 12's BatchAdvancer keeper must sign with this exact address, registered via LighterSim.setKeeper - otherwise every settleBatch reverts LighterSim_OnlyOwnerOrKeeper, indistinguishable from a dead keeper",
+    "certFactory": "0xC5f68Af5d821698eB749101edb32c01834C32D14"
+  },
+  "parameters": {
+    "targetMarginBps": 9000,
+    "instantCap18": "1000000000000000000000",
+    "settleWindow": 86400,
+    "settleBandBps": 500,
+    "mintFeeBps": 10,
+    "redeemFeeBps": 10,
+    "stalenessSeconds": 900,
+    "_stalenessSecondsNote": "TESTNET REACHABILITY VALUE. Mainnet is 93600 (TESTNET-PLAN.md S1). Must not be carried over.",
+    "pokeConfirmationSeconds": 300,
+    "deviationBps": 500,
+    "basisBandBps": 500,
+    "singleSource": false,
+    "_singleSourceNote": "Declares feed and venue mark independent. On testnet that independence is ORGANISATIONAL (two keys), not economic - both keepers are operated by us. Not evidence about mainnet.",
+    "depthBps": 1000,
+    "minDepthBps": 100,
+    "maxDepthBps": 3000,
+    "maxAttestationAgeSec": 300,
+    "maxAbsoluteCap18": "1000000000000000000000000000",
+    "venueWithdrawCap": "18446744073709551615",
+    "simRequiredMarginBps": 5000,
+    "feedDecimals": 8
+  },
+  "vaults": [
+    {
+      "symbol": "uTSLA",
+      "name": "UseCert TSLA",
+      "marketIndex": 16,
+      "priceDecimals": 2,
+      "sizeDecimals": 4,
+      "vault": "0xD57cb3C6A282583D63F09fdde9E9135a949Bd4D9",
+      "certificate": "0xcD70B2839F1a0E10e7ec546352E7F1F7aC075f5D",
+      "bufferBook": "0x5Ef9458C68C22308e89DcAd2c94D65DA8De4F6C6",
+      "certOracle": "0xe836CDA78CDFCa21d27619ED7f9bD880cc575729",
+      "replayAggregator": "0x4A1166a659A55625345e9515b32adECea5547C38",
+      "seedPrice18": "372580000000000000000",
+      "absoluteCap18": "90000000000000000000000",
+      "seedOpenInterest18": "900000000000000000000000"
+    }
+  ]
+}

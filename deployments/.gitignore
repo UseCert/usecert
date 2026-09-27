@@ -11,3 +11,13 @@
 # map silently repoints a UI at a new token while real balances sit in the old one. Re-run the
 # script instead.
 *.json
+
+# EXCEPT mainnet (chain 4663). No test writes a 4663 book: the only suite that switches to chain
+# 4663 (CommitGuard) calls the commit guard and never runs the script. An IGNORED new mainnet
+# book, by contrast, is how live deployments went unrecorded: 4663.json was deleted and not
+# noticed (ROADMAP 6.22), and three history books sat untracked while the README described them.
+# A new mainnet book must show up in `git status`, not wait for someone to remember `-f`.
+!4663.json
+!4663.*.json
+!history/
+!history/4663.*.json
