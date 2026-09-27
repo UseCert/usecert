@@ -1,0 +1,2626 @@
+#!/usr/bin/env python3
+"""UseCert stack-5 cutover kit: the host-side commands that take the stack-5 vaults from
+"deployed" to "live" (docs/STACK5-DEPLOY-RUNBOOK.md, "Cutover kit").
+
+    usecert-s5-cutover <subcommand> [--dry-run] [--offline --workdir DIR] [options]
+
+Each subcommand names the host it runs on and refuses to run anywhere else. Each is idempotent:
+run again after success, it changes nothing; faced with state it does not expect, it refuses and
+says what it saw. None of them prints, logs or copies a private key.
+
+  MONTREAL  (user usecert; forge; the deployer key in /etc/usecert/mainnet-deployer.env)
+    bootstrap        usecert-mainnet-bootstrap for the vaults not yet bootstrapped, then read back
+                     bootstrapped() and lighterAccountIndex(); writes /opt/usecert-s5/accounts.json
+    phase-a          pubkeys.env + venue minimums -> SafeBatches phaseA() (build only) -> a signing
+                     page (EIP-712 SafeTx, one signature per owner and batch) in /opt/usecert-s5/phaseA
+    phase-b          SafeBatches phaseB() (build only; refuses before the two-day notice)
+    open             SafeBatches openMinting() for --vaults (uTSLA first) -> signing page
+    exec-safe        owner signatures -> checkSignatures -> anvil fork -> execTransaction -> read-back
+  FRANCE    (keeper host)
+    genkeys          (as keeper) one venue API key per vault; pubkeys.env holds public halves only
+    keeper-configs   (as root) /opt/keeper/vaults/s5-<sym>.json, book-stack5.json, systemd drop-ins
+                     (installed, not started); --start once phase B is on chain
+    signer-cutover   (as root) the signer on 8787 moves to the stack-5 book; --rollback undoes it
+    funding-relay    (as root) unit + timer + stack-5 drop-in, one --dry-run pass; --enable
+  WORKSTATION (the contracts checkout; the front-end branch is in the same repository)
+    site-build       the front-end contract bundle from the stack-5 book, on frontend/total-return,
+                     as an LF tar for usecert-deploy-web on France
+
+--dry-run   every read and every check, no transaction, no systemctl, no file outside --workdir.
+--offline   (implies --dry-run) no network and no host: the chain is simulated from the book and
+            kept in <workdir>/sim-chain.json, so a sequence of offline runs follows the real one.
+            Everything the simulator answers is labelled SIM. It proves the plumbing, not the chain.
+"""
+import argparse
+import datetime
+import getpass
+import hashlib
+import io
+import json
+import os
+import posixpath
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from decimal import Decimal
+
+# --------------------------------------------------------------------------------- constants
+
+CHAIN_ID = 4663
+RPC = "https://rpc.mainnet.chain.robinhood.com"
+VENUE_API = "https://api.rh.lighter.xyz"
+SAFE_TXS = "https://api.safe.global/tx-service/robinhood"
+SITE_ATTESTATIONS = "https://use-cert.com/api/attestations"
+SIGNER_LOCAL = "http://127.0.0.1:8787/attestations"
+UA = "usecert-s5-cutover/1.0"          # the Robinhood RPC answers 403 without a User-Agent
+
+GOVERNANCE_SAFE = "0x848c91323f720DEf985adbCC85FA40E3405B70DF"
+STACK5_SETTLER = "0x29f975357cc98A4F4e7E4460440380AB3136d500"
+MULTISEND_CALLONLY_141 = "0x9641d764fc13c8B624c04430C7356C1C7C8102e2"
+MULTISEND_141 = "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526"
+ZERO = "0x" + "00" * 20
+ECRECOVER = "0x" + "00" * 19 + "01"
+
+# The asset table of script/DeployMainnet.s.sol, in its order. A book that disagrees is refused.
+ASSETS = [("uTSLA", 16), ("uSPY", 26), ("uQQQ", 25), ("uNVDA", 15), ("uAAPL", 10), ("uMSFT", 14)]
+
+# Linux MAX_ARG_STRLEN is 128 KiB per argument; batch 1b did not fit. Every batch hex this kit
+# hands to cast, forge or a wallet stays at or under this many characters ("0x" included).
+MAX_BATCH_HEX = 120_000
+SAFE_VERSIONS = ("1.3.0", "1.4.1")    # checkSignatures(bytes32,bytes,bytes) is the 3-argument form
+
+DEFAULT_API_KEY_INDEX = 3             # as usecert-keeper-setup and the stack-5 script tests
+
+# Montreal
+M_ROOT_DEFAULT = "/opt/usecert"
+M_S5 = "/opt/usecert-s5"
+M_DEPLOYER_ENV = "/etc/usecert/mainnet-deployer.env"
+M_FOUNDRY = "/home/usecert/.foundry/bin"
+# France
+F_KEEPER = "/opt/keeper"
+F_KEYS = "/opt/keeper/keys"
+F_VAULTS = "/opt/keeper/vaults"
+F_STAGE = "/opt/keeper/s5"
+F_PY = "/opt/keeper/venv/bin/python"
+F_BOOK5 = "/opt/keeper/book-stack5.json"
+F_BOOK4 = "/opt/keeper/book-stack4.json"
+F_SETTLER_KEY = "/opt/keeper/keys/s5-settler.key"
+F_TEMPLATE = "/opt/keeper/vaults/s4-uTSLA.json"
+F_KEEPER_S5 = "/opt/keeper/usecert-keeper-s5.py"
+F_SIGNER_S5 = "/opt/keeper/usecert-signer-mainnet-s5.py"
+F_RELAY = "/opt/keeper/usecert-funding-relay"
+F_RELAY_STATE = "/opt/keeper/funding-relay-state-s5.json"
+F_ATTESTER_ENV = "/etc/usecert-keeper/attester.env"
+F_SETTLER_ENV = "/etc/usecert-keeper/settler.env"
+SYSTEMD = "/etc/systemd/system"
+SIGNER_UNIT = "usecert-signer-mainnet.service"
+SIGNER_DROPIN = SYSTEMD + "/usecert-signer-mainnet.service.d/50-stack5.conf"
+RELAY_DROPIN = SYSTEMD + "/usecert-funding-relay.service.d/50-stack5.conf"
+
+KIT = os.path.abspath(__file__)
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(KIT)))       # <repo>/deploy/bin/<this>
+SYSTEMD_SRC = os.path.join(ROOT, "deploy", "systemd")
+BIN_SRC = os.path.join(ROOT, "deploy", "bin")
+
+# Function selectors (keccak256 of the signature, first 4 bytes). deploy/tests/test_s5_cutover.py
+# recomputes every one from SIGNATURES; a wrong one fails the suite, not a Safe batch.
+SIGNATURES = {
+    "execTransaction": "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)",
+    "getTransactionHash": "getTransactionHash(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,uint256)",
+    "checkSignatures": "checkSignatures(bytes32,bytes,bytes)", "getOwners": "getOwners()",
+    "getThreshold": "getThreshold()", "nonce": "nonce()", "VERSION": "VERSION()", "multiSend": "multiSend(bytes)",
+    "bootstrapped": "bootstrapped()", "lighterAccountIndex": "lighterAccountIndex()", "governance": "governance()",
+    "feeSink": "feeSink()", "insurancePool": "insurancePool()", "keeperHedging": "keeperHedging()",
+    "registeredAt": "registeredAt(address)", "isVault": "isVault(address)", "changeReadyAt": "changeReadyAt(bytes32)",
+    "settler": "settler()", "venueMinBase": "venueMinBase()", "venueMinNotional18": "venueMinNotional18()",
+    "absoluteCap18": "absoluteCap18(address)", "registerVault": "registerVault(address,address)",
+    "setBufferThresholds": "setBufferThresholds(uint256,uint256,uint256,uint256)", "setFeeSink": "setFeeSink(address)",
+    "setInsurancePool": "setInsurancePool(address)", "enableKeeperHedging": "enableKeeperHedging()",
+    "proposeChange": "proposeChange(bytes)", "setSettler": "setSettler(address)",
+    "setVenueApiKey": "setVenueApiKey(uint8,bytes)", "setVenueMinimums": "setVenueMinimums(uint256,uint256)",
+    "setAbsoluteCap": "setAbsoluteCap(address,uint256)", "oracle": "oracle()", "GOVERNANCE_DELAY": "GOVERNANCE_DELAY()",
+    "retired": "retired()", "attester": "attester()",
+}
+SEL = {
+    "execTransaction": "6a761202", "getTransactionHash": "d8d11f78", "checkSignatures": "934f3a11",
+    "getOwners": "a0e67e2b", "getThreshold": "e75235b8", "nonce": "affed0e0", "VERSION": "ffa1ad74",
+    "multiSend": "8d80ff0a", "bootstrapped": "35142c8c", "lighterAccountIndex": "35d7532e",
+    "governance": "5aa6e675", "feeSink": "4b38474d", "insurancePool": "ab2adc00", "keeperHedging": "23a983f2",
+    "registeredAt": "aaea3d9c", "isVault": "652b9b41", "changeReadyAt": "eaf30aaa", "settler": "ab221a76",
+    "venueMinBase": "7d6b1e96", "venueMinNotional18": "1cc934ce", "absoluteCap18": "f2e84932",
+    "registerVault": "05c4fdf9", "setBufferThresholds": "15d400b6", "setFeeSink": "da62e064",
+    "setInsurancePool": "a94c487e", "enableKeeperHedging": "7de60cc0", "proposeChange": "cd06618c",
+    "setSettler": "07f19eba", "setVenueApiKey": "c891db3f", "setVenueMinimums": "f4d6a155",
+    "setAbsoluteCap": "c4d17c14", "oracle": "7dc0d1d0", "GOVERNANCE_DELAY": "b0b54895", "retired": "2eb38ae0",
+    "attester": "47b0c3b3",
+}
+NAME_OF_SEL = {v: k for k, v in SEL.items()}
+TOPIC_EXECUTION_SUCCESS = "0x442e715f626346e8c54381002da614f62bee8d27386535b2521ec8540898556e"
+DOMAIN_TYPEHASH = "47e79534a245952e8b16893a336b85a3d9ea9fa8c573f3d803afb92a79469218"
+SAFE_TX_TYPEHASH = "bb8310d486368db6bd6f849402fdd73ad53d316b5a4b2644ad6efe0f941286d8"
+DRY_RUN_MARKER = "# DRY RUN - NOT REAL KEYS"
+
+
+class Refuse(Exception):
+    """The kit will not go on: the state is not what this step assumes. Exit status 2."""
+
+
+def say(*a):
+    print(*a, flush=True)
+
+
+def ok(msg):
+    say("   ok    " + msg)
+
+
+def step(msg):
+    say("\n== " + msg)
+
+
+def utc(ts):
+    return datetime.datetime.fromtimestamp(int(ts), datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+# ------------------------------------------------------------------------- keccak (pure Python)
+#
+# The same Keccak-256 as deploy/tests/_ethstub.py (Ethereum's pre-NIST padding). Used to cross-check
+# the Safe's own getTransactionHash and to compute proposal ids; never trusted alone.
+
+_RC = [0x0000000000000001, 0x0000000000008082, 0x800000000000808A, 0x8000000080008000,
+       0x000000000000808B, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
+       0x000000000000008A, 0x0000000000000088, 0x0000000080008009, 0x000000008000000A,
+       0x000000008000808B, 0x800000000000008B, 0x8000000000008089, 0x8000000000008003,
+       0x8000000000008002, 0x8000000000000080, 0x000000000000800A, 0x800000008000000A,
+       0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008]
+_ROT = [[0, 36, 3, 41, 18], [1, 44, 10, 45, 2], [62, 6, 43, 15, 61], [28, 55, 25, 21, 56], [27, 20, 39, 8, 14]]
+_M64 = (1 << 64) - 1
+
+
+def _rol(v, n):
+    return ((v << n) | (v >> (64 - n))) & _M64 if n else v
+
+
+def _keccak_f(a):
+    for rc in _RC:
+        c = [a[x][0] ^ a[x][1] ^ a[x][2] ^ a[x][3] ^ a[x][4] for x in range(5)]
+        d = [c[(x - 1) % 5] ^ _rol(c[(x + 1) % 5], 1) for x in range(5)]
+        a = [[a[x][y] ^ d[x] for y in range(5)] for x in range(5)]
+        b = [[0] * 5 for _ in range(5)]
+        for x in range(5):
+            for y in range(5):
+                b[y][(2 * x + 3 * y) % 5] = _rol(a[x][y], _ROT[x][y])
+        a = [[b[x][y] ^ (~b[(x + 1) % 5][y] & b[(x + 2) % 5][y]) for y in range(5)] for x in range(5)]
+        a[0][0] ^= rc
+    return a
+
+
+def keccak256(data):
+    rate = 136
+    msg = bytearray(data) + b"\x01"
+    msg += b"\x00" * (-len(msg) % rate)
+    msg[-1] |= 0x80
+    a = [[0] * 5 for _ in range(5)]
+    for off in range(0, len(msg), rate):
+        block = msg[off:off + rate]
+        for i in range(rate // 8):
+            a[i % 5][i // 5] ^= int.from_bytes(block[8 * i:8 * i + 8], "little")
+        a = _keccak_f(a)
+    return b"".join(a[i % 5][i // 5].to_bytes(8, "little") for i in range(4))
+
+
+# ------------------------------------------------------------------------------------ ABI
+
+def hb(x):
+    """hex string (with or without 0x) -> bytes."""
+    x = x.strip()
+    x = x[2:] if x[:2] in ("0x", "0X") else x
+    if len(x) % 2 or not re.fullmatch(r"[0-9a-fA-F]*", x):
+        raise ValueError("not hex: %r" % x[:40])
+    return bytes.fromhex(x)
+
+
+def hx(b):
+    return "0x" + bytes(b).hex()
+
+
+def is_addr(a):
+    return isinstance(a, str) and re.fullmatch(r"0x[0-9a-fA-F]{40}", a) is not None
+
+
+def addr_eq(a, b):
+    return is_addr(a) and is_addr(b) and a.lower() == b.lower()
+
+
+def _pad32(b):
+    return b + b"\x00" * (-len(b) % 32)
+
+
+def _static(t, v):
+    if t == "address":
+        if not is_addr(v):
+            raise ValueError("not an address: %r" % (v,))
+        return bytes(12) + hb(v)
+    if t == "bytes32":
+        b = hb(v) if isinstance(v, str) else bytes(v)
+        if len(b) != 32:
+            raise ValueError("bytes32 of length %d" % len(b))
+        return b
+    if t == "bool":
+        return int(bool(v)).to_bytes(32, "big")
+    if t.startswith("uint"):
+        bits = int(t[4:] or 256)
+        v = int(v)
+        if not 0 <= v < 1 << bits:
+            raise ValueError("%s out of range: %d" % (t, v))
+        return v.to_bytes(32, "big")
+    raise ValueError("unsupported ABI type " + t)
+
+
+def abi_encode(types, values):
+    head, tail = [], b""
+    base = 32 * len(types)
+    for t, v in zip(types, values):
+        if t == "bytes":
+            b = hb(v) if isinstance(v, str) else bytes(v)
+            head.append((base + len(tail)).to_bytes(32, "big"))
+            tail += len(b).to_bytes(32, "big") + _pad32(b)
+        else:
+            head.append(_static(t, v))
+    return b"".join(head) + tail
+
+
+def calldata(name, types=(), values=()):
+    return hb(SEL[name]) + abi_encode(list(types), list(values))
+
+
+def word(data, i):
+    return int.from_bytes(data[32 * i:32 * i + 32], "big")
+
+
+def w_addr(data, i=0):
+    return "0x" + data[32 * i + 12:32 * i + 32].hex()
+
+
+def dec_bytes_at(data, i):
+    """A dynamic `bytes` whose head word is argument i."""
+    off = word(data, i)
+    n = int.from_bytes(data[off:off + 32], "big")
+    return data[off + 32:off + 32 + n]
+
+
+def dec_address_array(data):
+    off = word(data, 0)
+    n = int.from_bytes(data[off:off + 32], "big")
+    return ["0x" + data[off + 32 + 32 * k + 12:off + 64 + 32 * k].hex() for k in range(n)]
+
+
+def dec_string(data):
+    return dec_bytes_at(data, 0).decode()
+
+
+def checksum(a):
+    """EIP-55."""
+    a = a.lower()[2:]
+    h = keccak256(a.encode()).hex()
+    return "0x" + "".join(c.upper() if c.isalpha() and int(h[i], 16) >= 8 else c for i, c in enumerate(a))
+
+
+def fmt18(v):
+    return "{:,.2f}".format(Decimal(v) / Decimal(10) ** 18)
+
+
+# ------------------------------------------------------------------------------ MultiSend
+
+def multisend_entries(data_hex):
+    """multiSend(bytes) calldata -> [(operation, to, value, data bytes)]. Refuses anything else."""
+    d = hb(data_hex)
+    if d[:4].hex() != SEL["multiSend"]:
+        raise Refuse("batch data is not a multiSend(bytes) call (selector 0x%s)" % d[:4].hex())
+    body = d[4:]
+    if word(body, 0) != 32:
+        raise Refuse("multiSend data has an unexpected offset")
+    n = word(body, 1)
+    packed = body[64:64 + n]
+    if len(packed) != n or any(body[64 + n:]) or len(body) != 64 + len(_pad32(packed)):
+        raise Refuse("multiSend data is truncated or padded with non-zero bytes")
+    out, i = [], 0
+    while i < n:
+        if i + 85 > n:
+            raise Refuse("multiSend entry header truncated at byte %d" % i)
+        op = packed[i]
+        to = "0x" + packed[i + 1:i + 21].hex()
+        value = int.from_bytes(packed[i + 21:i + 53], "big")
+        ln = int.from_bytes(packed[i + 53:i + 85], "big")
+        cd = packed[i + 85:i + 85 + ln]
+        if len(cd) != ln:
+            raise Refuse("multiSend entry data truncated at byte %d" % i)
+        out.append((op, to, value, bytes(cd)))
+        i += 85 + ln
+    return out
+
+
+def multisend_encode(entries):
+    packed = b"".join(bytes([op]) + hb(to) + int(v).to_bytes(32, "big") + len(cd).to_bytes(32, "big") + cd
+                      for op, to, v, cd in entries)
+    return hx(hb(SEL["multiSend"]) + (32).to_bytes(32, "big") + len(packed).to_bytes(32, "big") + _pad32(packed))
+
+
+def split_multisend(data_hex, limit=MAX_BATCH_HEX):
+    """Split one multiSend batch into as few consecutive batches as keep each one's hex at or
+    under `limit` characters. Call order is kept; every call lands in exactly one part, once."""
+    entries = multisend_entries(data_hex)
+    if len(data_hex) <= limit:
+        return [data_hex]
+    parts, cur = [], []
+    for e in entries:
+        alone = len(multisend_encode([e]))
+        if alone > limit:
+            raise Refuse("one call alone is %d hex characters, above %d; it cannot be sent" % (alone, limit))
+        if cur and len(multisend_encode(cur + [e])) > limit:
+            parts.append(multisend_encode(cur))
+            cur = []
+        cur.append(e)
+    if cur:
+        parts.append(multisend_encode(cur))
+    return parts
+
+
+def describe_call(to, cd, labels):
+    """One line per call, for the signing page and the log."""
+    name = NAME_OF_SEL.get(cd[:4].hex(), "0x" + cd[:4].hex())
+    who = labels.get(to.lower(), to)
+    body = cd[4:]
+    lab = lambda a: labels.get(a.lower(), a)                          # noqa: E731
+    try:
+        if name in ("registerVault", "setFeeSink", "setInsurancePool", "setSettler"):
+            arg = lab(w_addr(body, 0))
+        elif name == "setAbsoluteCap":
+            arg = "%s, %s USD" % (lab(w_addr(body, 0)), fmt18(word(body, 1)))
+        elif name == "setVenueMinimums":
+            arg = "base %d, notional %s USD" % (word(body, 0), fmt18(word(body, 1)))
+        elif name == "setVenueApiKey":
+            arg = "index %d, key %s" % (word(body, 0), hx(dec_bytes_at(body, 1)))
+        elif name == "setBufferThresholds":
+            arg = ", ".join(fmt18(word(body, k)) for k in range(4))
+        elif name == "proposeChange":
+            inner = describe_call(to, dec_bytes_at(body, 0), labels).split(": ", 1)[1]
+            return "%s: proposeChange(%s)" % (who, inner)
+        else:
+            arg = ""
+    except Exception:                                              # noqa: BLE001
+        arg = "?"
+    return "%s: %s(%s)" % (who, name, arg)
+
+
+# ----------------------------------------------------------------------------- Safe EIP-712
+
+def safe_tx_hash(safe, to, data_hex, operation, nonce, chain_id=CHAIN_ID):
+    """EIP-712 SafeTx hash as Safe 1.3.0 / 1.4.1 computes it (value, gas fields, gas token and
+    refund receiver all zero). A cross-check only: the hash the kit trusts is getTransactionHash."""
+    dom = keccak256(abi_encode(["bytes32", "uint256", "address"], [hb(DOMAIN_TYPEHASH), chain_id, safe]))
+    st = keccak256(abi_encode(
+        ["bytes32", "address", "uint256", "bytes32", "uint8", "uint256", "uint256", "uint256", "address", "address",
+         "uint256"],
+        [hb(SAFE_TX_TYPEHASH), to, 0, keccak256(hb(data_hex)), operation, 0, 0, 0, ZERO, ZERO, nonce]))
+    return hx(keccak256(b"\x19\x01" + dom + st))
+
+
+SIG_LINE = re.compile(r"^\s*(?P<label>\S+)\s+nonce\s+(?P<nonce>\d+)\s+owner\s+(?P<owner>0x[0-9a-fA-F]{40})"
+                      r"\s+signature\s+(?P<sig>0x[0-9a-fA-F]{130})\s*$")
+
+
+def parse_signatures(text, label, nonce):
+    """The lines the signing page's copy box produces, for this batch and nonce only.
+    Returns (entries [(owner, sig)], number of lines for other batches)."""
+    out, others = [], 0
+    for line in text.splitlines():
+        m = SIG_LINE.match(line)
+        if not m:
+            continue
+        if m["label"] != label or int(m["nonce"]) != int(nonce):
+            others += 1
+            continue
+        out.append((m["owner"], m["sig"]))
+    return out, others
+
+
+def normalize_sig(sig_hex):
+    """65 bytes r|s|v with v 27 or 28 (a wallet returning 0/1 is lifted). Anything else - an
+    eth_sign (v > 30) or a contract signature - is refused: the page only makes typed-data ones."""
+    b = bytearray(hb(sig_hex))
+    if len(b) != 65:
+        raise Refuse("signature is %d bytes, not 65" % len(b))
+    if b[64] in (0, 1):
+        b[64] += 27
+    if b[64] not in (27, 28):
+        raise Refuse("signature v=%d is not an EIP-712 ECDSA signature" % b[64])
+    return bytes(b)
+
+
+def order_signatures(entries, owners, threshold):
+    """entries: [(claimed owner, signature hex, recovered address)]. Returns (signatures bytes,
+    owners in order). Safe.checkNSignatures requires strictly ascending signers, so they are
+    sorted by owner address as a number. A signature that does not recover to its claimed owner,
+    a non-owner, two different signatures from one owner, or fewer than `threshold` owners is
+    refused."""
+    owners_l = {o.lower() for o in owners}
+    seen = {}
+    for claimed, sig, rec in entries:
+        if not addr_eq(claimed, rec):
+            raise Refuse("a signature claimed for %s recovers to %s" % (claimed, rec))
+        if claimed.lower() not in owners_l:
+            raise Refuse("%s signed, but is not an owner of the Safe" % claimed)
+        s = normalize_sig(sig)
+        if claimed.lower() in seen and seen[claimed.lower()] != s:
+            raise Refuse("two different signatures from %s" % claimed)
+        seen[claimed.lower()] = s
+    if len(seen) < threshold:
+        raise Refuse("%d distinct owner signature(s); the Safe needs %d" % (len(seen), threshold))
+    order = sorted(seen, key=lambda a: int(a, 16))
+    return b"".join(seen[a] for a in order), order
+
+
+def exec_calldata(to, data_hex, operation, sigs):
+    return hx(calldata("execTransaction",
+                       ["address", "uint256", "bytes", "uint8", "uint256", "uint256", "uint256", "address", "address",
+                        "bytes"],
+                       [to, 0, hb(data_hex), operation, 0, 0, 0, ZERO, ZERO, sigs]))
+
+
+# ------------------------------------------------------------------------------ the venue
+
+def venue_minimums(detail, market_id, size_decimals):
+    """(MINBASE, MINQUOTE) as usecert-keeper-setup computes them - round(min_base_amount x
+    10^size_decimals) and min_quote_amount x 1e18 - in exact decimal arithmetic. Refuses a row for
+    another market, in other units, not active, or finer than the units it converts to."""
+    if int(detail.get("market_id", -1)) != int(market_id):
+        raise Refuse("venue answered market %s for market %s" % (detail.get("market_id"), market_id))
+    sd = int(detail.get("size_decimals", detail.get("supported_size_decimals", -1)))
+    if sd != int(size_decimals):
+        raise Refuse("market %s: venue size_decimals %d, book sizeDecimals %d" % (market_id, sd, size_decimals))
+    if str(detail.get("status", "active")) != "active":
+        raise Refuse("market %s is %s on the venue" % (market_id, detail.get("status")))
+    base = Decimal(str(detail["min_base_amount"])) * (Decimal(10) ** sd)
+    quote = Decimal(str(detail["min_quote_amount"])) * (Decimal(10) ** 18)
+    if base != base.to_integral_value() or quote != quote.to_integral_value():
+        raise Refuse("market %s: minimums %s / %s are finer than the units they convert to"
+                     % (market_id, detail["min_base_amount"], detail["min_quote_amount"]))
+    base, quote = int(base), int(quote)
+    if base <= 0 or quote <= 0:
+        raise Refuse("market %s: zero venue minimum" % market_id)
+    if quote > 1000 * 10 ** 18:
+        raise Refuse("market %s: min notional above CertVault's $1,000 bound" % market_id)
+    return base, quote
+
+
+def parse_pubkeys(text):
+    """pubkeys.env -> (api_key_index, {sym: 0x...80 hex}, dry_run_marker)."""
+    idx, keys, dry = None, {}, False
+    for line in text.splitlines():
+        line = line.strip()
+        if line == DRY_RUN_MARKER:
+            dry = True
+        if not line or line.startswith("#"):
+            continue
+        k, _, v = line.partition("=")
+        if k == "API_KEY_INDEX":
+            idx = int(v)
+        elif k.startswith("PUBKEY_"):
+            if not re.fullmatch(r"0x[0-9a-fA-F]{80}", v):
+                raise Refuse("%s is not a 40-byte hex key" % k)
+            keys[k[len("PUBKEY_"):]] = v.lower()
+        else:
+            raise Refuse("unexpected line in pubkeys.env: %r" % k)
+    if idx is None or not 2 <= idx <= 254:
+        raise Refuse("pubkeys.env has no valid API_KEY_INDEX")
+    return idx, keys, dry
+
+
+def pubkeys_env(idx, keys, dry=False):
+    out = [DRY_RUN_MARKER] if dry else []
+    out.append("# public halves of the stack-5 venue API keys; the private halves stay in %s on France" % F_KEYS)
+    out.append("API_KEY_INDEX=%d" % idx)
+    out += ["PUBKEY_%s=%s" % (s, keys[s]) for s in keys]
+    return "\n".join(out) + "\n"
+
+
+# ------------------------------------------------------------------------------- the book
+
+def load_book(path, safe=GOVERNANCE_SAFE, settler=STACK5_SETTLER, sim=False):
+    """The stack-5 book as DeployMainnet._writeAddressBook writes it, checked against the asset
+    table and the live governance facts. `sim`: accept the book's own Safe and settler (offline
+    runs against a test book)."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+        book = json.loads(raw)
+    except (OSError, ValueError) as e:
+        raise Refuse("cannot read the stack-5 book %s: %s" % (path, e))
+    if book.get("stack") != 5:
+        raise Refuse("%s is not a stack-5 book (\"stack\": %r)" % (path, book.get("stack")))
+    if book.get("chainId") != CHAIN_ID:
+        raise Refuse("%s is for chain %r, not %d" % (path, book.get("chainId"), CHAIN_ID))
+    gov = book.get("senders", {}).get("governance")
+    if not sim and not addr_eq(gov, safe):
+        raise Refuse("the book's governance is %s, not the Safe %s" % (gov, safe))
+    sh = book.get("shared", {})
+    for k in ("certFactory", "capacityOracle", "feeVault", "insuranceStaking", "settler", "solvencyRegistry"):
+        if not is_addr(sh.get(k)) or int(sh[k], 16) == 0:
+            raise Refuse("the book has no shared.%s" % k)
+    if not sim and not addr_eq(sh["settler"], settler):
+        raise Refuse("the book's settler is %s, the stack-5 settler key is %s" % (sh["settler"], settler))
+    vaults = book.get("vaults") or []
+    table = [a for a in ASSETS if a[0] in {v.get("symbol") for v in vaults}]
+    if not vaults or [v.get("symbol") for v in vaults] != [a[0] for a in table]:
+        raise Refuse("the book's vaults %s are not the asset table's, in its order" % [v.get("symbol") for v in vaults])
+    for v, (sym, mkt) in zip(vaults, table):
+        if int(v.get("marketIndex", -1)) != mkt:
+            raise Refuse("%s: book market %s, asset table %d" % (sym, v.get("marketIndex"), mkt))
+        for k in ("vault", "certificate", "certOracle", "bufferBook"):
+            if not is_addr(v.get(k)) or int(v[k], 16) == 0:
+                raise Refuse("%s has no %s in the book" % (sym, k))
+    if not isinstance(book.get("blockNumber"), int) or book["blockNumber"] <= 0:
+        raise Refuse("the book records no blockNumber")
+    book["_path"] = path
+    book["_sha256"] = hashlib.sha256(raw).hexdigest()
+    book["_safe"] = gov if sim else safe
+    return book
+
+
+def labels_of(book):
+    lab = {book["_safe"].lower(): "Safe"}
+    for k, v in book["shared"].items():
+        if is_addr(v):
+            lab.setdefault(v.lower(), k)
+    for v in book["vaults"]:
+        lab[v["vault"].lower()] = v["symbol"] + " vault"
+        lab[v["certificate"].lower()] = v["symbol"] + " certificate"
+    return lab
+
+
+# ---------------------------------------------------------------------- keeper configuration
+
+def keeper_config(book, v, template, start_block, funding_start_ts):
+    """/opt/keeper/vaults/s5-<sym>.json. Transport settings (rpc, api, cast, fill timeout, auto
+    recall) come from the running stack-4 config on the same host; everything about the vault
+    comes from the stack-5 book."""
+    for k in ("rpc", "api", "cast"):
+        if not template.get(k):
+            raise Refuse("the stack-4 template config has no %r" % k)
+    if template["api"].rstrip("/") != VENUE_API:
+        raise Refuse("the template's venue API is %s, not %s (the USDC exchange is another venue)"
+                     % (template["api"], VENUE_API))
+    sym = v["symbol"]
+    return {
+        "_generatedBy": "deploy/bin/usecert-s5-cutover keeper-configs, from %s (sha256 %s)"
+                        % (os.path.basename(book["_path"]), book["_sha256"][:12]),
+        "symbol": sym,
+        "stack": 5,
+        "vault": v["vault"],
+        "oracle": v["certOracle"],
+        "market_index": int(v["marketIndex"]),
+        "price_decimals": int(v["priceDecimals"]),
+        "size_decimals": int(v["sizeDecimals"]),
+        "rpc": template["rpc"],
+        "api": template["api"],
+        "cast": template["cast"],
+        "fill_timeout_sec": int(template.get("fill_timeout_sec", 180)),
+        "auto_recall": bool(template.get("auto_recall", False)),
+        "start_block": int(start_block),
+        "funding_start_ts": int(funding_start_ts),
+        "state_file": "%s/state-s5-%s.json" % (F_KEEPER, sym),
+        "api_key_file": "%s/s5-%s-key.json" % (F_KEYS, sym),
+        "settler_key_file": F_SETTLER_KEY,
+        "auto_rehedge": False,
+    }
+
+
+def find_deploy_block(has_code, lo, hi):
+    """Smallest block in (lo, hi] at which has_code(block) is true, given has_code(lo) false and
+    has_code(hi) true. Binary search: about 27 reads for 1e8 blocks."""
+    if has_code(lo):
+        raise Refuse("the vault already has code at the book's block %d: not the book it was deployed with" % lo)
+    if not has_code(hi):
+        raise Refuse("the vault has no code at block %d" % hi)
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if has_code(mid):
+            hi = mid
+        else:
+            lo = mid
+    return hi
+
+
+# ------------------------------------------------------------------------- the signer check
+
+def check_attestations(resp, want_oracles, mark_version):
+    """Problems with a signer bundle (the /attestations body, or the signer's --once output),
+    for a signer that must sign exactly `want_oracles` with marks of `mark_version` (2: stack 5;
+    1: the stack-4 format, which carries no markSigVersion). Empty list = good."""
+    probs = []
+    if resp.get("stale"):
+        probs.append("bundle is stale")
+    if resp.get("error"):
+        probs.append("signer error: %s" % str(resp["error"])[:160])
+    if resp.get("refused"):
+        probs.append("refused: %s" % "; ".join("%s %s" % (r.get("symbol"), r.get("reason"))
+                                             for r in resp["refused"])[:300])
+    atts = resp.get("attestations") or []
+    got = {str(a.get("certOracle", "")).lower(): a for a in atts}
+    want = {o.lower() for o in want_oracles}
+    for o in sorted(want - set(got)):
+        probs.append("no mark for oracle %s" % o)
+    for o in sorted(set(got) - want):
+        probs.append("a mark for an oracle not in the book: %s" % o)
+    for o in sorted(want & set(got)):
+        a = got[o]
+        name = a.get("symbol", o)
+        ver = int(a.get("markSigVersion", 1))
+        if ver != mark_version:
+            probs.append("%s: markSigVersion %s, want %d" % (name, a.get("markSigVersion", "absent (v1)"), mark_version))
+        if mark_version == 2 and (not a.get("markObservedAt")
+                                  or int(a.get("markDeadline", 0)) - int(a["markObservedAt"]) > 60):
+            probs.append("%s: v2 mark without observedAt, or with a deadline past 60 s" % name)
+        if not str(a.get("markSig", "")).startswith("0x") or not str(a.get("attestSig", "")).startswith("0x"):
+            probs.append("%s: unsigned" % name)
+    return probs
+
+
+# ------------------------------------------------------------------------- the signing page
+
+PAGE_CSS = """:root{--ink:#0b0c0b;--deep:#111311;--line:#232823;--white:#f2f4f2;--silver:#c5ccc5;--dim:#8d978d;--green:#b9e3a8;--warn:#e7c77a;--red:#e79a8a}
+*{box-sizing:border-box}body{margin:0;background:var(--ink);color:var(--silver);font:16px/1.6 system-ui,sans-serif;padding-inline:16px}
+main{max-width:860px;margin:0 auto;padding-block:40px 80px}
+h1{color:var(--white);font-size:32px;line-height:1.1;margin:.2em 0 .6em}
+.k{font:12px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+code,.mono{font:13px ui-monospace,Consolas,monospace;color:var(--white);word-break:break-all}
+table{border-collapse:collapse;width:100%;margin:12px 0 24px;font-size:14px}td{border:1px solid var(--line);padding:8px 10px;vertical-align:top}td:first-child{color:var(--dim);width:30%}
+button{font:600 15px system-ui;padding:12px 18px;border:1px solid var(--green);background:var(--green);color:#0b0c0b;cursor:pointer;margin:6px 8px 6px 0}
+button.sec{background:transparent;color:var(--green)}button:disabled{opacity:.4;cursor:default}
+#status{margin:16px 0;padding:12px 14px;border:1px solid var(--line);background:var(--deep);min-height:24px}
+.ok{color:var(--green)}.err{color:var(--red)}
+textarea{width:100%;height:130px;background:var(--deep);color:var(--white);border:1px solid var(--line);font:13px ui-monospace,monospace;padding:10px}
+details{margin:6px 0 0}summary{cursor:pointer;color:var(--dim)}ol li{margin:6px 0}"""
+
+PAGE_JS = r"""
+const P = JSON.parse(document.getElementById("batches").textContent);
+const ZERO = "0x0000000000000000000000000000000000000000";
+const OWNERS = P.owners.map(o => o.toLowerCase());
+let account = null, provider = null;
+const data = {};
+const found = new Map();
+const st = (t, c) => { const e = document.getElementById("status"); e.textContent = t; e.className = c || ""; };
+const btns = document.getElementById("buttons");
+P.parts.forEach((p, i) => {
+  const b = document.createElement("button"); b.id = "sign" + i; b.disabled = true;
+  b.textContent = "Sign " + p.label + " (nonce " + p.nonce + ")"; b.onclick = () => sign(i); btns.appendChild(b);
+  fetch(p.file, { cache: "no-store" }).then(r => r.text()).then(t => {
+    t = t.trim();
+    if (t.length !== p.hexChars || !/^0x[0-9a-fA-F]*$/.test(t)) { st("Batch file " + p.file + " is not the one this page was built with. Do not sign; ask for a new page.", "err"); return; }
+    data[i] = t; document.getElementById("len" + i).textContent = ((t.length - 2) / 2).toLocaleString() + " bytes";
+  }).catch(() => st("Could not load " + p.file + ". Reload the page.", "err"));
+});
+const cp = document.createElement("button"); cp.id = "copy"; cp.className = "sec"; cp.disabled = true; cp.textContent = "Copy"; btns.appendChild(cp);
+// EIP-6963: every installed wallet announces itself, so the choice is yours.
+function renderWallets() {
+  const box = document.getElementById("wallets"); box.innerHTML = "";
+  if (!found.size) { box.innerHTML = '<span class="k">No wallet announced itself. Is MetaMask enabled in this browser?</span>'; return; }
+  for (const [rdns, w] of found) {
+    const b = document.createElement("button"); b.textContent = "Connect " + w.info.name;
+    if (!/metamask/i.test(w.info.name)) b.className = "sec";
+    b.onclick = () => connect(w.provider, w.info.name); box.appendChild(b);
+  }
+}
+window.addEventListener("eip6963:announceProvider", (e) => { found.set(e.detail.info.rdns || e.detail.info.name, e.detail); renderWallets(); });
+window.dispatchEvent(new Event("eip6963:requestProvider"));
+setTimeout(() => { if (!found.size && window.ethereum) { found.set("injected", { info: { name: "browser wallet" }, provider: window.ethereum }); } renderWallets(); }, 800);
+async function onChainOwners() {
+  // getOwners() through the wallet's own RPC: the list this page was built with must still be the Safe's.
+  const r = await provider.request({ method: "eth_call", params: [{ to: P.safe, data: "0xa0e67e2b" }, "latest"] });
+  const h = r.slice(2), off = 2 * parseInt(h.slice(0, 64), 16), n = parseInt(h.slice(off, off + 64), 16), out = [];
+  for (let k = 0; k < n; k++) out.push("0x" + h.slice(off + 64 + 64 * k + 24, off + 64 + 64 * (k + 1)));
+  return out.map(o => o.toLowerCase());
+}
+async function connect(p, name) {
+  provider = p; account = null;
+  P.parts.forEach((q, i) => { document.getElementById("sign" + i).disabled = true; });
+  try {
+    const accs = await provider.request({ method: "eth_requestAccounts" });
+    account = accs[0];
+    try { await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: P.chainIdHex }] }); }
+    catch (e) {
+      if (e && e.code === 4902) {
+        try { await provider.request({ method: "wallet_addEthereumChain", params: [{ chainId: P.chainIdHex, chainName: "Robinhood Chain", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: [P.rpc] }] }); } catch (e2) {}
+      }
+    }
+    const cid = parseInt(await provider.request({ method: "eth_chainId" }), 16);
+    if (cid !== P.chainId) { st("The wallet is on chain " + cid + ", not " + P.chainId + ". Switch to Robinhood Chain and connect again.", "err"); return; }
+    let live = null;
+    try { live = await onChainOwners(); } catch (e) { live = null; }
+    if (live && (live.length !== OWNERS.length || live.some(o => !OWNERS.includes(o)))) { st("The Safe's owners on chain are not the ones this page was built for. Do not sign.", "err"); return; }
+    const isOwner = OWNERS.includes(account.toLowerCase());
+    st(isOwner ? "Connected to " + name + ": " + account + " (an owner of the Safe" + (live ? ", checked on chain" : "") + ")." : "Connected to " + name + ": " + account + ". This is NOT an owner of the Safe. Switch account and connect again.", isOwner ? "ok" : "err");
+    P.parts.forEach((p, i) => { document.getElementById("sign" + i).disabled = !isOwner || !data[i]; });
+  } catch (e) { st("Connection refused: " + (e.message || e), "err"); }
+}
+async function sign(i) {
+  const p = P.parts[i];
+  const typed = {
+    types: {
+      EIP712Domain: [{ name: "chainId", type: "uint256" }, { name: "verifyingContract", type: "address" }],
+      SafeTx: [
+        { name: "to", type: "address" }, { name: "value", type: "uint256" }, { name: "data", type: "bytes" },
+        { name: "operation", type: "uint8" }, { name: "safeTxGas", type: "uint256" }, { name: "baseGas", type: "uint256" },
+        { name: "gasPrice", type: "uint256" }, { name: "gasToken", type: "address" }, { name: "refundReceiver", type: "address" },
+        { name: "nonce", type: "uint256" }
+      ]
+    },
+    primaryType: "SafeTx",
+    domain: { chainId: P.chainId, verifyingContract: P.safe },
+    message: { to: p.to, value: "0", data: data[i], operation: p.operation, safeTxGas: "0", baseGas: "0", gasPrice: "0", gasToken: ZERO, refundReceiver: ZERO, nonce: String(p.nonce) }
+  };
+  try {
+    st("Waiting for your wallet…");
+    const sig = await provider.request({ method: "eth_signTypedData_v4", params: [account, JSON.stringify(typed)] });
+    const o = document.getElementById("out"); o.value += p.label + " nonce " + p.nonce + " owner " + account + " signature " + sig + "\n";
+    document.getElementById("copy").disabled = false;
+    const next = P.parts[i + 1];
+    st("Signed " + p.label + ". " + (next ? "Now sign " + next.label + "." : "Copy the box and send it, then repeat with a second owner."), "ok");
+  } catch (e) { st("Not signed: " + (e.message || e), "err"); }
+}
+document.getElementById("copy").onclick = async () => {
+  const t = document.getElementById("out");
+  try { await navigator.clipboard.writeText(t.value); st("Copied.", "ok"); } catch (e) { t.select(); st("Select the text above and copy it.", ""); }
+};
+"""
+
+
+def _esc(s):
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def build_page(title, intro, safe, owners, threshold, parts, rpc=RPC, chain_id=CHAIN_ID):
+    """A static signing page: index.html next to one .hex per part. `parts`: dicts with label,
+    nonce, to, operation, file, hexChars, calls (one line each), safeTxHash (from the chain)."""
+    rows = []
+    for i, p in enumerate(parts):
+        calls = "".join("<li>%s</li>" % _esc(c) for c in p["calls"])
+        rows.append(
+            '<tr><td>%s · nonce %d</td><td>%d call(s) through <span class="mono">%s</span>, operation %d (delegatecall) · '
+            '<span class="mono" id="len%d">…</span><br>Safe tx hash <span class="mono">%s</span>'
+            '<details><summary>the calls</summary><ol>%s</ol></details></td></tr>'
+            % (_esc(p["label"]), p["nonce"], len(p["calls"]), _esc(p["to"]), p["operation"], i, _esc(p["safeTxHash"]),
+               calls))
+    payload = json.dumps({"safe": safe, "owners": owners, "chainId": chain_id, "chainIdHex": hex(chain_id), "rpc": rpc,
+                          "parts": [{k: p[k] for k in ("label", "nonce", "to", "operation", "file", "hexChars")}
+                                    for p in parts]})
+    order = ", then ".join("%s (nonce %d)" % (p["label"], p["nonce"]) for p in parts)
+    return """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive"><meta name="referrer" content="no-referrer">
+<title>%(title)s | UseCert</title>
+<style>
+%(css)s
+</style></head><body><main>
+<p class="k">UseCert · Safe %(safe_short)s · Robinhood Chain</p>
+<h1>%(title)s</h1>
+<p>%(intro)s</p>
+<p>Each button asks your wallet for one Safe signature (EIP-712 <code>SafeTx</code>). Signing sends nothing and costs nothing.%(nparts)s</p>
+<table>
+<tr><td>Safe</td><td class="mono">%(safe)s (%(threshold)d of %(nowners)d)</td></tr>
+%(rows)s
+</table>
+<ol>
+<li>Connect your wallet and pick an owner account. The page checks the account against the Safe's owners.</li>
+<li>Sign %(order)s. The wallet shows the nonce: it must match.</li>
+<li>Copy everything in the box and send it. Switch to a second owner account and repeat.</li>
+</ol>
+<div id="wallets"><span class="k">Looking for wallets…</span></div>
+<div id="buttons"></div>
+<div id="status">Not connected.</div>
+<p class="k">Signatures (send these)</p>
+<textarea id="out" readonly></textarea>
+</main>
+<script type="application/json" id="batches">%(payload)s</script>
+<script>%(js)s</script>
+</body></html>
+""" % {"title": _esc(title), "css": PAGE_CSS, "safe": _esc(safe), "safe_short": _esc(safe[:6] + "…" + safe[-4:]),
+       "intro": _esc(intro), "threshold": threshold, "nowners": len(owners), "rows": "\n".join(rows),
+       "order": _esc(order),
+       "nparts": (" The batch is in %d parts; the Safe's nonces force them to run in order." % len(parts)
+                  if len(parts) > 1 else ""),
+       "payload": payload.replace("</", "<\\/"), "js": PAGE_JS}
+
+
+def page_parts(kind, parts_hex, to, operation, nonce0, labels):
+    """(label, file, hex, nonce, calls) per part, labels like phaseA-1of2."""
+    n = len(parts_hex)
+    out = []
+    for k, h in enumerate(parts_hex):
+        label = "%s-%dof%d" % (kind, k + 1, n)
+        out.append({"label": label, "file": label + ".hex", "hex": h, "hexChars": len(h), "nonce": nonce0 + k,
+                    "to": to, "operation": operation,
+                    "calls": [describe_call(t, cd, labels) for _, t, _, cd in multisend_entries(h)]})
+    return out
+
+
+def txbuilder_json(safe, name, description, entries, created_ms, chain_id=CHAIN_ID):
+    """Safe Transaction Builder import file, the format SafeBatches._writeTxBuilder writes."""
+    return json.dumps({
+        "version": "1.0", "chainId": str(chain_id), "createdAt": created_ms,
+        "meta": {"name": name, "description": description, "txBuilderVersion": "1.16.5",
+                 "createdFromSafeAddress": safe, "createdFromOwnerAddress": ""},
+        "transactions": [{"to": checksum(t), "value": str(v), "data": hx(cd), "contractMethod": None,
+                          "contractInputsValues": None} for _, t, v, cd in entries]}, indent=2) + "\n"
+
+
+# ------------------------------------------------------------------ what each batch must be
+
+def expected_phase_a(book, api_idx, pubkeys, minimums):
+    """The calls phase A must contain per vault, in SafeBatches order, as (to, selector, check)
+    where check(calldata bytes) -> None or a problem. setBufferThresholds is the asset table's and
+    is only checked for its target."""
+    sh = book["shared"]
+    exp = []
+    for v in book["vaults"]:
+        sym, vault = v["symbol"], v["vault"]
+        mb, mq = minimums[sym]
+        exp += [
+            (sh["certFactory"], calldata("registerVault", ["address", "address"], [vault, v["certificate"]])),
+            (vault, None),                                                         # setBufferThresholds
+            (vault, calldata("setFeeSink", ["address"], [sh["feeVault"]])),
+            (vault, calldata("setInsurancePool", ["address"], [sh["insuranceStaking"]])),
+            (vault, calldata("enableKeeperHedging")),
+            (vault, calldata("proposeChange", ["bytes"], [calldata("setSettler", ["address"], [sh["settler"]])])),
+            (vault, calldata("proposeChange", ["bytes"],
+                             [calldata("setVenueApiKey", ["uint8", "bytes"], [api_idx, hb(pubkeys[sym])])])),
+            (vault, calldata("proposeChange", ["bytes"],
+                             [calldata("setVenueMinimums", ["uint256", "uint256"], [mb, mq])])),
+        ]
+    return exp
+
+
+def verify_batch(entries, expected, what):
+    """Every call is a plain CALL with no value, to the expected target, with the expected bytes."""
+    if len(entries) != len(expected):
+        raise Refuse("%s has %d calls, expected %d" % (what, len(entries), len(expected)))
+    for k, ((op, to, value, cd), (want_to, want_cd)) in enumerate(zip(entries, expected)):
+        if op != 0 or value != 0:
+            raise Refuse("%s call %d is operation %d value %d; only plain calls without value are expected" % (what, k, op, value))
+        if not addr_eq(to, want_to):
+            raise Refuse("%s call %d goes to %s, expected %s" % (what, k, to, want_to))
+        if want_cd is None:
+            if cd[:4].hex() != SEL["setBufferThresholds"]:
+                raise Refuse("%s call %d is not setBufferThresholds" % (what, k))
+        elif cd != want_cd:
+            raise Refuse("%s call %d (%s) is not the call expected" % (what, k, NAME_OF_SEL.get(cd[:4].hex(), cd[:4].hex())))
+
+
+def verify_proposals(prop, book, safe, entries):
+    """The proposals file matches the phase-A batch: one per proposeChange, same bytes, and each
+    id is keccak256 of its calldata."""
+    if int(prop.get("chainId", 0)) != CHAIN_ID or not addr_eq(prop.get("safe"), safe):
+        raise Refuse("the proposals file is for another chain or Safe")
+    inner = [(to, dec_bytes_at(cd[4:], 0)) for _, to, _, cd in entries if cd[:4].hex() == SEL["proposeChange"]]
+    ps = prop.get("proposals") or []
+    if len(ps) != len(inner) or int(prop.get("count", -1)) != len(ps):
+        raise Refuse("the proposals file lists %d proposals, the batch proposes %d" % (len(ps), len(inner)))
+    for p, (to, d) in zip(ps, inner):
+        if not addr_eq(p["vault"], to) or hb(p["data"]) != d:
+            raise Refuse("proposal %s/%s in the file is not the one in the batch" % (p.get("symbol"), p.get("setter")))
+        if hb(p["id"]) != keccak256(d):
+            raise Refuse("proposal %s/%s: id is not keccak256(data)" % (p.get("symbol"), p.get("setter")))
+
+
+def expected_phase_b(prop):
+    return [(p["vault"], hb(p["data"])) for p in prop["proposals"]]
+
+
+# ------------------------------------------------------------------------------- the chain
+
+class CallReverted(Exception):
+    pass
+
+
+class Rpc:
+    """JSON-RPC over urllib (no argument-length limit, unlike cast), with backoff on 429/5xx."""
+    sim = False
+
+    def __init__(self, url):
+        self.url = url
+
+    def req(self, method, params):
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+        delay = 1
+        for attempt in range(6):
+            try:
+                r = urllib.request.Request(self.url, body, {"Content-Type": "application/json", "User-Agent": UA})
+                with urllib.request.urlopen(r, timeout=30) as f:
+                    out = json.load(f)
+                if "error" in out:
+                    e = out["error"]
+                    if method == "eth_call":
+                        raise CallReverted("%s %s" % (e.get("message", e), e.get("data", "")))
+                    raise RuntimeError("%s: %s" % (method, e))
+                return out["result"]
+            except urllib.error.HTTPError as e:
+                if (e.code != 429 and e.code < 500) or attempt == 5:
+                    raise
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                if attempt == 5:
+                    raise
+            time.sleep(delay)
+            delay = min(delay * 2, 8)
+
+    def call(self, to, data, block="latest"):
+        return hb(self.req("eth_call", [{"to": to, "data": hx(data)}, block]))
+
+    def has_code(self, addr, block):
+        return len(hb(self.req("eth_getCode", [addr, hex(block) if isinstance(block, int) else block]))) > 0
+
+    def block(self, tag="latest"):
+        b = self.req("eth_getBlockByNumber", [hex(tag) if isinstance(tag, int) else tag, False])
+        return int(b["number"], 16), int(b["timestamp"], 16)
+
+    def chain_id(self):
+        return int(self.req("eth_chainId", []), 16)
+
+    def block_has_tx_from(self, n, sender):
+        b = self.req("eth_getBlockByNumber", [hex(n), True])
+        return any(addr_eq(t.get("from", ""), sender) for t in b.get("transactions", []))
+
+    def recover(self, digest_hex, sig_hex, claimed):
+        """The ecrecover precompile, through eth_call: the node recovers, not this kit."""
+        s = normalize_sig(sig_hex)
+        out = self.call(ECRECOVER, hb(digest_hex) + bytes(31) + s[64:65] + s[:64])
+        return w_addr(out) if len(out) == 32 else ZERO
+
+
+def v_uint(chain, to, name, types=(), args=()):
+    return word(chain.call(to, calldata(name, types, args)), 0)
+
+
+def v_addr(chain, to, name, types=(), args=()):
+    return w_addr(chain.call(to, calldata(name, types, args)))
+
+
+def v_bool(chain, to, name, types=(), args=()):
+    return v_uint(chain, to, name, types, args) != 0
+
+
+class SimChain:
+    """--offline: the stack-5 contracts as far as this kit touches them, simulated from the book and
+    persisted in <workdir>/sim-chain.json. Executing a batch applies its calls as the contracts
+    would (governance only, delayed setters only once ready), so the read-back is exercised."""
+    sim = True
+
+    def __init__(self, path, book=None, stage="deployed"):
+        self.path = path
+        if os.path.exists(path):
+            with open(path) as f:
+                self.s = json.load(f)
+            return
+        if book is None:
+            raise Refuse("offline: no simulated chain in %s yet and no book to make one from" % path)
+        owners = ["0x" + ("%02x" % (k + 1)) * 20 for k in range(3)]
+        s = {"now": int(book.get("timestamp", 1_800_000_000)) + 3600, "block": int(book["blockNumber"]) + 5000,
+             "bookBlock": int(book["blockNumber"]), "bookTs": int(book.get("timestamp", 1_800_000_000)),
+             "safe": {"address": book["_safe"].lower(), "nonce": 5, "owners": owners, "threshold": 2,
+                      "version": "1.4.1"},
+             "factory": book["shared"]["certFactory"].lower(), "capacity": book["shared"]["capacityOracle"].lower(),
+             "registry": book["shared"]["solvencyRegistry"].lower(),
+             "attester": book.get("senders", {}).get("attester", ZERO).lower(),
+             "delay": int(book.get("parameters", {}).get("governanceDelay", 172800)),
+             "registered": {}, "caps": {}, "vaults": {}, "oracles": [v["certOracle"].lower() for v in book["vaults"]]}
+        for i, v in enumerate(book["vaults"]):
+            s["vaults"][v["vault"].lower()] = {
+                "symbol": v["symbol"], "deployBlock": int(book["blockNumber"]) + 3 + 7 * i,
+                "bootstrapped": stage != "deployed", "account": (700_000 + 11 * i) if stage != "deployed" else 0,
+                "feeSink": ZERO, "insurancePool": ZERO, "keeperHedging": False, "settler": ZERO,
+                "minBase": 0, "minQuote": 0, "ready": {}, "oracle": v["certOracle"].lower()}
+        self.s = s
+        self.save()
+
+    def save(self):
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        with open(self.path, "w") as f:
+            json.dump(self.s, f, indent=1, sort_keys=True)
+
+    def block(self, tag="latest"):
+        if tag == "latest":
+            return self.s["block"], self.s["now"]
+        return int(tag), self.s["bookTs"] + (int(tag) - self.s["bookBlock"])
+
+    def chain_id(self):
+        return CHAIN_ID
+
+    def block_has_tx_from(self, n, sender):
+        return any(v["deployBlock"] == int(n) for v in self.s["vaults"].values())
+
+    def has_code(self, addr, block):
+        v = self.s["vaults"].get(addr.lower())
+        return v is not None and int(block) >= v["deployBlock"]
+
+    def recover(self, digest_hex, sig_hex, claimed):
+        normalize_sig(sig_hex)
+        return claimed                       # SIM: no secp256k1 offline; the chain recovers on the host
+
+    def call(self, to, data, block="latest"):
+        to, sel, body = to.lower(), data[:4].hex(), data[4:]
+        name = NAME_OF_SEL.get(sel)
+        s = self.s
+        W = lambda x: int(x).to_bytes(32, "big")                                    # noqa: E731
+        A = lambda a: bytes(12) + hb(a)                                              # noqa: E731
+        if to == s["safe"]["address"]:
+            sf = s["safe"]
+            if name == "nonce":
+                return W(sf["nonce"])
+            if name == "getThreshold":
+                return W(sf["threshold"])
+            if name == "getOwners":
+                return abi_encode(["uint256", "uint256"], [32, len(sf["owners"])]) + b"".join(A(o) for o in sf["owners"])
+            if name == "VERSION":
+                v = sf["version"].encode()
+                return W(32) + W(len(v)) + _pad32(v)
+            if name == "getTransactionHash":
+                to_, data_, op, nonce = w_addr(body, 0), dec_bytes_at(body, 2), word(body, 3), word(body, 9)
+                return hb(safe_tx_hash(sf["address"], to_, hx(data_), op, nonce))
+            if name == "checkSignatures":
+                if len(dec_bytes_at(body, 2)) < 65 * sf["threshold"]:
+                    raise CallReverted("GS020")
+                return b""
+        if to == s["factory"]:
+            v = w_addr(body, 0).lower()
+            if name == "isVault":
+                return W(v in s["registered"])
+            if name == "registeredAt":
+                return W(s["registered"].get(v, 0))
+        if to == s["capacity"] and name == "absoluteCap18":
+            return W(s["caps"].get(w_addr(body, 0).lower(), 0))
+        if to in s["oracles"] and name == "attester":
+            return A(s["attester"])
+        if to in s["vaults"]:
+            v = s["vaults"][to]
+            simple = {"bootstrapped": v["bootstrapped"], "lighterAccountIndex": v["account"],
+                      "keeperHedging": v["keeperHedging"], "venueMinBase": v["minBase"],
+                      "venueMinNotional18": v["minQuote"], "GOVERNANCE_DELAY": s["delay"], "retired": False}
+            if name in simple:
+                return W(simple[name])
+            if name in ("feeSink", "insurancePool", "settler", "oracle"):
+                return A(v[name])
+            if name == "governance":
+                return A(s["safe"]["address"])
+            if name == "changeReadyAt":
+                return W(v["ready"].get(hx(body[:32]), 0))
+        raise CallReverted("SIM: no answer for %s on %s" % (name or sel, to))
+
+    def execute(self, to, data_hex, operation, ts=None):
+        """execTransaction as the Safe: a delegatecall to MultiSendCallOnly runs each call as the
+        Safe, all or nothing."""
+        s = json.loads(json.dumps(self.s))
+        ts = s["now"] + 12 if ts is None else ts
+        if operation != 1 or not (addr_eq(to, MULTISEND_CALLONLY_141) or addr_eq(to, MULTISEND_141)):
+            raise CallReverted("SIM: only a MultiSend delegatecall is simulated")
+        for op, t, value, cd in multisend_entries(data_hex):
+            self._apply(s, t.lower(), cd, ts)
+        s["safe"]["nonce"] += 1
+        s["now"], s["block"] = ts, s["block"] + 48
+        self.s = s
+        self.save()
+        return ts
+
+    def _apply(self, s, to, cd, ts):
+        name, body = NAME_OF_SEL.get(cd[:4].hex()), cd[4:]
+        if to == s["factory"] and name == "registerVault":
+            v = w_addr(body, 0).lower()
+            if v in s["registered"]:
+                raise CallReverted("SIM: already registered")
+            s["registered"][v] = ts
+            return
+        if to == s["capacity"] and name == "setAbsoluteCap":
+            s["caps"][w_addr(body, 0).lower()] = word(body, 1)
+            return
+        v = s["vaults"].get(to)
+        if v is None:
+            raise CallReverted("SIM: call to an unknown contract %s" % to)
+        if name == "setBufferThresholds":
+            return
+        if name in ("setFeeSink", "setInsurancePool"):
+            if v[name[3].lower() + name[4:]] != ZERO:
+                raise CallReverted("SIM: %s is set-once" % name)
+            v[name[3].lower() + name[4:]] = w_addr(body, 0).lower()
+            return
+        if name == "enableKeeperHedging":
+            v["keeperHedging"] = True
+            return
+        if name == "proposeChange":
+            d = dec_bytes_at(body, 0)
+            v["ready"][hx(keccak256(d))] = ts + s["delay"]
+            return
+        if name in ("setSettler", "setVenueApiKey", "setVenueMinimums"):
+            i = hx(keccak256(cd))
+            r = v["ready"].get(i, 0)
+            if r == 0 or r > ts:
+                raise CallReverted("SIM: CertVault_ChangeNotReady (%s)" % name)
+            del v["ready"][i]
+            if name == "setSettler":
+                v["settler"] = w_addr(body, 0).lower()
+            elif name == "setVenueMinimums":
+                v["minBase"], v["minQuote"] = word(body, 0), word(body, 1)
+            return
+        raise CallReverted("SIM: %s is not simulated" % name)
+
+    def bootstrap(self, vaults):
+        for a in vaults:
+            v = self.s["vaults"][a.lower()]
+            v["bootstrapped"] = True
+            v["account"] = 700_000 + 11 * list(self.s["vaults"]).index(a.lower())
+        self.save()
+
+    def advance(self, seconds):
+        self.s["now"] += int(seconds)
+        self.s["block"] += int(seconds) * 4
+        self.save()
+
+
+# ------------------------------------------------------------------------- host and effects
+
+def detect_host():
+    if os.name == "nt":
+        return "workstation"
+    if os.path.exists(M_DEPLOYER_ENV) and os.path.exists(M_FOUNDRY + "/forge"):
+        return "montreal"
+    if os.path.exists(F_PY) and os.path.isdir(F_VAULTS):
+        return "france"
+    return "workstation"
+
+
+class Ctx:
+    """Where a subcommand runs and what it may do. In a dry run every write goes under
+    `workdir` (the host path mirrored there) and every command with an effect is printed, not run."""
+
+    def __init__(self, args):
+        self.args = args
+        self.offline = bool(getattr(args, "offline", False))
+        self.dry = bool(getattr(args, "dry_run", False)) or self.offline
+        self._workdir = getattr(args, "workdir", None)
+        self.host = detect_host()
+        self._chain = None
+
+    @property
+    def workdir(self):
+        if self._workdir is None:
+            self._workdir = tempfile.mkdtemp(prefix="s5-cutover-dry-")
+        return self._workdir
+
+    # ----- where
+    def require_host(self, want, user=None):
+        if self.offline:
+            say("   SIM   offline: the %s host check is skipped" % want)
+            return
+        if self.host != want:
+            raise Refuse("this subcommand runs on the %s host; this machine looks like %s" % (want, self.host))
+        me = "root" if hasattr(os, "geteuid") and os.geteuid() == 0 else getpass.getuser()
+        if user and me != user:
+            raise Refuse("run this as %s (it is running as %s)" % (user, me))
+        if want != "workstation":
+            with open(KIT, "rb") as f:
+                if b"\r" in f.read():
+                    raise Refuse("this copy of the kit has CRLF line endings: it was shipped with autocrlf on "
+                                 "(use git -c core.autocrlf=false archive)")
+
+    def p(self, path):
+        """The path a write (or a read of this kit's own output) uses."""
+        if not self.dry:
+            return path
+        rel = os.path.splitdrive(os.path.abspath(path))[1].lstrip("\\/")
+        return os.path.join(self.workdir, rel)
+
+    def rp(self, path):
+        """The path a read of a host input uses: the dry-run copy if there is one, else the host's."""
+        if self.dry and os.path.exists(self.p(path)):
+            return self.p(path)
+        return path
+
+    # ----- the chain
+    def chain(self, book=None, stage="deployed"):
+        if self._chain is None:
+            if self.offline:
+                self._chain = SimChain(os.path.join(self.workdir, "sim-chain.json"), book, stage)
+                adv = getattr(self.args, "sim_advance", 0) or 0
+                if adv:
+                    self._chain.advance(adv)
+                    say("   SIM   the simulated clock moved %d s, to %s" % (adv, utc(self._chain.s["now"])))
+            else:
+                self._chain = Rpc(getattr(self.args, "rpc", None) or RPC)
+                cid = self._chain.chain_id()
+                if cid != CHAIN_ID:
+                    raise Refuse("the RPC is chain %d, not %d" % (cid, CHAIN_ID))
+        return self._chain
+
+    def http_json(self, url, headers=None):
+        r = urllib.request.Request(url, headers=dict({"User-Agent": UA}, **(headers or {})))
+        with urllib.request.urlopen(r, timeout=30) as f:
+            return json.load(f)
+
+    # ----- effects
+    def run(self, argv, effect=True, env=None, cwd=None, redact=(), check=True, timeout=1800, show=True):
+        shown = " ".join("<redacted>" if a in redact else (a if len(a) <= 160 else "%s…(%d chars)" % (a[:24], len(a)))
+                         for a in argv)
+        if self.dry and effect:
+            say("   DRY   would run: %s" % shown)
+            return None
+        if show:
+            say("   run   %s" % shown)
+        r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, cwd=cwd, timeout=timeout)
+        if check and r.returncode != 0:
+            tail = (r.stderr or r.stdout).strip().splitlines()[-12:]
+            for s in redact:
+                tail = [l.replace(s, "<redacted>") for l in tail]
+            raise Refuse("%s failed (exit %d):\n      %s" % (argv[0], r.returncode, "\n      ".join(tail)))
+        return r
+
+    def write(self, path, content, mode=0o644, owner=None, refuse_if_different=False, what=None):
+        """Idempotent: an identical file is left alone. `refuse_if_different`: an existing file
+        with other content is state this step did not expect."""
+        dest = self.p(path)
+        b = content.encode() if isinstance(content, str) else content
+        if os.path.exists(dest):
+            with open(dest, "rb") as f:
+                cur = f.read()
+            if cur == b:
+                ok("unchanged %s" % path)
+                return False
+            if refuse_if_different:
+                raise Refuse("%s exists with different content%s; not overwriting it" % (path, (" (" + what + ")") if what else ""))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        tmp = dest + ".tmp-s5"
+        with open(tmp, "wb") as f:
+            f.write(b)
+        os.chmod(tmp, mode)
+        if owner and not self.dry and hasattr(os, "chown"):
+            import pwd
+            pw = pwd.getpwnam(owner)
+            os.chown(tmp, pw.pw_uid, pw.pw_gid)
+        os.replace(tmp, dest)
+        ok("%s %s%s" % ("wrote" if not self.dry else "DRY wrote", path, "" if not self.dry else "  -> " + dest))
+        return True
+
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError) as e:
+        raise Refuse("cannot read %s: %s" % (path, e))
+
+
+def sha12(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()[:12]
+
+
+# ------------------------------------------------------------------------- Safe plumbing
+
+def safe_state(chain, safe):
+    ver = dec_string(chain.call(safe, calldata("VERSION")))
+    if ver not in SAFE_VERSIONS:
+        raise Refuse("the Safe reports VERSION %s; this kit knows %s" % (ver, ", ".join(SAFE_VERSIONS)))
+    owners = dec_address_array(chain.call(safe, calldata("getOwners")))
+    thr = v_uint(chain, safe, "getThreshold")
+    nonce = v_uint(chain, safe, "nonce")
+    if not owners or not 1 <= thr <= len(owners):
+        raise Refuse("the Safe reports %d owners and threshold %d" % (len(owners), thr))
+    return {"version": ver, "owners": [checksum(o) for o in owners], "threshold": thr, "nonce": nonce}
+
+
+def chain_tx_hash(chain, safe, to, data_hex, op, nonce):
+    """getTransactionHash computed BY THE SAFE, and the local EIP-712 computation, which must agree."""
+    onchain = hx(chain.call(safe, calldata(
+        "getTransactionHash",
+        ["address", "uint256", "bytes", "uint8", "uint256", "uint256", "uint256", "address", "address", "uint256"],
+        [to, 0, hb(data_hex), op, 0, 0, 0, ZERO, ZERO, nonce])))
+    local = safe_tx_hash(safe, to, data_hex, op, nonce)
+    if onchain != local:
+        raise Refuse("the Safe's getTransactionHash %s differs from the EIP-712 hash %s" % (onchain, local))
+    return onchain
+
+
+def queued_nonces(ctx, safe):
+    if ctx.offline:
+        return []
+    try:
+        q = ctx.http_json(SAFE_TXS + "/api/v1/safes/%s/multisig-transactions/?executed=false&limit=50" % safe)
+        return sorted({int(t["nonce"]) for t in q.get("results", [])})
+    except Exception as e:                                           # noqa: BLE001
+        say("   WARN  could not read the Safe transaction service queue (%s); nonce collisions there are not checked" % e)
+        return []
+
+
+# =============================================================================== subcommands
+
+def book_for(ctx, default):
+    path = ctx.args.book or default
+    return load_book(ctx.rp(path), sim=ctx.offline)
+
+
+# ---------------------------------------------------------------------------------- bootstrap
+
+def cmd_bootstrap(ctx):
+    """Montreal. Bootstraps only the vaults not yet bootstrapped (a filtered copy of the book is
+    what usecert-mainnet-bootstrap reads), then reads back what the VENUE registered."""
+    ctx.require_host("montreal", "usecert")
+    book = book_for(ctx, os.path.join(ROOT, "deployments", "4663.stack5.json"))
+    chain = ctx.chain(book)
+    step("state of the %d stack-5 vaults" % len(book["vaults"]))
+    pending = []
+    for v in book["vaults"]:
+        gov = v_addr(chain, v["vault"], "governance")
+        if not addr_eq(gov, book["_safe"]):
+            raise Refuse("%s governance is %s, not the Safe" % (v["symbol"], gov))
+        b = v_bool(chain, v["vault"], "bootstrapped")
+        ai = v_uint(chain, v["vault"], "lighterAccountIndex")
+        say("   %-6s bootstrapped=%-5s accountIndex=%d" % (v["symbol"], b, ai))
+        if b and ai == 0:
+            raise Refuse("%s reads bootstrapped but accountIndex 0: the venue has not registered it - look before retrying" % v["symbol"])
+        if not b:
+            pending.append(v)
+    if pending:
+        step("bootstrapping %s" % ", ".join(v["symbol"] for v in pending))
+        sub = dict((k, v) for k, v in book.items() if not k.startswith("_"))
+        sub["vaults"] = pending
+        tmp = ctx.p(posixpath.join(M_S5, "bootstrap-pending.json"))
+        ctx.write(posixpath.join(M_S5, "bootstrap-pending.json"), json.dumps(sub, indent=2) + "\n")
+        tool = os.path.join(ROOT, "deploy", "bin", "usecert-mainnet-bootstrap")
+        ctx.run(["sudo", "-n", "env", "BOOK=" + tmp, tool], timeout=3600)
+        if ctx.offline:
+            chain.bootstrap([v["vault"] for v in pending])
+            say("   SIM   the simulated vaults are now bootstrapped")
+    else:
+        ok("every vault is already bootstrapped; nothing sent")
+    step("read back")
+    accounts, bad = {}, []
+    for v in book["vaults"]:
+        b = v_bool(chain, v["vault"], "bootstrapped")
+        ai = v_uint(chain, v["vault"], "lighterAccountIndex")
+        if not b or ai == 0:
+            bad.append(v["symbol"])
+        accounts[v["symbol"]] = ai
+        say("   %-6s bootstrapped=%-5s accountIndex=%d" % (v["symbol"], b, ai))
+    if bad and not (ctx.dry and not ctx.offline):
+        raise Refuse("not registered at the venue: %s" % ", ".join(bad))
+    if bad:
+        say("   DRY   %s would be bootstrapped by the run above; accounts.json not written" % ", ".join(bad))
+        return 0
+    if len(set(accounts.values())) != len(accounts):
+        raise Refuse("two vaults share a venue account index: %s" % accounts)
+    ctx.write(posixpath.join(M_S5, "accounts.json"), json.dumps(accounts, indent=2) + "\n", refuse_if_different=True,
+              what="accounts from an earlier bootstrap")
+    say("\n   NEXT  copy %s/accounts.json and the book to France (%s/), then genkeys there" % (M_S5, F_STAGE))
+    return 0
+
+
+# ------------------------------------------------------------------------------------ genkeys
+
+def cmd_genkeys(ctx):
+    """France, as keeper. One venue API key per vault, generated here; the private half is written
+    by lighter-ops.py (O_EXCL, mode 600) and never read back by this kit except its public field."""
+    ctx.require_host("france", "keeper")
+    acc_path = ctx.rp(ctx.args.accounts or posixpath.join(F_STAGE, "accounts.json"))
+    accounts = read_json(acc_path)
+    if not accounts or not all(isinstance(v, int) and v > 0 for v in accounts.values()):
+        raise Refuse("%s must map each symbol to a non-zero venue account index" % acc_path)
+    if [s for s in accounts] != [a[0] for a in ASSETS if a[0] in accounts]:
+        raise Refuse("accounts.json symbols %s are not in the asset table order" % list(accounts))
+    idx = int(ctx.args.api_key_index)
+    if not 2 <= idx <= 254:
+        raise Refuse("API_KEY_INDEX %d is outside 2..254" % idx)
+    ops = os.path.join(BIN_SRC, "lighter-ops.py")
+    keys = {}
+    step("venue API keys (index %d)" % idx)
+    for sym, acct in accounts.items():
+        path = posixpath.join(F_KEYS, "s5-%s-key.json" % sym)
+        rpath = ctx.rp(path)
+        if os.path.exists(rpath):
+            st = os.stat(rpath)
+            if os.name != "nt" and st.st_mode & 0o077:
+                raise Refuse("%s is readable by group or others (mode %o)" % (path, st.st_mode & 0o777))
+            k = read_json(rpath)
+            if int(k.get("account_index", -1)) != acct or int(k.get("api_key_index", -1)) != idx:
+                raise Refuse("%s is for account %s key %s, not account %d key %d"
+                             % (path, k.get("account_index"), k.get("api_key_index"), acct, idx))
+            pub = str(k.get("public", ""))
+            ok("%s: key exists (%s)" % (sym, path))
+        elif ctx.dry:
+            if ctx.offline:
+                pub = (ctx.args.sim_pubkey or hx(keccak256(("s5-dry-run-" + sym).encode()) + keccak256(sym.encode())[:8]))
+                ctx.write(path, json.dumps({"account_index": acct, "api_key_index": idx,
+                                            "private": "SIM-NO-KEY", "public": pub}), mode=0o600)
+                say("   SIM   %s: a placeholder public key (no key is generated offline)" % sym)
+            else:
+                ctx.run([F_PY, ops, "genkey", path, str(acct), str(idx)])
+                continue
+        else:
+            r = ctx.run([F_PY, ops, "genkey", path, str(acct), str(idx)], show=True)
+            printed = r.stdout.strip().splitlines()[-1].strip() if r.stdout.strip() else ""
+            k = read_json(path)
+            pub = str(k.get("public", ""))
+            if printed.lower().lstrip("0x") != pub.lower().lstrip("0x"):
+                raise Refuse("%s: lighter-ops printed a public key that is not the one in %s" % (sym, path))
+            ok("%s: key generated (%s)" % (sym, path))
+        pub = pub.lower()
+        pub = pub if pub.startswith("0x") else "0x" + pub
+        if not re.fullmatch(r"0x[0-9a-f]{80}", pub):
+            raise Refuse("%s: the public key is not 40 bytes" % sym)
+        keys[sym] = pub
+    if len(keys) != len(accounts):
+        say("   DRY   pubkeys.env not written: keys would be generated first")
+        return 0
+    if len(set(keys.values())) != len(keys):
+        if not (ctx.offline and ctx.args.sim_pubkey):
+            raise Refuse("two vaults have the same public key")
+        say("   SIM   one placeholder key for every vault (--sim-pubkey); a real run refuses this")
+    out = posixpath.join(F_STAGE, "pubkeys.env")
+    ctx.write(out, pubkeys_env(idx, keys, dry=ctx.dry), refuse_if_different=True, what="public keys from an earlier run")
+    step("public keys (copy %s to Montreal, %s/pubkeys.env)" % (out, M_S5))
+    for sym in keys:
+        say("   PUBKEY_%s=%s" % (sym, keys[sym]))
+    return 0
+
+
+# ------------------------------------------------------------------- forge builds (Montreal)
+
+def forge_env(book, extra):
+    env = {k: v for k, v in os.environ.items()
+           if not re.match(r"^(PUBKEY_|MINBASE_|MINQUOTE_|OPEN_|VENUE_AMOUNT_|MAINNET_ONLY$|STACK5_BOOK$|API_KEY_INDEX$)", k)}
+    env["PATH"] = M_FOUNDRY + os.pathsep + env.get("PATH", "")
+    env["MAINNET_GOVERNANCE_SAFE"] = book["_safe"]
+    env["MAINNET_SETTLER_ADDR"] = book["shared"]["settler"]
+    rel = os.path.relpath(os.path.abspath(book["_path"]), ROOT).replace("\\", "/")
+    if not rel.startswith("deployments/"):
+        raise Refuse("forge can read the book only under %s/deployments (fs_permissions); it is at %s" % (ROOT, book["_path"]))
+    if rel != "deployments/4663.stack5.json":
+        env["STACK5_BOOK"] = rel
+    if len(book["vaults"]) != len(ASSETS):
+        if len(book["vaults"]) != 1:
+            raise Refuse("a book with %d vaults: SafeBatches handles all six or one (MAINNET_ONLY)" % len(book["vaults"]))
+        env["MAINNET_ONLY"] = book["vaults"][0]["symbol"]
+    env.update(extra)
+    return env
+
+
+FORGE_ERR = re.compile(r"(SafeBatches_\w+\([^)]*\)|PHASE [AB]: [^\"\n]*|OPEN: [^\"\n]*|SafeBatches: [^\"\n]*)")
+
+
+def forge_build(ctx, book, sig, env_extra, names):
+    """Run `forge script SafeBatches --sig <sig>` (no --broadcast) and return the paths of the
+    files it wrote. The files it overwrites in deployments/ are backed up first; the caller
+    decides whether the new ones stand."""
+    # The batches must be built by the SafeBatches (and src/) the vaults were deployed from.
+    commit = str(book.get("commit", ""))
+    d = subprocess.run(["git", "-C", ROOT, "diff", "--quiet", commit, "HEAD", "--", "src", "script"], capture_output=True)
+    if not re.fullmatch(r"[0-9a-f]{40}", commit) or d.returncode != 0:
+        raise Refuse("src/ or script/ in %s differs from the deployed commit %s (git diff exit %d)" % (ROOT, commit[:12], d.returncode))
+    outs = {n: os.path.join(ROOT, "deployments", "4663.stack5.%s.json" % n) for n in names}
+    backup = {}
+    for n, pth in outs.items():
+        if os.path.exists(pth):
+            with open(pth, "rb") as f:
+                backup[n] = f.read()
+    env = forge_env(book, env_extra)
+    shown = {k: v for k, v in env_extra.items()}
+    say("   env   %s" % " ".join("%s=%s" % (k, shown[k]) for k in sorted(shown)))
+    r = subprocess.run([M_FOUNDRY + "/forge", "script", "script/SafeBatches.s.sol:SafeBatches", "--sig", sig,
+                        "--rpc-url", ctx.args.rpc or RPC], capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, env=env, timeout=1800)
+    log = r.stdout + r.stderr
+    if r.returncode != 0:
+        _restore(outs, backup)
+        msgs = sorted(set(FORGE_ERR.findall(log))) or log.strip().splitlines()[-6:]
+        extra = ""
+        for m in msgs:
+            t = re.match(r"SafeBatches_PhaseBTooEarly\(\"?(\w+)\"?, \"?(\w+)\"?, (\d+)", m)
+            if t:
+                extra = "\n      the first proposal (%s %s) is ready at %s" % (t.group(1), t.group(2), utc(t.group(3)))
+        raise Refuse("SafeBatches %s refused:\n      %s%s" % (sig, "\n      ".join(msgs), extra))
+    return outs, backup, log
+
+
+def _restore(outs, backup):
+    for n, pth in outs.items():
+        if n in backup:
+            with open(pth, "wb") as f:
+                f.write(backup[n])
+        elif os.path.exists(pth):
+            os.remove(pth)
+
+
+def publish_batch(ctx, book, kind, title, intro, multisend, txbuilder_raw, extra_files, outdir, rebuild):
+    """Split, hash on chain, and write the signing page directory. Idempotent against an existing
+    directory built from the same bytes at the same nonce."""
+    chain = ctx.chain(book)
+    safe = book["_safe"]
+    if int(multisend["operation"]) != 1 or not (addr_eq(multisend["to"], MULTISEND_CALLONLY_141)
+                                                or addr_eq(multisend["to"], MULTISEND_141)):
+        raise Refuse("the batch is not a delegatecall to Safe's MultiSend 1.4.1: %s op %s" % (multisend["to"], multisend["operation"]))
+    ss = safe_state(chain, safe)
+    nonce0 = ctx.args.nonce if getattr(ctx.args, "nonce", None) is not None else ss["nonce"]
+    if nonce0 < ss["nonce"]:
+        raise Refuse("--nonce %d is already used; the Safe's next nonce is %d" % (nonce0, ss["nonce"]))
+    parts_hex = split_multisend(multisend["data"])
+    q = queued_nonces(ctx, safe)
+    clash = [n for n in q if nonce0 <= n < nonce0 + len(parts_hex)]
+    if clash and getattr(ctx.args, "nonce", None) is None:
+        raise Refuse("the Safe transaction service already queues nonce(s) %s; execute or reject them, or pass --nonce" % clash)
+    labels = labels_of(book)
+    parts = page_parts(kind, parts_hex, checksum(multisend["to"]), 1, nonce0, labels)
+    for p in parts:
+        p["safeTxHash"] = chain_tx_hash(chain, safe, p["to"], p["hex"], 1, p["nonce"])
+    manifest = {
+        "kind": kind, "chainId": CHAIN_ID, "safe": safe, "owners": ss["owners"], "threshold": ss["threshold"],
+        "safeVersion": ss["version"], "book": os.path.basename(book["_path"]), "bookSha256": book["_sha256"],
+        "builtAt": int(time.time()), "calls": sum(len(p["calls"]) for p in parts),
+        "parts": [{k: p[k] for k in ("label", "file", "nonce", "to", "operation", "hexChars", "safeTxHash")} for p in parts],
+    }
+    mpath = os.path.join(outdir, "manifest.json")
+    if os.path.exists(ctx.rp(mpath)):
+        old = read_json(ctx.rp(mpath))
+        same = [(p["safeTxHash"], p["nonce"]) for p in old.get("parts", [])] == [(p["safeTxHash"], p["nonce"]) for p in parts]
+        if same:
+            ok("%s: the signing page in %s is already this batch, at these nonces" % (kind, outdir))
+            _print_parts(parts)
+            return parts, True
+        if not rebuild:
+            raise Refuse("%s already holds a different %s batch (other bytes or nonces). Signatures for it are void "
+                         "if it is rebuilt. Pass --rebuild to move it aside and build again." % (outdir, kind))
+        aside = ctx.p(outdir) + ".old-%d" % int(time.time())
+        os.rename(ctx.p(outdir), aside)
+        say("   moved the previous page to %s" % aside)
+    for p in parts:
+        ctx.write(os.path.join(outdir, p["file"]), p["hex"] + "\n")
+    ctx.write(os.path.join(outdir, "%s.multisend.json" % kind), json.dumps(multisend) + "\n")
+    if len(parts) == 1:
+        ctx.write(os.path.join(outdir, "%s.txbuilder.json" % kind), txbuilder_raw)
+    else:
+        created = read_json_str(txbuilder_raw).get("createdAt", int(time.time() * 1000))
+        for p in parts:
+            ctx.write(os.path.join(outdir, "%s.txbuilder.json" % p["label"]),
+                      txbuilder_json(safe, "%s (%s)" % (title, p["label"]), "part of %s; nonce %d" % (kind, p["nonce"]),
+                                     multisend_entries(p["hex"]), created))
+    for name, content in extra_files.items():
+        ctx.write(os.path.join(outdir, name), content)
+    ctx.write(os.path.join(outdir, "index.html"),
+              build_page(title, intro, safe, ss["owners"], ss["threshold"], parts))
+    ctx.write(mpath, json.dumps(manifest, indent=2) + "\n")
+    _print_parts(parts)
+    return parts, False
+
+
+def read_json_str(s):
+    try:
+        return json.loads(s)
+    except ValueError:
+        return {}
+
+
+def _print_parts(parts):
+    for p in parts:
+        say("   SAFE_TX_HASH %s nonce %d %s (%d calls, %d hex chars; computed by the Safe, getTransactionHash)"
+            % (p["label"], p["nonce"], p["safeTxHash"], len(p["calls"]), p["hexChars"]))
+
+
+def build_or_load(ctx, book, sig, env_extra, names, synth=None):
+    """The batch files: from forge on Montreal; from --from-build DIR when offline; or, offline
+    with no DIR, from `synth` (the simulator's stand-in for phase B and openMinting)."""
+    if ctx.offline:
+        src = getattr(ctx.args, "from_build", None)
+        if src:
+            say("   SIM   offline: the batch comes from %s, not from forge" % src)
+            return {n: os.path.join(src, "4663.stack5.%s.json" % n) for n in names}, {}, None
+        if synth is None:
+            raise Refuse("offline %s needs --from-build DIR holding SafeBatches' output" % sig)
+        say("   SIM   offline: the batch is synthesised the way SafeBatches builds it")
+        return synth(), {}, None
+    return forge_build(ctx, book, sig, env_extra, names)
+
+
+# ------------------------------------------------------------------------------------ phase A
+
+def cmd_phase_a(ctx):
+    ctx.require_host("montreal", "usecert")
+    book = book_for(ctx, os.path.join(ROOT, "deployments", "4663.stack5.json"))
+    chain = ctx.chain(book, stage="bootstrapped")
+    pk_path = ctx.rp(ctx.args.pubkeys or posixpath.join(M_S5, "pubkeys.env"))
+    with open(pk_path) as f:
+        idx, pubkeys, dry_keys = parse_pubkeys(f.read())
+    if dry_keys and not ctx.dry:
+        raise Refuse("%s came from a dry run (placeholder keys); run genkeys for real on France" % pk_path)
+    syms = [v["symbol"] for v in book["vaults"]]
+    if sorted(pubkeys) != sorted(syms):
+        raise Refuse("pubkeys.env has keys for %s; the book has %s" % (sorted(pubkeys), syms))
+    step("vaults: bootstrapped, governed by the Safe, not yet wired")
+    for v in book["vaults"]:
+        if not v_bool(chain, v["vault"], "bootstrapped") or v_uint(chain, v["vault"], "lighterAccountIndex") == 0:
+            raise Refuse("%s is not bootstrapped: run bootstrap first" % v["symbol"])
+    ok("all %d bootstrapped" % len(syms))
+    step("venue minimums (%s/api/v1/orderBookDetails)" % VENUE_API)
+    minimums, env = {}, {"API_KEY_INDEX": str(idx)}
+    for v in book["vaults"]:
+        if ctx.offline:
+            det = {"market_id": v["marketIndex"], "size_decimals": v["sizeDecimals"], "status": "active",
+                   "min_base_amount": "0.0150", "min_quote_amount": "10.000000"}
+            say("   SIM   market %s: min_base_amount 0.0150, min_quote_amount 10 (offline placeholder)" % v["marketIndex"])
+        else:
+            d = ctx.http_json("%s/api/v1/orderBookDetails?market_id=%d" % (VENUE_API, int(v["marketIndex"])))
+            rows = [r for r in d.get("order_book_details", []) if int(r.get("market_id", -1)) == int(v["marketIndex"])]
+            if len(rows) != 1:
+                raise Refuse("the venue returned %d rows for market %s" % (len(rows), v["marketIndex"]))
+            det = rows[0]
+        mb, mq = venue_minimums(det, v["marketIndex"], v["sizeDecimals"])
+        minimums[v["symbol"]] = (mb, mq)
+        env["MINBASE_" + v["symbol"]] = str(mb)
+        env["MINQUOTE_" + v["symbol"]] = str(mq)
+        env["PUBKEY_" + v["symbol"]] = pubkeys[v["symbol"]]
+        say("   %-6s market %-3s MINBASE=%d MINQUOTE=%d (%s USD)" % (v["symbol"], v["marketIndex"], mb, mq, fmt18(mq)))
+    step("SafeBatches phaseA() - build only, nothing is broadcast")
+    outs, backup, _ = build_or_load(ctx, book, "phaseA()", env, ["phaseA", "phaseA.multisend", "phaseA-proposals"])
+    try:
+        ms = read_json(outs["phaseA.multisend"])
+        with open(outs["phaseA"]) as f:
+            txb = f.read()
+        with open(outs["phaseA-proposals"]) as f:
+            prop_raw = f.read()
+        prop = json.loads(prop_raw)
+        entries = multisend_entries(ms["data"])
+        tb = json.loads(txb)["transactions"]
+        if [(t["to"].lower(), t["data"].lower()) for t in tb] != [(to.lower(), hx(cd)) for _, to, _, cd in entries]:
+            raise Refuse("the Transaction Builder file and the MultiSend payload disagree")
+        verify_batch(entries, expected_phase_a(book, idx, pubkeys, minimums), "phase A")
+        verify_proposals(prop, book, book["_safe"], entries)
+        ok("phase A: %d calls, each the one intended (keys, minimums, settler %s); %d proposals match"
+           % (len(entries), book["shared"]["settler"], len(prop["proposals"])))
+        # The proposals file is what phase B will apply. Keep the one already on disk if the new
+        # build proposes exactly the same bytes (only builtAt differs).
+        old = backup.get("phaseA-proposals")
+        if old is not None and not ctx.offline:
+            oldp = json.loads(old)
+            if oldp.get("proposals") == prop["proposals"]:
+                with open(outs["phaseA-proposals"], "wb") as f:
+                    f.write(old)
+                prop_raw = old.decode()
+            elif not ctx.args.rebuild:
+                raise Refuse("the proposals file on disk (%s) proposes other bytes than this build; phase B applies "
+                             "that file. Pass --rebuild only if the old phase A was never executed." % outs["phaseA-proposals"])
+        parts, _ = publish_batch(
+            ctx, book, "phaseA", "Sign stack 5 phase A",
+            "Phase A registers each stack-5 vault with CertFactory (the 16-day insurance clock starts), sets its fee sink "
+            "and insurance pool (set once), turns on keeper hedging and proposes the settler, the venue API key and the "
+            "venue minimums (they apply in phase B, two days later). It opens no minting and moves no funds.",
+            ms, txb, {"phaseA-proposals.json": prop_raw}, posixpath.join(M_S5, "phaseA"), ctx.args.rebuild)
+    except Refuse:
+        if not ctx.offline:
+            _restore(outs, backup)
+        raise
+    finally:
+        if ctx.dry and not ctx.offline:
+            _restore(outs, backup)
+    say("\n   NEXT  owners open %s/phaseA/index.html (serve the directory) and sign each part; put the lines in "
+        "%s/phaseA/sigs.txt; then exec-safe --batch %s/phaseA/%s --nonce %d --sigs %s/phaseA/sigs.txt"
+        % (M_S5, M_S5, M_S5, parts[0]["file"], parts[0]["nonce"], M_S5))
+    if not ctx.dry:
+        say("   ALSO  commit deployments/4663.stack5.phaseA-proposals.json (phase B applies it byte for byte)")
+    return 0
+
+
+# ------------------------------------------------------------------------------------ phase B
+
+def cmd_phase_b(ctx):
+    ctx.require_host("montreal", "usecert")
+    book = book_for(ctx, os.path.join(ROOT, "deployments", "4663.stack5.json"))
+    chain = ctx.chain(book)
+    executed = ctx.rp(posixpath.join(M_S5, "phaseA", "phaseA-proposals.json"))
+    if not os.path.exists(executed):
+        raise Refuse("%s is missing: phase B applies the proposals of the phase A that was signed" % executed)
+    prop_exec = read_json(executed)
+    disk = os.path.join(ROOT, "deployments", "4663.stack5.phaseA-proposals.json")
+    if not ctx.offline:
+        if not os.path.exists(disk) or read_json(disk).get("proposals") != prop_exec.get("proposals"):
+            raise Refuse("%s is not the proposals file of the phase A that was signed (%s)" % (disk, executed))
+
+    def synth():
+        now = chain.block()[1]
+        for p in prop_exec["proposals"]:
+            r = v_uint(chain, p["vault"], "changeReadyAt", ["bytes32"], [p["id"]])
+            if r == 0:
+                raise Refuse("SafeBatches phaseB() refused:\n      SafeBatches_ProposalNotOnChain(\"%s\", \"%s\", %s)" % (p["symbol"], p["setter"], p["id"]))
+            if r > now:
+                raise Refuse("SafeBatches phaseB() refused:\n      SafeBatches_PhaseBTooEarly(\"%s\", \"%s\", %d, %d)\n"
+                             "      the first proposal (%s %s) is ready at %s" % (p["symbol"], p["setter"], r, now, p["symbol"], p["setter"], utc(r)))
+        entries = [(0, p["vault"], 0, hb(p["data"])) for p in prop_exec["proposals"]]
+        d = os.path.join(ctx.workdir, "sim-build")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "4663.stack5.phaseB.json"), "w") as f:
+            f.write(txbuilder_json(book["_safe"], "UseCert stack 5 - phase B (day >= 2)", "SIM", entries, int(now * 1000)))
+        with open(os.path.join(d, "4663.stack5.phaseB.multisend.json"), "w") as f:
+            json.dump({"to": MULTISEND_CALLONLY_141, "operation": 1, "calls": len(entries), "data": multisend_encode(entries)}, f)
+        return {"phaseB": os.path.join(d, "4663.stack5.phaseB.json"), "phaseB.multisend": os.path.join(d, "4663.stack5.phaseB.multisend.json")}
+
+    step("SafeBatches phaseB() - build only; it refuses before every proposal's notice has run")
+    outs, backup, _ = build_or_load(ctx, book, "phaseB()", {}, ["phaseB", "phaseB.multisend"], synth)
+    try:
+        ms = read_json(outs["phaseB.multisend"])
+        with open(outs["phaseB"]) as f:
+            txb = f.read()
+        entries = multisend_entries(ms["data"])
+        verify_batch(entries, expected_phase_b(prop_exec), "phase B")
+        ok("phase B: %d applies, byte for byte the executed phase A's proposals" % len(entries))
+        with open(executed) as f:
+            prop_raw = f.read()
+        parts, _ = publish_batch(
+            ctx, book, "phaseB", "Sign stack 5 phase B",
+            "Phase B applies the three changes phase A proposed two days ago, byte for byte: the settler, the venue API "
+            "key and the venue minimums of each vault. It opens no minting and moves no funds.",
+            ms, txb, {"phaseA-proposals.json": prop_raw}, posixpath.join(M_S5, "phaseB"), ctx.args.rebuild)
+    except Refuse:
+        if not ctx.offline:
+            _restore(outs, backup)
+        raise
+    finally:
+        if ctx.dry and not ctx.offline:
+            _restore(outs, backup)
+    say("\n   NEXT  owners sign %s/phaseB/index.html; then exec-safe --batch %s/phaseB/%s --nonce %d --sigs %s/phaseB/sigs.txt"
+        % (M_S5, M_S5, parts[0]["file"], parts[0]["nonce"], M_S5))
+    return 0
+
+
+# --------------------------------------------------------------------------------- openMinting
+
+def cmd_open(ctx):
+    ctx.require_host("montreal", "usecert")
+    book = book_for(ctx, os.path.join(ROOT, "deployments", "4663.stack5.json"))
+    chain = ctx.chain(book)
+    want = [s.strip() for s in ctx.args.vaults.split(",") if s.strip()]
+    if ctx.args.vaults != "all" and any(s not in [v["symbol"] for v in book["vaults"]] for s in want):
+        raise Refuse("--vaults %s: not all in the book" % ctx.args.vaults)
+    sel = book["vaults"] if ctx.args.vaults == "all" else [v for v in book["vaults"] if v["symbol"] in want]
+    tag = "all" if ctx.args.vaults == "all" else "-".join(v["symbol"] for v in sel)
+    env = {"OPEN_VAULTS": ctx.args.vaults}
+    if ctx.args.cap18:
+        env["OPEN_CAP18"] = str(int(Decimal(ctx.args.cap18)))
+
+    def synth():
+        entries = []
+        for v in sel:
+            if not addr_eq(v_addr(chain, v["vault"], "settler"), book["shared"]["settler"]) or v_uint(chain, v["vault"], "venueMinBase") == 0:
+                raise Refuse("SafeBatches openMinting() refused:\n      SafeBatches_NotReady(\"%s\", \"settler not applied - phase B not executed\")" % v["symbol"])
+            cap = int(v["absoluteCap18"])
+            if ctx.args.cap18:
+                if int(env["OPEN_CAP18"]) > cap:
+                    raise Refuse("OPEN: OPEN_CAP18 above the asset's reviewed cap - it may only lower it")
+                cap = int(env["OPEN_CAP18"])
+            entries.append((0, book["shared"]["capacityOracle"], 0, calldata("setAbsoluteCap", ["address", "uint256"], [v["vault"], cap])))
+        d = os.path.join(ctx.workdir, "sim-build")
+        os.makedirs(d, exist_ok=True)
+        n = "open-" + tag
+        with open(os.path.join(d, "4663.stack5.%s.json" % n), "w") as f:
+            f.write(txbuilder_json(book["_safe"], "UseCert stack 5 - open minting: " + tag, "SIM", entries, 0))
+        with open(os.path.join(d, "4663.stack5.%s.multisend.json" % n), "w") as f:
+            json.dump({"to": MULTISEND_CALLONLY_141, "operation": 1, "calls": len(entries), "data": multisend_encode(entries)}, f)
+        return {n: os.path.join(d, "4663.stack5.%s.json" % n), n + ".multisend": os.path.join(d, "4663.stack5.%s.multisend.json" % n)}
+
+    name = "open-" + tag
+    step("SafeBatches openMinting() for %s - build only" % tag)
+    outs, backup, _ = build_or_load(ctx, book, "openMinting()", env, [name, name + ".multisend"], synth)
+    try:
+        ms = read_json(outs[name + ".multisend"])
+        with open(outs[name]) as f:
+            txb = f.read()
+        entries = multisend_entries(ms["data"])
+        if len(entries) != len(sel):
+            raise Refuse("openMinting built %d calls for %d vaults" % (len(entries), len(sel)))
+        for (op, to, value, cd), v in zip(entries, sel):
+            if op or value or not addr_eq(to, book["shared"]["capacityOracle"]) or cd[:4].hex() != SEL["setAbsoluteCap"] \
+                    or not addr_eq(w_addr(cd[4:], 0), v["vault"]):
+                raise Refuse("openMinting call for %s is not CapacityOracle.setAbsoluteCap(vault, cap)" % v["symbol"])
+            say("   %-6s cap %s USD" % (v["symbol"], fmt18(word(cd[4:], 1))))
+        parts, _ = publish_batch(
+            ctx, book, name, "Sign stack 5: open minting (%s)" % tag,
+            "This sets CapacityOracle.setAbsoluteCap for the listed vaults. It is what lets them take deposits: "
+            "the first opening is one vault with a small cap, for one real round trip before the others.",
+            ms, txb, {}, posixpath.join(M_S5, name), ctx.args.rebuild)
+    except Refuse:
+        if not ctx.offline:
+            _restore(outs, backup)
+        raise
+    finally:
+        if ctx.dry and not ctx.offline:
+            _restore(outs, backup)
+    say("\n   NEXT  exec-safe --batch %s/%s/%s --nonce %d --sigs %s/%s/sigs.txt"
+        % (M_S5, name, parts[0]["file"], parts[0]["nonce"], M_S5, name))
+    return 0
+
+
+# ----------------------------------------------------------------------------------- exec-safe
+
+def expectations(chain, book, entries, proposals, ts, delay):
+    """What the executed calls must have changed, read back: [(what, got, want, ok)]. `ts` None
+    = the execution time is unknown (an already-executed batch): time-stamped values must merely
+    be set."""
+    by_data = {hb(p["data"]): p for p in (proposals or {}).get("proposals", [])}
+    out = []
+
+    def chk(what, got, want, good=None):
+        out.append((what, got, want, (got == want) if good is None else good))
+
+    lab = labels_of(book)
+    for op, to, value, cd in entries:
+        name, body = NAME_OF_SEL.get(cd[:4].hex()), cd[4:]
+        who = lab.get(to.lower(), to)
+        if name == "registerVault":
+            v = w_addr(body, 0)
+            chk("%s isVault(%s)" % (who, lab.get(v.lower(), v)), v_bool(chain, to, "isVault", ["address"], [v]), True)
+            r = v_uint(chain, to, "registeredAt", ["address"], [v])
+            chk("%s registeredAt(%s)" % (who, lab.get(v.lower(), v)), r, ts if ts else "non-zero", r == ts if ts else r > 0)
+        elif name in ("setFeeSink", "setInsurancePool"):
+            getter = name[3].lower() + name[4:]
+            chk("%s %s()" % (who, getter), v_addr(chain, to, getter).lower(), w_addr(body, 0).lower())
+        elif name == "enableKeeperHedging":
+            chk("%s keeperHedging()" % who, v_bool(chain, to, "keeperHedging"), True)
+        elif name == "setBufferThresholds":
+            out.append(("%s setBufferThresholds: reporting only (BufferBook), not read back" % who, "-", "-", True))
+        elif name == "proposeChange":
+            d = dec_bytes_at(body, 0)
+            p = by_data.get(d)
+            if p is None:
+                chk("%s proposeChange(%s) is in the proposals file" % (who, NAME_OF_SEL.get(d[:4].hex(), "?")), False, True)
+                continue
+            r = v_uint(chain, to, "changeReadyAt", ["bytes32"], [p["id"]])
+            if ts:
+                chk("%s changeReadyAt(%s %s)" % (who, p["setter"], p["id"][:10]), r, ts + delay)
+            else:
+                chk("%s changeReadyAt(%s %s)%s" % (who, p["setter"], p["id"][:10], "" if r else " - 0: applied since"),
+                    r, "any", True)
+        elif name in ("setSettler", "setVenueApiKey", "setVenueMinimums"):
+            i = hx(keccak256(cd))
+            chk("%s changeReadyAt(%s) consumed" % (who, name), v_uint(chain, to, "changeReadyAt", ["bytes32"], [i]), 0)
+            if name == "setSettler":
+                chk("%s settler()" % who, v_addr(chain, to, "settler").lower(), w_addr(body, 0).lower())
+            elif name == "setVenueMinimums":
+                chk("%s venueMinBase()" % who, v_uint(chain, to, "venueMinBase"), word(body, 0))
+                chk("%s venueMinNotional18()" % who, v_uint(chain, to, "venueMinNotional18"), word(body, 1))
+        elif name == "setAbsoluteCap":
+            v = w_addr(body, 0)
+            chk("capacityOracle absoluteCap18(%s)" % lab.get(v.lower(), v), v_uint(chain, to, "absoluteCap18", ["address"], [v]), word(body, 1))
+        else:
+            chk("%s %s: no read-back is defined for this call" % (who, name or cd[:4].hex()), False, True)
+    return out
+
+
+def print_expectations(rows, where):
+    bad = 0
+    for what, got, want, good in rows:
+        say("   %-4s %s: %s%s" % ("ok" if good else "FAIL", what, got, "" if good else "  (want %s)" % want))
+        bad += not good
+    if bad:
+        raise Refuse("%d read-back check(s) failed on %s" % (bad, where))
+    ok("every read-back holds on %s (%d checks)" % (where, len(rows)))
+
+
+def deployer_env(ctx):
+    r = ctx.run(["sudo", "-n", "cat", M_DEPLOYER_ENV], effect=False, show=False)
+    env = {}
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if "=" in line and not line.startswith("#"):
+            k, _, v = line.partition("=")
+            env[k.strip()] = v.strip().strip("'\"")
+    if not env.get("MAINNET_DEPLOYER_PK") or not is_addr(env.get("MAINNET_DEPLOYER_ADDR", "")):
+        raise Refuse("%s has no MAINNET_DEPLOYER_PK / MAINNET_DEPLOYER_ADDR" % M_DEPLOYER_ENV)
+    return env
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+def cast_send_json(ctx, argv, redact=()):
+    r = ctx.run(argv + ["--json"], effect=False, redact=redact, show=True, timeout=900)
+    txt = r.stdout.strip()
+    rec = json.loads(txt[txt.index("{"):]) if "{" in txt else {}
+    return rec
+
+
+def receipt_ok(rec, safe, safe_tx_hash_):
+    st = str(rec.get("status", ""))
+    if st not in ("0x1", "1", "true", "True"):
+        return "status %s" % st
+    succ = [l for l in rec.get("logs", []) if addr_eq(l.get("address", ""), safe)
+            and l.get("topics", [""])[0].lower() == TOPIC_EXECUTION_SUCCESS]
+    if not succ:
+        return "no ExecutionSuccess event from the Safe"
+    if not any(safe_tx_hash_[2:].lower() in (l.get("data", "") + "".join(l.get("topics", []))).lower() for l in succ):
+        return "ExecutionSuccess does not carry this safeTxHash"
+    return None
+
+
+def cmd_exec_safe(ctx):
+    ctx.require_host("montreal", "usecert")
+    batch = os.path.abspath(ctx.args.batch)
+    outdir = os.path.dirname(batch)
+    man = read_json(os.path.join(outdir, "manifest.json"))
+    part = next((p for p in man["parts"] if p["file"] == os.path.basename(batch)), None)
+    if part is None:
+        raise Refuse("%s is not a part listed in %s/manifest.json" % (batch, outdir))
+    if int(ctx.args.nonce) != int(part["nonce"]):
+        raise Refuse("--nonce %d, but %s was built and signed for nonce %d" % (ctx.args.nonce, part["label"], part["nonce"]))
+    with open(batch) as f:
+        data_hex = f.read().strip()
+    if len(data_hex) != part["hexChars"] or len(data_hex) > MAX_BATCH_HEX:
+        raise Refuse("%s is %d hex characters; the manifest says %d (limit %d)" % (batch, len(data_hex), part["hexChars"], MAX_BATCH_HEX))
+    book = book_for(ctx, os.path.join(ROOT, "deployments", man["book"]))
+    if book["_sha256"] != man["bookSha256"]:
+        raise Refuse("the book changed since this batch was built")
+    chain = ctx.chain(book)
+    safe, to, op, nonce = man["safe"], part["to"], int(part["operation"]), int(part["nonce"])
+    entries = multisend_entries(data_hex)
+    proposals = None
+    ppath = os.path.join(outdir, "phaseA-proposals.json")
+    if os.path.exists(ppath):
+        proposals = read_json(ppath)
+    delay = int(book.get("parameters", {}).get("governanceDelay", 172800))
+    if book["vaults"]:
+        onchain_delay = v_uint(chain, book["vaults"][0]["vault"], "GOVERNANCE_DELAY")
+        if onchain_delay != delay:
+            raise Refuse("the vault's GOVERNANCE_DELAY is %d, the book says %d" % (onchain_delay, delay))
+
+    step("%s at nonce %d: the Safe's state" % (part["label"], nonce))
+    ss = safe_state(chain, safe)
+    if sorted(o.lower() for o in ss["owners"]) != sorted(o.lower() for o in man["owners"]) or ss["threshold"] != man["threshold"]:
+        raise Refuse("the Safe's owners or threshold changed since the page was built")
+    if ss["nonce"] > nonce:
+        say("   the Safe's nonce is %d: nonce %d has been used. Checking whether it was this batch." % (ss["nonce"], nonce))
+        print_expectations(expectations(chain, book, entries, proposals, None, delay), "chain (already executed)")
+        ok("already executed; nothing sent")
+        return 0
+    if ss["nonce"] < nonce:
+        raise Refuse("the Safe's next nonce is %d: execute the earlier batch(es) first" % ss["nonce"])
+    h = chain_tx_hash(chain, safe, to, data_hex, op, nonce)
+    if h != part["safeTxHash"]:
+        raise Refuse("the Safe computes %s for this batch; the page showed %s" % (h, part["safeTxHash"]))
+    ok("safeTxHash %s (the Safe's getTransactionHash, equal to the EIP-712 hash)" % h)
+
+    step("owner signatures from %s" % ctx.args.sigs)
+    with open(ctx.args.sigs) as f:
+        found, others = parse_signatures(f.read(), part["label"], nonce)
+    say("   %d line(s) for %s at nonce %d%s" % (len(found), part["label"], nonce, (", %d for other batches ignored" % others) if others else ""))
+    rec = [(o, s, chain.recover(h, s, o)) for o, s in found]
+    if chain.sim:
+        say("   SIM   offline: signatures are not recovered (no ecrecover); each is taken for its claimed owner")
+    sigs, order = order_signatures(rec, ss["owners"], ss["threshold"])
+    ok("%d owner(s), in ascending address order: %s" % (len(order), ", ".join(checksum(o) for o in order)))
+    try:
+        chain.call(safe, calldata("checkSignatures", ["bytes32", "bytes", "bytes"], [h, hb(data_hex), sigs]))
+    except CallReverted as e:
+        raise Refuse("the Safe's checkSignatures rejects these signatures: %s" % e)
+    ok("checkSignatures passes on chain")
+    cd = exec_calldata(to, data_hex, op, sigs)
+
+    if ctx.offline:
+        step("SIM: execution on the simulated chain (stands in for the anvil fork)")
+        ts = chain.execute(to, data_hex, op)
+        print_expectations(expectations(chain, book, entries, proposals, ts, delay), "the simulated chain")
+        say("   DRY   would send execTransaction from the deployer (%d bytes of calldata)" % (len(cd) // 2 - 1))
+        return 0
+
+    dep = deployer_env(ctx)
+    derived = ctx.run(["%s/cast" % M_FOUNDRY, "wallet", "address", "--private-key", dep["MAINNET_DEPLOYER_PK"]],
+                      effect=False, redact=(dep["MAINNET_DEPLOYER_PK"],), show=False).stdout.strip()
+    if not addr_eq(derived, dep["MAINNET_DEPLOYER_ADDR"]):
+        raise Refuse("the deployer key does not derive MAINNET_DEPLOYER_ADDR")
+
+    step("anvil fork (--hardfork shanghai): execTransaction with these signatures, then the read-back")
+    port = free_port()
+    fork_url = "http://127.0.0.1:%d" % port
+    anvil = subprocess.Popen(["%s/anvil" % M_FOUNDRY, "--fork-url", ctx.args.rpc or RPC, "--hardfork", "shanghai",
+                              "--port", str(port), "--auto-impersonate", "--silent"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        fork = Rpc(fork_url)
+        for _ in range(120):
+            try:
+                if fork.chain_id() == CHAIN_ID:
+                    break
+            except Exception:                                        # noqa: BLE001
+                time.sleep(0.5)
+        else:
+            raise Refuse("anvil did not come up on %s" % fork_url)
+        if v_uint(fork, safe, "nonce") != nonce:
+            raise Refuse("the fork's Safe nonce is not %d" % nonce)
+        frec = cast_send_json(ctx, ["%s/cast" % M_FOUNDRY, "send", safe, "--data", cd, "--from", dep["MAINNET_DEPLOYER_ADDR"],
+                                    "--unlocked", "--rpc-url", fork_url])
+        bad = receipt_ok(frec, safe, h)
+        if bad:
+            raise Refuse("on the fork, execTransaction failed: %s. Nothing was sent to the chain." % bad)
+        fblock = int(str(frec["blockNumber"]), 0)
+        _, fts = fork.block(fblock)
+        ok("fork: executed in block %d, gas used %d" % (fblock, int(str(frec.get("gasUsed", "0")), 0)))
+        print_expectations(expectations(fork, book, entries, proposals, fts, delay), "the fork")
+    finally:
+        anvil.terminate()
+        try:
+            anvil.wait(10)
+        except subprocess.TimeoutExpired:
+            anvil.kill()
+
+    if ctx.dry:
+        say("\n   DRY   the fork succeeded; not sending execTransaction to chain %d" % CHAIN_ID)
+        return 0
+    step("execTransaction on chain %d, from the deployer %s" % (CHAIN_ID, dep["MAINNET_DEPLOYER_ADDR"]))
+    if v_uint(chain, safe, "nonce") != nonce:
+        raise Refuse("the Safe's nonce moved while the fork ran; start again")
+    rec_ = cast_send_json(ctx, ["%s/cast" % M_FOUNDRY, "send", safe, "--data", cd, "--private-key", dep["MAINNET_DEPLOYER_PK"],
+                                "--rpc-url", ctx.args.rpc or RPC], redact=(dep["MAINNET_DEPLOYER_PK"],))
+    bad = receipt_ok(rec_, safe, h)
+    txh = rec_.get("transactionHash", "?")
+    if bad:
+        raise Refuse("execTransaction %s: %s" % (txh, bad))
+    _, ts = chain.block(int(str(rec_["blockNumber"]), 0))
+    ok("executed: tx %s, block %d, %s" % (txh, int(str(rec_["blockNumber"]), 0), utc(ts)))
+    print_expectations(expectations(chain, book, entries, proposals, ts, delay), "chain %d" % CHAIN_ID)
+    if proposals and any(NAME_OF_SEL.get(c[:4].hex()) == "proposeChange" for _, _, _, c in entries):
+        say("   the delayed changes are ready at %s (phase B from then on)" % utc(ts + delay))
+    return 0
+
+
+# ----------------------------------------------------------------------------- keeper-configs
+
+def unit_dropins(sym):
+    d = "%s/usecert-keeper@s5-%s.service.d" % (SYSTEMD, sym)
+    return {d + "/50-stack5-settler.conf": os.path.join(SYSTEMD_SRC, "usecert-keeper@.service.d-50-stack5-settler.conf"),
+            d + "/60-stack5-code.conf": os.path.join(SYSTEMD_SRC, "usecert-keeper@.service.d-60-stack5-code.conf")}
+
+
+def src_bytes(path, ctx=None):
+    """A file this kit installs, from its own checkout. On a host a CRLF copy is refused (it was
+    shipped with autocrlf on and would not match GitHub); offline, or on a Windows checkout, it is
+    read as LF, which is what git stores."""
+    with open(path, "rb") as f:
+        b = f.read()
+    if b"\r" in b:
+        if ctx is not None and (ctx.offline or ctx.host == "workstation"):
+            return b.replace(b"\r\n", b"\n")
+        raise Refuse("%s has CRLF line endings; ship the kit with git -c core.autocrlf=false archive" % path)
+    return b
+
+
+def settler_address(ctx, cast):
+    """The settler key's address, derived by cast from the key file (never printed)."""
+    if ctx.offline:
+        return None
+    with open(F_SETTLER_KEY) as f:
+        pk = f.read().strip()
+    r = ctx.run([cast, "wallet", "address", "--private-key", pk], effect=False, redact=(pk,), show=False)
+    return r.stdout.strip().split()[0]
+
+
+def cmd_keeper_configs(ctx):
+    ctx.require_host("france", "root")
+    book = book_for(ctx, ctx.args.book_default or posixpath.join(F_STAGE, "4663.stack5.json"))
+    chain = ctx.chain(book, stage="bootstrapped")
+    tpath = ctx.rp(ctx.args.template or F_TEMPLATE)
+    if os.path.exists(tpath):
+        template = read_json(tpath)
+    elif ctx.offline:
+        template = {"rpc": RPC, "api": VENUE_API, "cast": "/opt/keeper/bin/cast", "fill_timeout_sec": 180, "auto_recall": False}
+        say("   SIM   no %s here: a placeholder stack-4 template" % F_TEMPLATE)
+    else:
+        raise Refuse("no stack-4 template config at %s (pass --template)" % tpath)
+    say("   template %s: rpc %s, api %s, cast %s, fill_timeout_sec %s, auto_recall %s"
+        % (tpath, template.get("rpc"), template.get("api"), template.get("cast"), template.get("fill_timeout_sec", 180),
+           template.get("auto_recall", False)))
+    if not ctx.offline:
+        if not os.path.exists(F_SETTLER_KEY):
+            raise Refuse("no settler key at %s" % F_SETTLER_KEY)
+        if os.stat(F_SETTLER_KEY).st_mode & 0o077:
+            raise Refuse("%s is readable by group or others" % F_SETTLER_KEY)
+    if not ctx.offline and os.path.exists(F_SETTLER_ENV):
+        raise Refuse("%s exists: its KEEPER_SETTLER_PK would override the configs' settler_key_file. Remove it, or "
+                     "make it hold the key of %s and drop settler_key_file" % (F_SETTLER_ENV, STACK5_SETTLER))
+    latest, _ = chain.block()
+    step("per vault: deploy block, venue key file, config")
+    cfgs = {}
+    for v in book["vaults"]:
+        sym = v["symbol"]
+        start, fts, how = int(book["blockNumber"]), int(book.get("timestamp", 0)), "the book's block (a lower bound)"
+        try:
+            b = find_deploy_block(lambda n: chain.has_code(v["vault"], n), int(book["blockNumber"]), latest)
+            # A pruned node answers old eth_getCode with nothing and the search would stop at its
+            # horizon: accept the block only if the deployer sent a transaction in it.
+            if chain.block_has_tx_from(b, book["senders"]["deployer"]):
+                start, how = b, "deploy block"
+                _, fts = chain.block(b)
+            else:
+                how += "; block %d has no deployer transaction, so it is not trusted" % b
+        except (RuntimeError, CallReverted, urllib.error.URLError) as e:
+            how += "; history unavailable: %s" % str(e)[:60]
+        keyf = ctx.rp(posixpath.join(F_KEYS, "s5-%s-key.json" % sym))
+        if not os.path.exists(keyf):
+            raise Refuse("%s: no venue key %s - run genkeys first" % (sym, keyf))
+        k = read_json(keyf)
+        acct = v_uint(chain, v["vault"], "lighterAccountIndex")
+        if int(k.get("account_index", -1)) != acct or acct == 0:
+            raise Refuse("%s: the key file is for venue account %s, the vault's is %d" % (sym, k.get("account_index"), acct))
+        cfg = keeper_config(book, v, template, start, fts)
+        cfgs[sym] = cfg
+        say("   %-6s start_block %d (%s), funding_start_ts %d, account %d" % (sym, start, how, fts, acct))
+        cpath = posixpath.join(F_VAULTS, "s5-%s.json" % sym)
+        if os.path.exists(ctx.rp(cpath)):
+            old = read_json(ctx.rp(cpath))
+            if {k2: v2 for k2, v2 in old.items() if k2 != "_generatedBy"} == {k2: v2 for k2, v2 in cfg.items() if k2 != "_generatedBy"}:
+                ok("unchanged %s" % cpath)
+                continue
+            raise Refuse("%s exists and differs (%s); a keeper may be using it - not overwriting"
+                         % (cpath, ", ".join(sorted(k2 for k2 in cfg if old.get(k2) != cfg[k2]))))
+        if os.path.exists(ctx.rp(cfg["state_file"])):
+            raise Refuse("%s has a state file %s but no config: unexpected" % (sym, cfg["state_file"]))
+        ctx.write(cpath, json.dumps(cfg, indent=2) + "\n", mode=0o640, owner="keeper")
+    with open(book["_path"], "rb") as f:
+        ctx.write(F_BOOK5, f.read(), mode=0o644, owner="keeper", refuse_if_different=True, what="another stack-5 book")
+    step("code and systemd drop-ins (installed, not started)")
+    ctx.write(F_KEEPER_S5, src_bytes(os.path.join(BIN_SRC, "usecert-keeper.py"), ctx), mode=0o755, owner="keeper")
+    changed = False
+    for v in book["vaults"]:
+        for dest, src in unit_dropins(v["symbol"]).items():
+            changed |= ctx.write(dest, src_bytes(src, ctx), mode=0o644)
+    if changed:
+        ctx.run(["systemctl", "daemon-reload"])
+    if not ctx.args.start:
+        say("\n   NEXT  after phase B has executed: keeper-configs --start")
+        return 0
+
+    step("--start: phase B must be on chain, and the keys must be the ones it installed")
+    cast = template["cast"]
+    derived = settler_address(ctx, cast)
+    if derived is not None and not addr_eq(derived, STACK5_SETTLER):
+        raise Refuse("%s derives %s, not the stack-5 settler %s" % (F_SETTLER_KEY, derived, STACK5_SETTLER))
+    for v in book["vaults"]:
+        sym = v["symbol"]
+        s_on = v_addr(chain, v["vault"], "settler")
+        if not addr_eq(s_on, book["shared"]["settler"]) or (derived and not addr_eq(s_on, derived)):
+            raise Refuse("%s: settler() is %s - phase B not executed, or another key" % (sym, s_on))
+        if not v_bool(chain, v["vault"], "keeperHedging") or v_uint(chain, v["vault"], "venueMinBase") == 0:
+            raise Refuse("%s: keeper hedging off or venue minimums unset - phases A/B not on chain" % sym)
+        if ctx.offline:
+            say("   SIM   %s: venue key check (lighter-ops.py check) skipped offline" % sym)
+        else:
+            r = ctx.run(["runuser", "-u", "keeper", "--", F_PY, os.path.join(BIN_SRC, "lighter-ops.py"), "check",
+                         posixpath.join(F_KEYS, "s5-%s-key.json" % sym), VENUE_API], effect=False, check=False, show=False)
+            if r.stdout.strip() != "OK":
+                raise Refuse("%s: the venue does not accept the API key yet: %s" % (sym, (r.stdout or r.stderr).strip()[:200]))
+        ok("%s: settler %s, keeper hedging on, venue minimums set%s" % (sym, s_on, "" if ctx.offline else ", venue key accepted"))
+    for v in book["vaults"]:
+        unit = "usecert-keeper@s5-%s" % v["symbol"]
+        ctx.run(["systemctl", "enable", unit])
+        ctx.run(["systemctl", "start", unit])
+    if ctx.dry:
+        return 0
+    time.sleep(20)
+    bad = []
+    for v in book["vaults"]:
+        unit = "usecert-keeper@s5-%s" % v["symbol"]
+        a = ctx.run(["systemctl", "is-active", unit], effect=False, check=False, show=False).stdout.strip()
+        n = ctx.run(["systemctl", "show", "-p", "NRestarts", "--value", unit], effect=False, check=False, show=False).stdout.strip()
+        say("   %-26s %s, restarts %s" % (unit, a, n))
+        if a != "active" or n not in ("0", ""):
+            bad.append(unit)
+    if bad:
+        raise Refuse("not running cleanly: %s - read /var/log/usecert-keeper-s5-<sym>.log" % ", ".join(bad))
+    ok("six stack-5 keepers running")
+    return 0
+
+
+# ----------------------------------------------------------------------------- signer-cutover
+
+def signer_dropin(ctx):
+    return src_bytes(os.path.join(SYSTEMD_SRC, "usecert-signer-mainnet.service.d-50-stack5.conf"), ctx)
+
+
+def poll_attestations(ctx, url, oracles, version, seconds=90):
+    probs, deadline = ["no answer"], time.time() + seconds
+    while time.time() < deadline:
+        try:
+            r = ctx.http_json(url)
+            probs = check_attestations(r, oracles, version)
+            if not probs:
+                return []
+        except urllib.error.HTTPError as e:
+            try:
+                probs = check_attestations(json.load(e), oracles, version) or ["HTTP %d" % e.code]
+            except Exception:                                        # noqa: BLE001
+                probs = ["HTTP %d" % e.code]
+        except Exception as e:                                       # noqa: BLE001
+            probs = [str(e)[:120]]
+        time.sleep(5)
+    return probs
+
+
+def cmd_signer_cutover(ctx):
+    ctx.require_host("france", "root")
+    book4 = read_json(ctx.rp(F_BOOK4))
+    o4 = [v["certOracle"] for v in book4.get("vaults", [])]
+    if ctx.args.rollback:
+        step("rollback: the signer back to its own unit (stack 4)")
+        if not os.path.exists(ctx.p(SIGNER_DROPIN)):
+            say("   no stack-5 drop-in at %s" % SIGNER_DROPIN)
+        elif ctx.dry:
+            say("   DRY   would remove %s" % SIGNER_DROPIN)
+        else:
+            os.remove(SIGNER_DROPIN)
+            ok("removed %s" % SIGNER_DROPIN)
+        ctx.run(["systemctl", "daemon-reload"])
+        ctx.run(["systemctl", "restart", SIGNER_UNIT])
+        if ctx.dry:
+            return 0
+        probs = poll_attestations(ctx, SIGNER_LOCAL, o4, 1)
+        if probs:
+            raise Refuse("after rollback the signer does not serve the stack-4 oracles cleanly: %s" % "; ".join(probs))
+        ok("the signer serves the %d stack-4 oracles again, v1 marks" % len(o4))
+        return 0
+
+    book = load_book(ctx.rp(ctx.args.book or F_BOOK5), sim=ctx.offline)
+    o5 = [v["certOracle"] for v in book["vaults"]]
+    chain = ctx.chain(book)
+    step("preconditions")
+    att4 = str(book4.get("senders", {}).get("attester", ""))
+    att5 = str(book.get("senders", {}).get("attester", ""))
+    if not addr_eq(att4, att5):
+        raise Refuse("the stack-5 attester %s is not the stack-4 attester %s: attester.env holds only the latter" % (att5, att4))
+    for v in book["vaults"]:
+        a = v_addr(chain, v["certOracle"], "attester")
+        if not addr_eq(a, att5):
+            raise Refuse("%s oracle attester() is %s, not %s" % (v["symbol"], a, att5))
+    ok("attester %s on all %d stack-5 oracles (the key in %s)" % (att5, len(o5), F_ATTESTER_ENV))
+    if not ctx.offline:
+        es = ctx.run(["systemctl", "show", "-p", "ExecStart", "--value", SIGNER_UNIT], effect=False, show=False).stdout
+        if os.path.exists(SIGNER_DROPIN):
+            with open(SIGNER_DROPIN, "rb") as f:
+                if f.read() != signer_dropin(ctx):
+                    raise Refuse("%s exists with other content" % SIGNER_DROPIN)
+        elif "book-stack4.json" not in es:
+            raise Refuse("%s does not run book-stack4.json today (ExecStart: %s); not what this cutover expects"
+                         % (SIGNER_UNIT, es.strip()[:200]))
+    ctx.write(F_SIGNER_S5, src_bytes(os.path.join(BIN_SRC, "usecert-signer-mainnet.py"), ctx), mode=0o755, owner="keeper")
+
+    step("the stack-5 signer, once, beside the live one (systemd-run; the key stays in the environment file)")
+    once = ["systemd-run", "--quiet", "--wait", "--pipe", "--collect", "--uid=keeper", "--gid=keeper",
+            "-p", "EnvironmentFile=%s" % F_ATTESTER_ENV,
+            "--setenv=STACK=5", "--setenv=MARK_SIG_VERSION=2", "--setenv=OI_SOURCE=venue", "--setenv=SANITY_CHECKS=1",
+            "--setenv=MULTIPLIER_CHECKS=1", "/bin/sh", "-c",
+            'ATTESTER_PK="$KEEPER_ATTESTER_PK" exec %s %s %s --once' % (F_PY, F_SIGNER_S5, F_BOOK5)]
+    if ctx.offline:
+        say("   DRY   would run: %s" % " ".join(once))
+    else:
+        r = ctx.run(once, effect=False, show=True, timeout=300)
+        try:
+            resp = json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            raise Refuse("the stack-5 signer's --once output is not JSON")
+        probs = check_attestations(resp, o5, 2)
+        if probs:
+            raise Refuse("the stack-5 signer would not sign cleanly: %s" % "; ".join(probs))
+        ok("it signs v2 marks for all %d stack-5 oracles; nothing refused" % len(o5))
+    if not ctx.args.switch:
+        say("\n   NEXT  at site cutover: signer-cutover --switch (rollback: signer-cutover --rollback)")
+        return 0
+
+    step("switch: drop-in %s, restart" % SIGNER_DROPIN)
+    changed = ctx.write(SIGNER_DROPIN, signer_dropin(ctx), mode=0o644)
+    if not changed and not ctx.dry:
+        probs = poll_attestations(ctx, SIGNER_LOCAL, o5, 2, 30)
+        if probs:
+            raise Refuse("already switched, but the signer is not healthy: %s. Roll back with --rollback" % "; ".join(probs))
+        ok("already switched: 8787 serves v2 marks for the six stack-5 oracles; nothing restarted")
+        return 0
+    ctx.run(["systemctl", "daemon-reload"])
+    ctx.run(["systemctl", "restart", SIGNER_UNIT])
+    if ctx.dry:
+        return 0
+    probs = poll_attestations(ctx, SIGNER_LOCAL, o5, 2)
+    if not probs:
+        probs = ["site: " + p for p in poll_attestations(ctx, ctx.args.site or SITE_ATTESTATIONS, o5, 2, 60)]
+    if probs:
+        say("   FAIL  %s - rolling back" % "; ".join(probs))
+        os.remove(SIGNER_DROPIN)
+        ctx.run(["systemctl", "daemon-reload"])
+        ctx.run(["systemctl", "restart", SIGNER_UNIT])
+        back = poll_attestations(ctx, SIGNER_LOCAL, o4, 1)
+        raise Refuse("cutover undone%s" % ("; and the stack-4 signer is NOT healthy: " + "; ".join(back) if back else "; stack 4 serves again"))
+    ok("8787 and %s serve v2 marks for the six stack-5 oracles" % (ctx.args.site or SITE_ATTESTATIONS))
+    say("   rollback: usecert-s5-cutover signer-cutover --rollback")
+    return 0
+
+
+# ------------------------------------------------------------------------------ funding-relay
+
+def cmd_funding_relay(ctx):
+    ctx.require_host("france", "root")
+    book = load_book(ctx.rp(ctx.args.book or F_BOOK5), sim=ctx.offline)
+    step("install (not enabled)")
+    changed = False
+    for name in ("usecert-funding-relay.service", "usecert-funding-relay.timer"):
+        dest = "%s/%s" % (SYSTEMD, name)
+        changed |= ctx.write(dest, src_bytes(os.path.join(SYSTEMD_SRC, name), ctx), refuse_if_different=not ctx.args.replace,
+                             what="pass --replace to overwrite")
+    changed |= ctx.write(RELAY_DROPIN, src_bytes(os.path.join(SYSTEMD_SRC, "usecert-funding-relay.service.d-50-stack5.conf"), ctx))
+    ctx.write(F_RELAY, src_bytes(os.path.join(BIN_SRC, "usecert-funding-relay"), ctx), mode=0o755, owner="keeper",
+              refuse_if_different=not ctx.args.replace, what="pass --replace to overwrite")
+    if changed:
+        ctx.run(["systemctl", "daemon-reload"])
+    missing = [v["symbol"] for v in book["vaults"] if not os.path.exists(ctx.rp("%s/s5-%s.json" % (F_VAULTS, v["symbol"])))]
+    if missing:
+        raise Refuse("no keeper config for %s: run keeper-configs first" % ", ".join(missing))
+    step("one --dry-run pass over the stack-5 vaults, as keeper")
+    argv = ["runuser", "-u", "keeper", "--", "env", "FUNDING_RELAY_VAULTS=%s/s5-*.json" % F_VAULTS,
+            "FUNDING_RELAY_STATE=%s" % F_RELAY_STATE, F_PY, F_RELAY, "--dry-run"]
+    if ctx.offline:
+        say("   DRY   would run: %s" % " ".join(argv))
+        return 0
+    r = ctx.run(argv, effect=False, check=False, timeout=900)
+    for line in (r.stdout + r.stderr).strip().splitlines()[-20:]:
+        say("   | " + line)
+    m = re.search(r"funding relay: (\d+) vaults", r.stdout + r.stderr)
+    if r.returncode != 0 or not m or int(m.group(1)) != len(book["vaults"]):
+        raise Refuse("the dry run did not pass over exactly the %d stack-5 vaults cleanly (exit %d). Before phase B the "
+                     "venue refuses the auth token: expected then." % (len(book["vaults"]), r.returncode))
+    ok("dry run: %d vaults, nothing refused" % len(book["vaults"]))
+    if not ctx.args.enable:
+        say("\n   NEXT  funding-relay --enable (the timer runs it hourly at :07)")
+        return 0
+    ctx.run(["systemctl", "enable", "--now", "usecert-funding-relay.timer"])
+    if ctx.dry:
+        return 0
+    en = ctx.run(["systemctl", "is-enabled", "usecert-funding-relay.timer"], effect=False, check=False, show=False).stdout.strip()
+    ac = ctx.run(["systemctl", "is-active", "usecert-funding-relay.timer"], effect=False, check=False, show=False).stdout.strip()
+    if en != "enabled" or ac != "active":
+        raise Refuse("the timer is %s / %s" % (en, ac))
+    ok("usecert-funding-relay.timer enabled and active")
+    return 0
+
+
+# -------------------------------------------------------------------------------- site-build
+
+GENERATED = {
+    "src/chain/contracts.ts": "scripts/gen-frontend-abi.py --chain 4663 --book 4663.stack5.json "
+                              "(writes frontend/usecert-contracts.mainnet.ts in the contracts repo; copied here). "
+                              "CHAIN.stack = 5 is what switches the site to stack 5 (src/chain/deployment.ts IS_STACK5).",
+    "src/chain/contracts.stack5.ts": "scripts/gen-stack5-abi.py <contracts> <front end> (reads the branch's stack-4 "
+                                     "src/chain/contracts.ts BEFORE it is replaced, to pin the stack-4 mark relay).",
+}
+BINARY_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2", ".ttf", ".otf", ".pdf", ".mp4", ".lockb")
+
+
+def git(repo, *a, text=True):
+    r = subprocess.run(["git", "-C", repo, *a], capture_output=True, text=text)
+    if r.returncode != 0:
+        raise Refuse("git %s: %s" % (" ".join(a), (r.stderr if text else r.stderr.decode()).strip()[:200]))
+    return r.stdout
+
+
+def safe_extract(tar_bytes, dest):
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as t:
+        for m in t.getmembers():
+            p = os.path.normpath(m.name)
+            if p.startswith("..") or os.path.isabs(p) or m.issym() or m.islnk():
+                raise Refuse("the front-end archive has an unsafe member %r" % m.name)
+        t.extractall(dest, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+
+
+def lf_problems(root):
+    bad = []
+    for d, _, files in os.walk(root):
+        for f in files:
+            if f.lower().endswith(BINARY_EXT):
+                continue
+            p = os.path.join(d, f)
+            with open(p, "rb") as fh:
+                b = fh.read()
+            if b"\r\n" in b:
+                bad.append(os.path.relpath(p, root).replace("\\", "/"))
+    return bad
+
+
+def deterministic_tar(src, out_path, prefix):
+    """Sorted members, fixed mtime/uid/gid, so the same inputs give the same tar bytes."""
+    files = []
+    for d, dirs, fs in os.walk(src):
+        dirs.sort()
+        for f in sorted(fs):
+            files.append(os.path.join(d, f))
+    with tarfile.open(out_path, "w", format=tarfile.PAX_FORMAT) as t:
+        for p in sorted(files, key=lambda x: os.path.relpath(x, src).replace("\\", "/")):
+            rel = os.path.relpath(p, src).replace("\\", "/")
+            ti = tarfile.TarInfo(prefix + rel)
+            with open(p, "rb") as fh:
+                b = fh.read()
+            ti.size, ti.mtime, ti.mode, ti.uid, ti.gid, ti.uname, ti.gname = len(b), 0, 0o644, 0, 0, "", ""
+            t.addfile(ti, io.BytesIO(b))
+
+
+def git_blob(b):
+    return hashlib.sha1(b"blob %d\0" % len(b) + b).hexdigest()
+
+
+def cmd_site_build(ctx):
+    ctx.require_host("workstation")
+    contracts = os.path.abspath(ctx.args.contracts or ROOT)
+    fe_repo = os.path.abspath(ctx.args.frontend_repo or contracts)
+    ref = ctx.args.frontend_ref
+    book_path = os.path.join(contracts, "deployments", "4663.stack5.json")
+    book = load_book(book_path, sim=ctx.args.sim_book)
+    step("inputs")
+    commit = str(book.get("commit", ""))
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise Refuse("the book's commit %r is not a commit hash" % commit)
+    diff = subprocess.run(["git", "-C", contracts, "diff", "--quiet", commit, "HEAD", "--", "src"], capture_output=True)
+    if diff.returncode != 0 and not ctx.args.allow_src_diff:
+        raise Refuse("src/ at HEAD differs from the deployed commit %s: the ABIs would not be the deployed ones" % commit[:12])
+    if git(contracts, "status", "--porcelain", "--", "src", "scripts").strip():
+        raise Refuse("src/ or scripts/ has uncommitted changes in %s" % contracts)
+    ref_commit = git(fe_repo, "rev-parse", "--verify", ref + "^{commit}").strip()
+    ok("book %s (sha256 %s), deployed at %s; src/ unchanged since" % (os.path.relpath(book_path, contracts), book["_sha256"][:12], commit[:12]))
+    ok("front end %s = %s (%s)" % (ref, ref_commit[:12], fe_repo))
+    out = os.path.abspath(ctx.args.out or os.path.join(contracts, "..", "s5-site-build"))
+    name = "usecert-web-stack5-%s-book%s" % (ref_commit[:12], book["_sha256"][:12])
+    say("   will write %s/%s.tar (+ .sha256, MANIFEST.txt), overwriting in the tree:" % (out, name))
+    for f, how in GENERATED.items():
+        say("     %-30s %s" % (f, how))
+    if ctx.dry:
+        say("   DRY   no forge build, no generation, no tar")
+        return 0
+    step("forge build (the ABIs come from out/)")
+    ctx.run(["forge", "build"], effect=False, cwd=contracts, timeout=3600)
+    step("front-end tree from %s, LF (git -c core.autocrlf=false archive)" % ref)
+    stage = os.path.join(out, name)
+    if os.path.exists(stage):
+        shutil.rmtree(stage)
+    os.makedirs(stage)
+    tar_bytes = subprocess.run(["git", "-C", fe_repo, "-c", "core.autocrlf=false", "archive", "--format=tar", ref_commit],
+                               capture_output=True, check=True).stdout
+    safe_extract(tar_bytes, stage)
+    base_contracts = os.path.join(stage, "src", "chain", "contracts.ts")
+    if not os.path.exists(base_contracts):
+        raise Refuse("%s has no src/chain/contracts.ts" % ref)
+    step("generate")
+    py = sys.executable
+    gen_out = os.path.join(contracts, "frontend", "usecert-contracts.mainnet.ts")
+    had = os.path.exists(gen_out)
+    ctx.run([py, os.path.join(contracts, "scripts", "gen-frontend-abi.py"), "--chain", "4663", "--book", "4663.stack5.json"],
+            effect=False, cwd=contracts)
+    ctx.run([py, os.path.join(contracts, "scripts", "gen-stack5-abi.py"), contracts, stage], effect=False, cwd=contracts)
+    shutil.copyfile(gen_out, base_contracts)
+    if not had:
+        os.remove(gen_out)
+    with open(base_contracts, encoding="utf-8") as f:
+        ts = f.read()
+    probs = [m for m in ("  id: 4663,", "  stack: 5,") if m not in ts]
+    probs += [v[k] for v in book["vaults"] for k in ("vault", "certOracle", "certificate") if v[k] not in ts]
+    if probs:
+        raise Refuse("the generated contracts.ts lacks %s" % probs[:4])
+    ok("contracts.ts: chain 4663, stack 5, all %d vaults' addresses" % len(book["vaults"]))
+    bad = lf_problems(stage)
+    if bad:
+        raise Refuse("CRLF in %d file(s), e.g. %s" % (len(bad), bad[:3]))
+    ok("every text file is LF")
+    step("tar")
+    tpath = os.path.join(out, name + ".tar")
+    deterministic_tar(stage, tpath, "")
+    with open(tpath, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    with open(tpath + ".sha256", "w", newline="\n") as f:
+        f.write("%s  %s\n" % (digest, os.path.basename(tpath)))
+    lines = []
+    for f_ in sorted(GENERATED):
+        with open(os.path.join(stage, f_), "rb") as fh:
+            b = fh.read()
+        lines.append("%s  git-blob %s  sha256 %s" % (f_, git_blob(b), hashlib.sha256(b).hexdigest()))
+    with open(os.path.join(out, name + ".MANIFEST.txt"), "w", newline="\n") as f:
+        f.write("front end %s @ %s\nbook %s sha256 %s (deployed at %s)\ncontracts HEAD %s\ngenerated:\n  %s\n"
+                % (ref, ref_commit, os.path.basename(book_path), book["_sha256"], commit, git(contracts, "rev-parse", "HEAD").strip(),
+                   "\n  ".join(lines)))
+    ok("%s  sha256 %s" % (tpath, digest))
+    for l in lines:
+        say("   " + l)
+    say("\n   NEXT  scp the tar and .sha256 to France; see the runbook, step 13 (site)")
+    return 0
+
+
+# ============================================================================== entry point
+
+HOSTS = {"bootstrap": "montreal", "genkeys": "france", "phase-a": "montreal", "exec-safe": "montreal",
+         "phase-b": "montreal", "open": "montreal", "keeper-configs": "france", "signer-cutover": "france",
+         "site-build": "workstation", "funding-relay": "france"}
+
+
+def parser():
+    ap = argparse.ArgumentParser(prog="usecert-s5-cutover", description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def add(name, fn, help_):
+        p = sub.add_parser(name, help="[%s] %s" % (HOSTS[name], help_))
+        p.set_defaults(fn=fn)
+        p.add_argument("--dry-run", action="store_true", help="every read and check; no transaction, no systemctl, no write outside --workdir")
+        p.add_argument("--offline", action="store_true", help="no network, no host: a simulated chain in --workdir (implies --dry-run)")
+        p.add_argument("--workdir", help="where a dry run writes (default: a new temporary directory)")
+        p.add_argument("--sim-advance", type=int, default=0, help="offline: move the simulated clock this many seconds first")
+        p.add_argument("--rpc", help="chain RPC (default %s)" % RPC)
+        p.add_argument("--book", help="the stack-5 book")
+        return p
+
+    add("bootstrap", cmd_bootstrap, "bootstrap the vaults, read back, write accounts.json")
+    p = add("genkeys", cmd_genkeys, "venue API keys on the keeper host; pubkeys.env")
+    p.add_argument("--accounts", help="accounts.json (default %s/accounts.json)" % F_STAGE)
+    p.add_argument("--api-key-index", type=int, default=int(os.environ.get("API_KEY_INDEX", DEFAULT_API_KEY_INDEX)))
+    p.add_argument("--sim-pubkey", help="offline: the placeholder public key to use for every vault")
+    for name, fn, h in (("phase-a", cmd_phase_a, "build phase A and its signing page"),
+                        ("phase-b", cmd_phase_b, "build phase B and its signing page"),
+                        ("open", cmd_open, "build openMinting and its signing page")):
+        p = add(name, fn, h)
+        p.add_argument("--nonce", type=int, help="first Safe nonce (default: the Safe's next)")
+        p.add_argument("--rebuild", action="store_true", help="replace a page built from other bytes (voids its signatures)")
+        p.add_argument("--from-build", help="offline: a directory holding SafeBatches' output files")
+        if name == "phase-a":
+            p.add_argument("--pubkeys", help="pubkeys.env (default %s/pubkeys.env)" % M_S5)
+        if name == "open":
+            p.add_argument("--vaults", required=True, help="uTSLA, a comma list, or all")
+            p.add_argument("--cap18", help="a lower first cap, 18 decimals (e.g. 1000000000000000000000 = $1,000)")
+    p = add("exec-safe", cmd_exec_safe, "verify signatures, run on a fork, execute, read back")
+    p.add_argument("--batch", required=True, help="a part's .hex, next to its manifest.json")
+    p.add_argument("--nonce", type=int, required=True)
+    p.add_argument("--sigs", required=True, help="the lines the signing page produced")
+    p = add("keeper-configs", cmd_keeper_configs, "stack-5 keeper configs and drop-ins; --start")
+    p.add_argument("--template", help="a stack-4 keeper config to take rpc/api/cast from (default %s)" % F_TEMPLATE)
+    p.add_argument("--start", action="store_true", help="start the six keepers (after phase B)")
+    p.set_defaults(book_default=None)
+    p = add("signer-cutover", cmd_signer_cutover, "check, then --switch the signer to stack 5; --rollback")
+    p.add_argument("--switch", action="store_true", help="install the drop-in and restart (site cutover)")
+    p.add_argument("--rollback", action="store_true", help="remove the drop-in: back to stack 4")
+    p.add_argument("--site", help="the public attestations URL (default %s)" % SITE_ATTESTATIONS)
+    p = add("site-build", cmd_site_build, "front-end bundle from the stack-5 book, LF tar")
+    p.add_argument("--contracts", help="contracts checkout (default: this kit's)")
+    p.add_argument("--frontend-repo", help="repository holding the front-end branch (default: the contracts checkout)")
+    p.add_argument("--frontend-ref", default="origin/frontend/total-return")
+    p.add_argument("--out", help="output directory (default <contracts>/../s5-site-build)")
+    p.add_argument("--allow-src-diff", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--sim-book", action="store_true", help=argparse.SUPPRESS)
+    p = add("funding-relay", cmd_funding_relay, "install the relay, one dry run; --enable")
+    p.add_argument("--enable", action="store_true")
+    p.add_argument("--replace", action="store_true", help="overwrite an installed relay or unit that differs")
+    return ap
+
+
+def main(argv=None):
+    args = parser().parse_args(argv)
+    ctx = Ctx(args)
+    say("usecert-s5-cutover %s  [host: %s%s]" % (args.cmd, "SIM" if ctx.offline else ctx.host,
+                                                   (", DRY RUN" + (", workdir %s" % ctx._workdir if ctx._workdir else "")) if ctx.dry else ""))
+    try:
+        return args.fn(ctx)
+    except Refuse as e:
+        say("\n   REFUSED  %s" % e)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

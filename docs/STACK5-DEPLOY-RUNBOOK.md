@@ -136,7 +136,318 @@ seeds each buffer; the attester attests batch 1 and sets one mark per vault.
 
 Commit the book (it is not git-ignored): `git add deployments/4663.stack5.json`.
 
+## Cutover kit: Monday (deployed) to Thursday (live)
+
+Steps 5 to 13 are run with one tool, `deploy/bin/usecert-s5-cutover`. Each subcommand names its
+host and refuses to run anywhere else. Each is idempotent: run it again and it changes nothing.
+Faced with state it does not expect, it refuses (exit 2) and says what it saw. It never prints a
+private key. The kit sends only two kinds of transaction, both from Montréal: the six bootstraps
+(inside `usecert-mainnet-bootstrap`) and `execTransaction`. Nothing else it does touches the chain.
+
+Every subcommand takes `--dry-run`: all reads and checks, no transaction, no `systemctl`, and no
+file written outside `--workdir`. Run it before the real command. `--offline` (implies `--dry-run`)
+runs anywhere, with no network, against a simulated chain kept in `<workdir>/sim-chain.json`:
+`deploy/tests/test_s5_cutover.py` runs the whole sequence below that way.
+
+**Where the kit runs.**
+
+- **Montréal:** the checkout in `/opt/usecert`, as user `usecert`. It holds the kit's commit, and
+  `git diff <book commit> HEAD -- src script` must be empty. The phase builders refuse otherwise.
+- **France:** a copy of `deploy/` from the same commit, shipped with LF line endings. The kit
+  refuses a CRLF copy of itself:
+  ```
+  git -c core.autocrlf=false archive --format=tar HEAD deploy | ssh usecert-keeper \
+    'sudo mkdir -p /opt/keeper/s5-kit /opt/keeper/s5 && sudo tar -x -C /opt/keeper/s5-kit && sudo chown -R keeper:keeper /opt/keeper/s5-kit /opt/keeper/s5'
+  K=/opt/keeper/s5-kit/deploy/bin/usecert-s5-cutover     # below: "France$ $K ..."
+  ```
+- **Workstation:** this contracts checkout, for `site-build` only.
+
+On Montréal, `K=/opt/usecert/deploy/bin/usecert-s5-cutover`.
+
+**Who signs what.** The kit never signs for the Safe. It builds the Safe batches (with forge,
+without broadcasting) and a signing page for them. It verifies the owners' signatures, runs the
+transaction on a fork, and only then sends `execTransaction`. The deployer pays the gas.
+`execTransaction` needs 2 of the 3 owner signatures. The deployer's own signature counts for
+nothing.
+
+| Step | Host | Command | Signs / sends |
+|---|---|---|---|
+| bootstrap | Montréal | `$K bootstrap` | deployer: six `bootstrap()` |
+| venue keys | France (keeper) | `$K genkeys` | nothing; keys generated on France |
+| phase A build | Montréal | `$K phase-a` | nothing |
+| phase A | owners, then Montréal | the signing page; `$K exec-safe` | 2 owners (EIP-712); deployer sends |
+| keeper, signer prep | France (root) | `$K keeper-configs`; `$K signer-cutover` | nothing |
+| phase B build | Montréal | `$K phase-b` | nothing |
+| phase B | owners, then Montréal | the signing page; `$K exec-safe` | 2 owners; deployer sends |
+| keepers, relay | France (root) | `$K keeper-configs --start`; `$K funding-relay --enable` | the relay's attester key signs `accrueFunding` hourly |
+| open uTSLA | owners, then Montréal | `$K open --vaults uTSLA ...`; `$K exec-safe` | 2 owners; deployer sends |
+| site | workstation, then France | `$K site-build`; `usecert-deploy-web`; `$K signer-cutover --switch` | nothing |
+
+### Monday, day 0
+
+**M1. Bootstrap, then verify** (Montréal, **deployer**; money: 1 USDG per vault leaves each buffer).
+
+```
+Montréal$ $K bootstrap --dry-run && $K bootstrap
+Montréal$ BOOK=/opt/usecert/deployments/4663.stack5.json deploy/bin/usecert-mainnet-verify
+```
+
+The kit hands only the vaults that are not yet bootstrapped to `usecert-mainnet-bootstrap`, as a
+filtered copy of the book (`/opt/usecert-s5/bootstrap-pending.json`, run through `sudo -n`). Then
+it reads back what the venue registered. It writes `/opt/usecert-s5/accounts.json`
+(`{"uTSLA": <accountIndex>, ...}`) only if every vault reads `bootstrapped()` true and a non-zero,
+distinct `lighterAccountIndex()`. An existing, different `accounts.json` is refused.
+
+*Check:* `cast call <vault> 'lighterAccountIndex()(uint256)'` for one vault equals its entry.
+
+**M2. Venue API keys** (France, as `keeper`; nobody signs).
+
+```
+workstation$ scp montreal:/opt/usecert-s5/accounts.json montreal:/opt/usecert/deployments/4663.stack5.json usecert-keeper:/tmp/
+France$ sudo -u keeper cp /tmp/accounts.json /tmp/4663.stack5.json /opt/keeper/s5/
+France$ sudo -u keeper $K genkeys --dry-run && sudo -u keeper $K genkeys      # API_KEY_INDEX=3 unless --api-key-index
+```
+
+This runs `lighter-ops.py genkey /opt/keeper/keys/s5-<sym>-key.json <account> 3` for each vault
+that has no key file yet. The file is created O_EXCL, mode 600. An existing key file must be for
+the same account and key index, with no group or other permissions. The kit reads only its
+`public` field. It writes `/opt/keeper/s5/pubkeys.env`: `API_KEY_INDEX=3` and one `PUBKEY_<SYM>=0x…`
+(40 bytes) per vault. It refuses two equal keys. A dry run's file starts with
+`# DRY RUN - NOT REAL KEYS`, and the real `phase-a` refuses that file.
+
+*Check:* `grep -ci private /opt/keeper/s5/pubkeys.env` prints `1` (the comment line only).
+
+**M3. Phase A build and signing page** (Montréal; nobody signs yet).
+
+```
+workstation$ scp usecert-keeper:/opt/keeper/s5/pubkeys.env montreal:/opt/usecert-s5/pubkeys.env
+Montréal$ $K phase-a --dry-run && $K phase-a
+```
+
+1. Reads the venue minimums from `api.rh.lighter.xyz/api/v1/orderBookDetails?market_id=<m>`:
+   `MINBASE = min_base_amount × 10^size_decimals` and `MINQUOTE = min_quote_amount × 1e18`. This is
+   `usecert-keeper-setup`'s arithmetic, done in exact decimals. The kit refuses the row if its
+   `market_id` or `size_decimals` differ from the book, if it is not active, or if a value does not
+   convert to a whole number.
+2. Runs `SafeBatches phaseA()` (build only) with `MAINNET_GOVERNANCE_SAFE`, `MAINNET_SETTLER_ADDR`,
+   `API_KEY_INDEX`, `PUBKEY_*`, `MINBASE_*`, `MINQUOTE_*` (and `MAINNET_ONLY` for a one-vault book).
+   A refusal from the script is shown as the script's own message.
+3. Decodes the MultiSend payload and checks it call by call against what was meant. It must be 8
+   calls per vault, in SafeBatches' order: `registerVault(vault, certificate)`, then
+   `setBufferThresholds`, `setFeeSink(FeeVault)`, `setInsurancePool(InsuranceStaking)`,
+   `enableKeeperHedging()`, then the three `proposeChange` for `setSettler(settler)`,
+   `setVenueApiKey(3, PUBKEY)` and `setVenueMinimums(MINBASE, MINQUOTE)`. The proposals file must
+   list the same bytes, each with id = keccak256(data). The Transaction Builder file must agree
+   with the payload.
+4. Writes `/opt/usecert-s5/phaseA/`: `index.html`, one `phaseA-<k>of<n>.hex` per part,
+   `phaseA.txbuilder.json`, `phaseA.multisend.json`, `phaseA-proposals.json`, `manifest.json`.
+   A payload over 120,000 hex characters is split at call boundaries into consecutive batches at
+   consecutive nonces, with one Sign button each (Linux `MAX_ARG_STRLEN` is 128 KiB per argument).
+   Phase A is about 18,000 characters, so it is one batch.
+5. Prints `SAFE_TX_HASH <part> nonce <n> 0x…` for each part. The Safe computes it
+   (`getTransactionHash`), and the kit refuses if its own EIP-712 computation differs. The nonce
+   is the Safe's next. The kit refuses a clash with a transaction queued on the Safe transaction
+   service, unless `--nonce` is given.
+
+Commit `deployments/4663.stack5.phaseA-proposals.json`. Phase B applies it byte for byte. Running
+`phase-a` again with the same inputs keeps that file byte-identical and reports "already this
+batch". With other inputs it refuses, unless `--rebuild` is given, and `--rebuild` voids any
+signatures already collected.
+
+**M4. Owners sign phase A** (**2 of 3 owners**).
+
+Serve `/opt/usecert-s5/phaseA/` to the owners (the same way as the batch-1 pages). Each owner
+connects a wallet, picked with EIP-6963, and signs each part with `eth_signTypedData_v4`. The
+domain is `{chainId: 4663, verifyingContract: Safe}`, the call is operation 1 (delegatecall) to
+MultiSendCallOnly 1.4.1, and the nonce is the one shown. The page refuses a wallet on another
+chain, an account that is not an owner, and an owner list that no longer matches the Safe's
+`getOwners()` read through the wallet. The copy box holds lines like
+`phaseA-1of1 nonce 5 owner 0x… signature 0x…`. Put every owner's lines in
+`/opt/usecert-s5/phaseA/sigs.txt`.
+
+**M5. Execute phase A** (Montréal, **deployer** sends; **go from Chris**).
+
+```
+Montréal$ $K exec-safe --batch /opt/usecert-s5/phaseA/phaseA-1of1.hex --nonce 5 --sigs /opt/usecert-s5/phaseA/sigs.txt --dry-run
+Montréal$ $K exec-safe --batch /opt/usecert-s5/phaseA/phaseA-1of1.hex --nonce 5 --sigs /opt/usecert-s5/phaseA/sigs.txt
+```
+
+In order, the kit:
+
+1. Checks that the manifest's owners and threshold are still the Safe's, and that the Safe's
+   nonce is exactly this batch's. A higher nonce means the batch was used: it runs the read-back
+   and exits 0 ("already executed").
+2. Recomputes the safeTxHash on chain and requires it to equal the page's.
+3. Recovers each signature with the ecrecover precompile (by `eth_call`) and requires it to
+   recover to the owner it claims. It orders the signatures by owner address, ascending, and runs
+   the Safe's `checkSignatures`.
+4. Starts `anvil --fork-url $RPC --hardfork shanghai --auto-impersonate` and sends
+   `execTransaction` there from the deployer. It requires status 1, the Safe's `ExecutionSuccess`
+   carrying this hash, and the full read-back on the fork.
+5. Only then, and only without `--dry-run`, sends `execTransaction` to chain 4663 from the
+   deployer, and reads back again on chain.
+
+The phase A read-back is 54 checks for six vaults: `isVault` and `registeredAt(vault)` = the
+execution block's timestamp, `feeSink()` = FeeVault, `insurancePool()` = InsuranceStaking,
+`keeperHedging()` = true, and for each of the 18 recorded proposals
+`changeReadyAt(id)` = timestamp + 172800. It prints the time phase B becomes possible.
+
+**M6. France prep** (France, root; nobody signs).
+
+```
+France$ sudo $K keeper-configs --book /opt/keeper/s5/4663.stack5.json --dry-run
+France$ sudo $K keeper-configs --book /opt/keeper/s5/4663.stack5.json
+France$ sudo $K signer-cutover --book /opt/keeper/s5/4663.stack5.json --dry-run
+```
+
+`keeper-configs` writes `/opt/keeper/vaults/s5-<sym>.json` for each vault:
+
+- from the book: vault, oracle, market, decimals;
+- from the running `s4-uTSLA.json`: `rpc`, `api` (refused unless it is `https://api.rh.lighter.xyz`),
+  `cast`, `fill_timeout_sec`, `auto_recall`;
+- `start_block`: the vault's deploy block. It is found by binary search on `eth_getCode` and
+  accepted only if the deployer sent a transaction in that block. Otherwise the book's
+  `blockNumber` is used, which is a lower bound;
+- `funding_start_ts`: that block's timestamp;
+- `state_file /opt/keeper/state-s5-<sym>.json`, `api_key_file /opt/keeper/keys/s5-<sym>-key.json`
+  (it must exist, and its account must be the vault's `lighterAccountIndex()`), `stack 5`,
+  `settler_key_file /opt/keeper/keys/s5-settler.key` (mode 600), `auto_rehedge false`.
+
+It also writes:
+
+- `/opt/keeper/book-stack5.json`;
+- `/opt/keeper/usecert-keeper-s5.py`, the stack-5 keeper. The stack-4 keepers keep running
+  `/opt/keeper/usecert-keeper.py`, untouched;
+- per instance, `/etc/systemd/system/usecert-keeper@s5-<sym>.service.d/{50-stack5-settler,60-stack5-code}.conf`.
+
+It does not start anything. It refuses an existing config that differs, a state file without a
+config, and `/etc/usecert-keeper/settler.env` (two sources for the settler key).
+
+`signer-cutover` with no flag changes nothing. It checks that the stack-5 oracles' `attester()` is
+the stack-4 attester, whose key is in `attester.env`, and that the live unit runs
+`book-stack4.json`. It installs `/opt/keeper/usecert-signer-mainnet-s5.py`. Then it runs the
+stack-5 signer once beside the live one (`systemd-run --uid=keeper -p EnvironmentFile=attester.env
+... --once`). The result must be v2 marks for all six stack-5 oracles, with nothing refused.
+
+### Wednesday, day ≥ 2 (after the time M5 printed)
+
+**W1. Phase B** (Montréal, then **2 of 3 owners**, then **deployer**; **go from Chris**).
+
+```
+Montréal$ $K phase-b --dry-run && $K phase-b
+    (owners sign /opt/usecert-s5/phaseB/index.html -> /opt/usecert-s5/phaseB/sigs.txt)
+Montréal$ $K exec-safe --batch /opt/usecert-s5/phaseB/phaseB-1of1.hex --nonce 6 --sigs /opt/usecert-s5/phaseB/sigs.txt --dry-run
+Montréal$ $K exec-safe --batch /opt/usecert-s5/phaseB/phaseB-1of1.hex --nonce 6 --sigs /opt/usecert-s5/phaseB/sigs.txt
+```
+
+Before the notice has run, `phase-b` shows SafeBatches' own refusal,
+`SafeBatches_PhaseBTooEarly(symbol, setter, readyAt, now)`, with `readyAt` as a UTC time. It also
+refuses if `deployments/4663.stack5.phaseA-proposals.json` is not the file in
+`/opt/usecert-s5/phaseA/`. The batch must be exactly the 18 recorded proposals, in order, byte for
+byte.
+
+The read-back (36 checks) requires that each apply's `changeReadyAt` is consumed (0),
+`settler()` is the settler, and `venueMinBase()` and `venueMinNotional18()` are the proposed
+minimums.
+
+**W2. Keepers and funding relay** (France, root).
+
+```
+France$ sudo $K keeper-configs --book /opt/keeper/s5/4663.stack5.json --start
+France$ sudo $K funding-relay --dry-run && sudo $K funding-relay
+France$ sudo $K funding-relay --enable
+```
+
+`--start` requires three things for every vault before it enables and starts
+`usecert-keeper@s5-<sym>`:
+
+- `settler()` = the book's settler = the address `s5-settler.key` derives
+  (`0x29f975357cc98A4F4e7E4460440380AB3136d500`);
+- keeper hedging on and venue minimums set;
+- the venue accepts the vault's API key: `lighter-ops.py check` prints `OK`.
+
+After 20 s, each unit must be active with no restarts. `funding-relay` installs the unit, the timer
+and the drop-in `usecert-funding-relay.service.d/50-stack5.conf`, which relays only
+`/opt/keeper/vaults/s5-*.json`, with state in `/opt/keeper/funding-relay-state-s5.json`. It
+installs `/opt/keeper/usecert-funding-relay`. Then it runs one `--dry-run` pass as `keeper`, which
+must cover exactly the six vaults with nothing refused. Before phase B the venue refuses the auth
+token, so this step belongs here and not on Monday. `--enable` turns the hourly timer on. The
+relay must run at least every 2 days, or `sweepFees` stops.
+
+### Thursday: open one, go live, prove one
+
+**T1. Open uTSLA with a $1,000 cap** (**2 of 3 owners**, **deployer**; **go from Chris**: from here uTSLA can take money).
+
+```
+Montréal$ $K open --vaults uTSLA --cap18 1000000000000000000000
+    (owners sign /opt/usecert-s5/open-uTSLA/index.html)
+Montréal$ $K exec-safe --batch /opt/usecert-s5/open-uTSLA/open-uTSLA-1of1.hex --nonce 7 --sigs /opt/usecert-s5/open-uTSLA/sigs.txt
+```
+
+*Read-back:* `CapacityOracle.absoluteCap18(uTSLA vault)` = 1000e18.
+
+**T2. Site build** (workstation, then France).
+
+```
+workstation$ git fetch origin && python deploy/bin/usecert-s5-cutover site-build --dry-run
+workstation$ python deploy/bin/usecert-s5-cutover site-build
+```
+
+It needs `deployments/4663.stack5.json` (the committed book) and `src/` equal to the book's
+`commit`. It refuses otherwise, because the ABIs would not be the deployed ones. It runs
+`forge build`, then:
+
+1. `git -c core.autocrlf=false archive origin/frontend/total-return` into a staging tree. That
+   branch carries the approved option-A copy, and its `src/chain/contracts.ts` is today's stack-4
+   bundle.
+2. `scripts/gen-frontend-abi.py --chain 4663 --book 4663.stack5.json` writes
+   `frontend/usecert-contracts.mainnet.ts` in the contracts repo. It carries the stack-5 addresses,
+   the ABIs and `CHAIN.stack = 5`, which is what turns `IS_STACK5` on in `src/chain/deployment.ts`.
+3. `scripts/gen-stack5-abi.py <contracts> <staging>` writes `src/chain/contracts.stack5.ts`, the
+   stack-5 ABIs plus the pinned stack-4 mark relay. It must run while `src/chain/contracts.ts` is
+   still the stack-4 bundle: it reads that bundle's `setMarkPriceSigned` and asserts 4 inputs.
+4. The kit copies step 2's file over `src/chain/contracts.ts`.
+
+Those two files are the only ones changed. The kit refuses a `contracts.ts` without
+`id: 4663`, `stack: 5` and every vault's addresses, and any text file with CRLF. It writes
+`../s5-site-build/usecert-web-stack5-<branch commit>-book<sha>.tar` (sorted members, fixed mtimes),
+`.tar.sha256`, and `.MANIFEST.txt` with the git blob id of each generated file.
+
+```
+workstation$ scp ../s5-site-build/usecert-web-stack5-*.tar* usecert-keeper:/tmp/
+France$ cd /tmp && sha256sum -c usecert-web-stack5-*.tar.sha256
+France$ sudo rm -rf /opt/usecert-web-s5-src && sudo mkdir /opt/usecert-web-s5-src && sudo tar -x -C /opt/usecert-web-s5-src -f /tmp/usecert-web-stack5-*.tar
+France$ grep -rlI $'\r' /opt/usecert-web-s5-src | wc -l        # 0
+```
+
+**T3. Site cutover** (France, root; **go from Chris**).
+
+```
+France$ sudo rsync -a --delete --exclude node_modules --exclude .output --exclude .output.prev /opt/usecert-web-s5-src/ /opt/usecert-web/
+France$ sudo chown -R usecert:usecert /opt/usecert-web && (cd /opt/usecert-web && sudo -u usecert /home/usecert/.bun/bin/bun install --frozen-lockfile)
+France$ sudo /usr/local/bin/usecert-deploy-web          # builds, refuses an unbootable bundle, rolls back a site that does not serve
+France$ sudo $K signer-cutover --switch
+```
+
+`--switch` installs `usecert-signer-mainnet.service.d/50-stack5.conf` and restarts the signer. The
+drop-in sets `STACK=5`, `MARK_SIG_VERSION=2`, `OI_SOURCE=venue`, `SANITY_CHECKS=1` and
+`MULTIPLIER_CHECKS=1`, with ExecStart pointing at the `-s5` copy and `book-stack5.json`. The kit
+then requires `127.0.0.1:8787/attestations` and `https://use-cert.com/api/attestations` to serve
+v2 marks (`markSigVersion` 2, deadline ≤ observedAt + 60) for exactly the six stack-5 oracles,
+with nothing refused. If either does not, it removes the drop-in itself and checks that stack 4
+serves again. Rollback at any time, one command:
+
+```
+France$ sudo $K signer-cutover --rollback        # removes the drop-in; checks 8787 serves the stack-4 oracles again
+```
+
+Then step 11's round trip on uTSLA. Then the repo side of step 13: move the books, copy
+`book-stack5.json` to its new name in the France health check, and commit the two generated
+front-end files to the published front-end branch, so that the release manifest matches GitHub.
+
 ## 5. Bootstrap (**deployer EOA**) and source verification
+
+Kit: `usecert-s5-cutover bootstrap` (Monday, M1 above).
 
 ```
 BOOK=/opt/usecert/deployments/4663.stack5.json deploy/bin/usecert-mainnet-bootstrap
@@ -147,6 +458,8 @@ Each vault must read `bootstrapped=true` and a non-zero `lighterAccountIndex` fr
 
 ## 6. Venue inputs for phase A (nobody signs)
 
+Kit: `usecert-s5-cutover genkeys` on France; `phase-a` reads the minimums (M2, M3 above).
+
 On the France keeper host, per vault: `lighter-ops.py genkey KEYFILE <account index> <API_KEY_INDEX>`
 → the public half is `PUBKEY_<SYM>` (the private half never leaves that host). Minimums from
 `https://api.rh.lighter.xyz/api/v1/orderBookDetails?market_id=<m>`, as `usecert-keeper-setup` computes
@@ -154,6 +467,8 @@ them (`MINBASE = round(min_base_amount × 10^size_decimals)`, `MINQUOTE = min_qu
 $10 today). Phase A refuses a zero MINBASE and minimums the vault would reject.
 
 ## 7. Phase A, day 0 (**Safe**)
+
+Kit: `usecert-s5-cutover phase-a`, the signing page, then `exec-safe` (M3 to M5 above).
 
 ```
 forge script script/SafeBatches.s.sol:SafeBatches --sig 'phaseA()' --rpc-url $RPC
@@ -193,13 +508,22 @@ After execution, check each vault: `feeSink`, `insurancePool`, `keeperHedging`,
 
 ## 8. During the wait (France keeper host)
 
-- Signer in stack-5 mode (`STACK=5`): v2 marks (`observedAt`, 60 s validity), attestations as
-  `latest + 1` (the deploy attested batch 1).
-- Funding relay (`usecert-funding-relay`): hourly `accrueFunding`. Fees cannot be swept without it.
-- Keeper with the settler key: `STACK=5`, `KEEPER_SETTLER_KEY_FILE`. At start it checks the key
-  against `settler()`. It will fail until phase B lands, which is expected.
+With the kit (M6, W2, T3 above), the order is:
+
+- **Signer.** Checked during the wait (`signer-cutover`: one stack-5 `--once` run beside the live
+  signer). It is switched only at site cutover (`--switch`). Port 8787 serves one stack, and the
+  stack-4 site reads it until the new site is live. Stack 5 then serves v2 marks (`observedAt`,
+  60 s validity) and attestations as `latest + 1` (the deploy attested batch 1).
+- **Keepers.** Configured and installed during the wait (`keeper-configs`), and started after
+  phase B (`--start`). A stack-5 keeper checks its key against `settler()` at start, and that
+  check fails until phase B lands.
+- **Funding relay** (hourly `accrueFunding`; fees cannot be swept without it). Installed after
+  phase B (`funding-relay`, then `--enable`). Before phase B the venue refuses the auth token made
+  with the vault's key, and no vault can hold a position before openMinting anyway.
 
 ## 9. Phase B, day ≥ 2 (**Safe**)
+
+Kit: `usecert-s5-cutover phase-b`, then `exec-safe` (W1 above).
 
 ```
 forge script script/SafeBatches.s.sol:SafeBatches --sig 'phaseB()' --rpc-url $RPC
@@ -220,6 +544,8 @@ Every vault is deployed and wired. None can mint. Open **one**.
 
 ## 11. Open uTSLA only (**Safe**), then one small real round trip
 
+Kit: `usecert-s5-cutover open --vaults uTSLA --cap18 1000000000000000000000`, then `exec-safe` (T1 above).
+
 ```
 OPEN_VAULTS=uTSLA OPEN_CAP18=1000000000000000000000 \
   forge script script/SafeBatches.s.sol:SafeBatches --sig 'openMinting()' --rpc-url $RPC
@@ -229,7 +555,7 @@ This is one `CapacityOracle.setAbsoluteCap`, here a $1,000 first cap (without `O
 the table's $90k). It refuses a vault where phase B is not visible on chain (`settler`, venue
 minimums) or phase A is missing, and any cap above the asset's reviewed row.
 
-The round trip, about $20. It must clear the venue's $10 minimum and 0.015 TSLA:
+The round trip, about $20. It must clear the venue's $10 minimum and its minimum size (0.0200 TSLA on 2026-09-27; `phase-a` prints the day's):
 
 1. `requestMint` from a test wallet. The keeper sees `HedgeRequested` and opens the hedge off chain
    with the vault's API key.
@@ -249,6 +575,8 @@ OPEN_VAULTS=uTSLA forge script script/SafeBatches.s.sol:SafeBatches --sig 'openM
 ```
 
 ## 13. Cutover (repo, front end)
+
+Kit: `usecert-s5-cutover site-build`, `usecert-deploy-web`, then `signer-cutover --switch` (T2, T3 above).
 
 1. Move stack 4's book to history: `git mv deployments/4663.json deployments/history/4663.5-stack4-six-vaults-safe-governed.json`,
    then add a row to `deployments/history/README.md`.
@@ -296,3 +624,11 @@ withdrawal (window from 2026-10-06 15:18 UTC) is unaffected.
    cannot be confused with v1's `ucINS`.
 4. **Ops wallet = deployer.** 5% of fees lands on the hot key that signs deploys. Set
    `MAINNET_OPS_WALLET` to a separate address if that is not wanted. FeeVault is immutable.
+5. **Order on Thursday.** The signer on 8787 moves to stack 5 at site cutover, not before, because
+   the live site reads it. A stack-5 mint needs a v2 mark signed within `maxMarkAge` (300 s), and
+   until T3 no such mark is published. So uTSLA, though open on chain from T1, cannot actually be
+   minted until T3, and the step-11 round trip can only run after T3, with the new site public and
+   uTSLA open to anyone up to the $1,000 cap. Accept this, or add a tool that relays a mark from a
+   signer `--once` bundle so the round trip can run before T3.
+6. **`auto_recall` for the stack-5 keepers** is copied from `s4-uTSLA.json`. Stack 5 caps recalls
+   at the attested margin. Confirm that the stack-4 value is wanted.
