@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import Accordion from "@/components/Accordion";
 import type { AccordionRow } from "@/components/Accordion";
-import { IS_TESTNET } from "@/chain/deployment";
+import { IS_TESTNET, IS_STACK5 } from "@/chain/deployment";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
@@ -56,7 +56,9 @@ export const HOW_IT_WORKS_ROWS: AccordionRow[] = [
     title: "Honest Boundaries",
     meta: "Risk: named plainly",
     body: [
-      "Certificates are synthetic: price exposure backed by perp positions and USDG margin, not custody of shares. No dividends, no shareholder rights, no claim on an issuer.",
+      IS_STACK5
+        ? "Certificates are synthetic: price exposure backed by perp positions and USDG margin, not custody of shares. No shareholder rights and no claim on an issuer. Dividends are reflected in the price rather than paid out: each certificate tracks the Robinhood stock token, which reinvests them."
+        : "Certificates are synthetic: price exposure backed by perp positions and USDG margin, not custody of shares. No dividends, no shareholder rights, no claim on an issuer.",
       "Risks are named plainly: sustained negative funding (buffered, then fee'd, never hidden), market and operator dependency, and oracle or liquidation tail risk in extreme gaps. UseCert is infrastructure, not investment advice.",
     ],
     image: "/hiw-boundaries.jpg",

@@ -1,4 +1,4 @@
-import { HAS_CERT_TOKEN } from "@/chain/deployment";
+import { HAS_CERT_TOKEN, IS_STACK5 } from "@/chain/deployment";
 import { IS_TESTNET } from "@/chain/deployment";
 
 export type ArticleCategory = "MECHANICS" | "MARKETS" | "RISK" | "DESIGN";
@@ -81,7 +81,9 @@ export const ARTICLES: Article[] = [
       {
         heading: "The honest boundary",
         paragraphs: [
-          "Certificates are synthetic. Backed by perp positions and USDG margin, not custody of shares. No dividends, no shareholder rights. The solvency dashboard is public and the stress parameters are published, because the point of putting it on chain is that you should never have to take our word for it.",
+          IS_STACK5
+            ? "Certificates are synthetic. Backed by perp positions and USDG margin, not custody of shares. No shareholder rights, and no dividend is paid out: dividends are reflected in the price, because each certificate tracks the Robinhood stock token, which reinvests them. The solvency dashboard is public and the stress parameters are published, because the point of putting it on chain is that you should never have to take our word for it."
+            : "Certificates are synthetic. Backed by perp positions and USDG margin, not custody of shares. No dividends, no shareholder rights. The solvency dashboard is public and the stress parameters are published, because the point of putting it on chain is that you should never have to take our word for it.",
         ],
       },
     ],

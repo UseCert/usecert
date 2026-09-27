@@ -7,7 +7,7 @@ import { EM_DASH, NO_POSITION, fmtCompactUSD, fmtOrDash } from "./format";
 import { fromBps, fromPrice18 } from "@/chain/units";
 import { BASIS_ON_THIS_DEPLOYMENT } from "@/chain/useVaults";
 import { cn } from "@/lib/utils";
-import { CHAIN_ID, COLLATERAL_SYMBOL, HAS_CERT_TOKEN, VENUE_IS_SIMULATED } from "@/chain/deployment";
+import { CHAIN_ID, COLLATERAL_SYMBOL, HAS_CERT_TOKEN, VENUE_IS_SIMULATED, IS_STACK5 } from "@/chain/deployment";
 
 /* --------------------------------------------------------------- content */
 
@@ -38,7 +38,9 @@ const DESIGN_LAWS: { n: string; title: string; body: string }[] = [
   {
     n: "05",
     title: "Mirror the market honestly",
-    body: "Certificates are synthetic price exposure - no custody of shares, no dividends, no shareholder rights. Corporate actions follow the underlying market spec.",
+    body: IS_STACK5
+      ? "Certificates are synthetic price exposure - no custody of shares, no shareholder rights. Each tracks the Robinhood stock token: dividends are reflected in its price, not paid out, and splits are absorbed by the token's multiplier."
+      : "Certificates are synthetic price exposure - no custody of shares, no dividends, no shareholder rights. Corporate actions follow the underlying market spec.",
   },
 ];
 
@@ -774,7 +776,7 @@ export default function RiskView() {
           <ul className="mt-5 flex flex-col gap-4 text-[13px] leading-[1.55] text-white-60">
             <li>
               Certificates are <span className="text-white">synthetic</span>: price exposure backed by a perp position
-              and collateral margin - not custody of shares, no dividends, no shareholder rights.
+              {IS_STACK5 ? "and collateral margin - not custody of shares, no shareholder rights. Dividends are reflected in the price, never paid out." : "and collateral margin - not custody of shares, no dividends, no shareholder rights."}
             </li>
             <li>
               Solvency is <span className="text-white">not instantaneous</span>: margin and notional come from an

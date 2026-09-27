@@ -3,7 +3,7 @@ import Accordion from "@/components/Accordion";
 import type { AccordionRow } from "@/components/Accordion";
 import LetterReveal from "@/components/LetterReveal";
 import SwapButton from "@/components/SwapButton";
-import { HAS_CERT_TOKEN } from "@/chain/deployment";
+import { HAS_CERT_TOKEN, IS_STACK5 } from "@/chain/deployment";
 import { IS_TESTNET } from "@/chain/deployment";
 
 const EASE = [0.16, 1, 0.3, 1] as [number, number, number, number];
@@ -14,7 +14,9 @@ export const FAQ_ROWS: AccordionRow[] = [
     body: [
       IS_TESTNET
         ? "No. Certificates are synthetic: price exposure backed by perp positions and USDG margin on Robinhood Chain, not custody of shares. There are no dividends and no shareholder rights. What you get is the stock’s price, holdable as a plain token, redeemable at oracle price any time — in the same transaction below the vault’s instant cap, and queued and paid by claim above it."
-        : "No. Certificates are synthetic: price exposure backed by perp positions and USDG margin on Robinhood Chain, not custody of shares. There are no dividends and no shareholder rights. What you get is the stock’s price, holdable as a plain token, redeemable any time: the vault closes its hedge on chain at once, and the collateral comes back from the venue within minutes, paid by claim.",
+        : IS_STACK5
+          ? "No. Certificates are synthetic: price exposure backed by perp positions and USDG margin on Robinhood Chain, not custody of shares, with no shareholder rights. No dividend is paid out, but dividends are reflected in the price: each certificate tracks the Robinhood stock token for the same stock, which reinvests them, and UseCert funds that from its own buffer and fees because the hedge earns none. What you get is the stock’s total return, holdable as a plain token, redeemable any time: the vault closes its hedge on chain at once, and the collateral comes back from the venue within minutes, paid by claim."
+          : "No. Certificates are synthetic: price exposure backed by perp positions and USDG margin on Robinhood Chain, not custody of shares. There are no dividends and no shareholder rights. What you get is the stock’s price, holdable as a plain token, redeemable any time: the vault closes its hedge on chain at once, and the collateral comes back from the venue within minutes, paid by claim.",
     ],
   },
   {

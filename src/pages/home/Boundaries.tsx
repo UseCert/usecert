@@ -1,3 +1,4 @@
+import { IS_STACK5 } from "@/chain/deployment";
 import { motion } from "framer-motion";
 import Scribble from "@/components/Scribble";
 import { useReveal } from "@/i18n";
@@ -41,7 +42,7 @@ export default function Boundaries() {
               viewport={{ once: true, amount: 0.4 }}
               variants={{ hidden: {}, show: { transition: { staggerChildren: 0.02 } } }}
             >
-              {R("Certificates are synthetic, and we say that first. Backed by perp positions and USDG margin, not custody of shares. No dividends, no shareholder rights. The solvency dashboard is public and the stress parameters are published, because trust here should never require trusting us.")
+              {R(IS_STACK5 ? "Certificates are synthetic, and we say that first. Backed by perp positions and USDG margin, not custody of shares. No shareholder rights, and no dividend is paid out: dividends are reflected in the price, funded by UseCert, because each certificate tracks the Robinhood stock token. The solvency dashboard is public and the stress parameters are published, because trust here should never require trusting us." : "Certificates are synthetic, and we say that first. Backed by perp positions and USDG margin, not custody of shares. No dividends, no shareholder rights. The solvency dashboard is public and the stress parameters are published, because trust here should never require trusting us.")
                 .map((w, i) => (
                   <motion.span
                     key={i}

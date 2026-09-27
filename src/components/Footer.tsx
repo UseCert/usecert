@@ -2,7 +2,7 @@ import { Link } from "@/lib/router-compat";
 import { motion } from "framer-motion";
 import SwapButton from "./SwapButton";
 import { SOCIALS, XIcon, TelegramIcon } from "./SocialIcons";
-import { CHAIN_ID, CHAIN_LABEL, IS_TESTNET } from "@/chain/deployment";
+import { CHAIN_ID, CHAIN_LABEL, IS_TESTNET, IS_STACK5 } from "@/chain/deployment";
 
 const fadeUp = (delay: number) => ({
   initial: { opacity: 0, y: 24 },
@@ -93,8 +93,9 @@ export default function Footer() {
             </div>
             <SwapButton label="Launch App" to="/dashboard" variant="primary" fullWidth className="mt-3" />
             <p className="mt-6 font-mono text-[11px] leading-[1.5] uppercase tracking-[0.06em] text-white-60">
-              Certificates are synthetic. No dividends, no shareholder rights. Not available where synthetic equity
-              exposure is restricted. UseCert is infrastructure, not investment advice.
+              {IS_STACK5
+                ? "Certificates are synthetic. No shareholder rights, and no dividend is paid out: dividends are reflected in the price, because each certificate tracks the Robinhood stock token, which reinvests them. Not available where synthetic equity exposure is restricted. UseCert is infrastructure, not investment advice."
+                : "Certificates are synthetic. No dividends, no shareholder rights. Not available where synthetic equity exposure is restricted. UseCert is infrastructure, not investment advice."}
             </p>
           </motion.div>
         </div>

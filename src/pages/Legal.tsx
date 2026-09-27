@@ -1,3 +1,4 @@
+import { IS_STACK5 } from "@/chain/deployment";
 import { useLocation } from "@/lib/router-compat";
 import { motion } from "framer-motion";
 
@@ -11,7 +12,9 @@ interface LegalSection {
 }
 
 const PROTOCOL_DISCLAIMER =
-  "Certificates are synthetic instruments backed by on chain perp positions and USDG margin. No dividends, no shareholder rights. Not available where synthetic equity exposure is restricted. UseCert is infrastructure, not investment advice.";
+  IS_STACK5
+  ? "Certificates are synthetic instruments backed by on chain perp positions and USDG margin. No shareholder rights, and no dividend is paid out: dividends are reflected in the price. Not available where synthetic equity exposure is restricted. UseCert is infrastructure, not investment advice."
+  : "Certificates are synthetic instruments backed by on chain perp positions and USDG margin. No dividends, no shareholder rights. Not available where synthetic equity exposure is restricted. UseCert is infrastructure, not investment advice.";
 
 const CONTACT_LINE =
   "For any questions about this document, reach the team on X (x.com/use_cert) or Telegram (t.me/usecertonchain).";
@@ -77,7 +80,9 @@ const DOCS: Record<LegalDoc, { title: string; updated: string; sections: LegalSe
       {
         heading: "2. Certificates are not shares",
         paragraphs: [
-          "Certificates are synthetic instruments. They are backed by on chain perp positions and USDG margin, not by custody of shares. Certificates carry no dividends, no voting rights, and no shareholder rights of any kind, and grant no claim on any issuer, exchange, or company referenced by an underlying market.",
+          IS_STACK5
+            ? "Certificates are synthetic instruments. They are backed by on chain perp positions and USDG margin, not by custody of shares. Certificates carry no voting rights and no shareholder rights of any kind, and grant no claim on any issuer, exchange, or company referenced by an underlying market. No dividend is ever paid to holders. A certificate’s value tracks the Robinhood stock token for the same stock, whose price includes reinvested dividends; UseCert funds that part from its own buffer and fees, not from any issuer, and if they are not enough the shortfall is shown on the public solvency dashboard."
+            : "Certificates are synthetic instruments. They are backed by on chain perp positions and USDG margin, not by custody of shares. Certificates carry no dividends, no voting rights, and no shareholder rights of any kind, and grant no claim on any issuer, exchange, or company referenced by an underlying market.",
         ],
       },
       {
