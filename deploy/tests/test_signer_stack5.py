@@ -45,6 +45,7 @@ def signer(env, vaults=None):
     th = bytes.fromhex(V2["typehash"] if S.cfg.mark_v2 else V1["typehash"])
     dom = bytes.fromhex(V2["domain"] if S.cfg.mark_v2 else V1["domain"])
     S.oracle = {v["certOracle"]: (dom, th) for v in S.vaults}
+    S.token, S.feed = {}, {}
     S.events = []
     S.guard = s.NotionalGuard(S.cfg.jump_factor, S.cfg.lookback, lambda v, a, b: S.events_in(v, a, b))
     S.events_in = lambda v, a, b: False
@@ -64,7 +65,9 @@ class Capture:
 
 def chain(**kw):
     c = {"notional": 0, "oi": 5 * 10 ** 24, "batch": 12, "latest_at": 1790492300, "nonce": 7,
-         "mark_at": 1790492000, "feed_px18": 372560000000000000000}
+         "mark_at": 1790492000, "feed_px18": 372560000000000000000,
+         # option A reads (MULTIPLIER_CHECKS, on under STACK=5): TSLA's recorded multiplier is 1e18
+         "mult18": 10 ** 18, "ca_window": False, "token_paused": False}
     c.update(kw)
     return c
 

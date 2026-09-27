@@ -1,0 +1,8 @@
+{
+ "_note": "ERC-8056 reads of the Robinhood stock tokens on Robinhood Chain 4663, recorded 2026-09-27 at block 74190432 with cast call (read-only). SPY carries a dividend multiplier; TSLA none.",
+ "block": 74190432,
+ "tokens": {
+  "SPY": {"address": "0x117cc2133c37B721F49dE2A7a74833232B3B4C0C", "uiMultiplier": "1001717991187472003", "oraclePaused": false},
+  "TSLA": {"address": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d", "uiMultiplier": "1000000000000000000", "oraclePaused": false}
+ }
+}
