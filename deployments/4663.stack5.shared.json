@@ -5,8 +5,8 @@
   "commit": "9e059093976a0a6d332a57432b6faa844c36f9c3",
   "script": "script/DeployStack5Shared.s.sol",
   "deployer": "0x6381577a72266E6b89eE9E96dF604CC3cd3f8e92",
-  "audited": false,
-  "_auditNote": "Internal pre-audit fixes (docs/AUDIT-SCOPE-STACK5.md); NOT externally audited.",
+  "audited": true,
+  "_auditNote": "Audited by Sermium, an independent auditor (AI-assisted, time-boxed): report of 2026-09-28, revision 2, covering these contracts and the six stack-5 vaults, oracles, registry and capacity oracle. 0 Critical, 0 High, 3 Medium, 6 Low, 13 Info; the contract-level findings are carried to the next deployment. Venue integration and off-chain services were outside its scope. See docs/AUDIT-SCOPE-STACK5.md.",
   "solvencyRegistry": {
     "address": "0x548F20fb28528E89989c6836d4FB2cDDE229F311",
     "createdBy": "Safe batch 1a (nonce 2)",
