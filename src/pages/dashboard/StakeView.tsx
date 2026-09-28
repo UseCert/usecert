@@ -37,9 +37,9 @@ const days = (sec: bigint | undefined) => (sec === undefined ? "—" : `${Number
 type Draw = readonly [string, bigint, bigint, boolean, boolean];
 
 /**
- * STACK 5: InsuranceStaking v2 lives at its own address. It is shown only on a stack-5 bundle and
- * once that address is recorded in insurance.ts; every other build renders the v1 pool below,
- * unchanged. The choice is a module constant, so no hook is ever called conditionally.
+ * STACK 5: InsuranceStaking v2 lives at its own address. It is shown whenever that address is
+ * recorded in insurance.ts (the address alone decides, whatever the vault stack); v1 stays below,
+ * exit-only. The choice is a module constant, so no hook is ever called conditionally.
  */
 export default function StakeView() {
   // Staking v2 does not depend on the vault stack (it went live before the stack-5 vaults), so it

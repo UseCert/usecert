@@ -1,5 +1,5 @@
 // GENERATED from Foundry artifacts - do not hand-edit.
-// Stack-5 ABIs ONLY (no addresses: stack 5 is not deployed). Every Stack5* export is used only
+// Stack-5 ABIs ONLY (no addresses: those live in the address files). Every Stack5* export is used only
 // where IS_STACK5 (src/chain/deployment.ts) is true; on a stack-4 bundle their reads are disabled
 // and their writes unreachable. Stack4MarkRelayABI, at the end, is the stack-4 relay's own.
 //

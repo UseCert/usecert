@@ -13,12 +13,12 @@ import { MicroLabel, Panel, Stagger } from "./ui";
 import { cn } from "@/lib/utils";
 
 /**
- * CERT staking, STACK 5: CertStaking v2. Rendered by CertStakePanel only on a stack-5 bundle AND
- * once the v2 address is recorded in certStaking.ts; every other build shows v1.
+ * CERT staking, STACK 5: CertStaking v2. Rendered by CertStakePanel whenever the v2 address is
+ * recorded in certStaking.ts (the address alone decides); v1 stays reachable for its stakers to leave.
  *
  * What v2 changes on this screen:
- *  - `notifyRewardAmount` refuses a funding below `minNotify()` (CertStaking_BelowMinNotify), so
- *    the funding form reads the minimum and will not send less;
+ *  - no funding form: the staking v2 review (M-01) showed a large funding late in a period is
+ *    captured by whoever stakes just before it; rewards arrive through the hourly-pushed forwarder;
  *  - `exit()` with nothing staked just claims, so it is offered whenever there is a stake OR a
  *    reward, as one transaction;
  *  - `unallocated()` is a view that includes any stretch nobody was staked for.
@@ -40,7 +40,6 @@ export default function CertStakePanelV2({ pool, deployTx }: { pool: `0x${string
   const publicClient = usePublicClient({ chainId: CHAIN_ID });
   const { mutateAsync } = useWriteContract();
   const [amount, setAmount] = useState("");
-  const [fund, setFund] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<{ tone: "ok" | "warn"; text: string } | null>(null);
 
@@ -81,13 +80,6 @@ export default function CertStakePanelV2({ pool, deployTx }: { pool: `0x${string
       return -1n;
     }
   }, [amount]);
-  const fund6 = useMemo(() => {
-    try {
-      return fund.trim() === "" ? 0n : parseUnits(fund.trim(), 6);
-    } catch {
-      return -1n;
-    }
-  }, [fund]);
 
   const send = useCallback(
     async (label: string, request: Parameters<typeof mutateAsync>[0]) => {
@@ -123,22 +115,10 @@ export default function CertStakePanelV2({ pool, deployTx }: { pool: `0x${string
   const onWithdraw = () => mine && send("Withdraw all staked CERT", { ...POOL, functionName: "withdraw", args: [mine] });
   const onClaim = () => send("Claim USDG reward", { ...POOL, functionName: "getReward" });
   const onExit = () => send("Withdraw all and claim", { ...POOL, functionName: "exit" });
-  const onFund = async () => {
-    // The contract refuses less than minNotify; the button is disabled below it, and this is the
-    // same check again so a stale render cannot send a funding that can only revert.
-    if (fund6 <= 0n || minNotify === undefined || fund6 < minNotify) return;
-    if ((usdgAllowance ?? 0n) < fund6) {
-      if (!(await send("Approve USDG for the reward stream", { ...USDG, functionName: "approve", args: [pool, fund6] }))) return;
-    }
-    if (await send(`Fund ${fund} USDG of rewards`, { ...POOL, functionName: "notifyRewardAmount", args: [fund6] })) setFund("");
-  };
 
   const gate = !connected ? "connect" : wrongNetwork ? "network" : null;
   const room = cap !== undefined && total !== undefined ? (cap > total ? cap - total : 0n) : undefined;
   const stakeBlocked = gate !== null || amount18 <= 0n || (room !== undefined && amount18 > room) || (wallet !== undefined && amount18 > wallet);
-  const belowMin = fund6 > 0n && minNotify !== undefined && fund6 < minNotify;
-  const fundBlocked =
-    gate !== null || fund6 <= 0n || minNotify === undefined || fund6 < minNotify || (usdgWallet !== undefined && fund6 > usdgWallet);
   const canExit = (mine ?? 0n) > 0n || (earned ?? 0n) > 0n;
 
   const Btn = ({ label, onClick, disabled, id }: { label: string; onClick: () => void; disabled?: boolean; id: string }) => (
@@ -226,27 +206,9 @@ export default function CertStakePanelV2({ pool, deployTx }: { pool: `0x${string
 
       <Stagger index={15}>
         <Panel className="mt-3 p-5">
-          <MicroLabel>Fund the reward stream</MicroLabel>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <input
-              value={fund}
-              onChange={(e) => setFund(e.target.value.replace(/[^\d.]/g, ""))}
-              inputMode="decimal"
-              placeholder="USDG"
-              className="min-w-0 flex-1 border hairline-dark bg-[#0d0f0d] px-3 py-2 font-mono text-[12px] tabular-nums text-white outline-none placeholder:text-white-60/40 focus:border-green-bright"
-            />
-            {gate === null && (
-              <Btn
-                id={`Fund ${fund} USDG of rewards`}
-                label={(usdgAllowance ?? 0n) < fund6 && fund6 > 0n ? "Approve & fund" : "Fund"}
-                onClick={() => void onFund()}
-                disabled={fundBlocked}
-              />
-            )}
-          </div>
-          <p className={cn("mt-2 font-mono text-[10px] uppercase leading-[1.6] tracking-[0.06em]", belowMin ? "text-warn" : "text-white-60/80")}>
-            {`Minimum funding ${usd(minNotify)} USDG; the contract refuses less. `}
-            Anyone can pay rewards in. A funding during a running stream is spread over the time left and never moves its end.
+          <MicroLabel>How rewards arrive</MicroLabel>
+          <p className="mt-3 max-w-[90ch] font-mono text-[11px] leading-[1.7] text-silver">
+            {`The buyback fund's share of the fees reaches this pool through the forwarder, which UseCert pushes every hour, so no large payment builds up for one moment. A funding during a running stream is spread over the time left and never moves its end; the contract refuses one below ${usd(minNotify)} USDG.`}
           </p>
         </Panel>
       </Stagger>
@@ -261,7 +223,7 @@ export default function CertStakePanelV2({ pool, deployTx }: { pool: `0x${string
             and anyone can add to it. No annual rate is shown, because it would be a forecast, not a fact. There are no token
             emissions. Reward funded while nobody is staked is not lost: it is carried into the next stream
             {unallocated !== undefined && unallocated > 0n ? ` (${usd(unallocated, 4)} USDG carried now)` : ""}.
-            {IS_STACK5 ? "" : " The vaults that pay these fees are opening now; until they do, income is zero."}
+            {IS_STACK5 ? "" : " The six vaults that pay these fees are deployed and registered but take no mints yet; until they do, income is zero."}
           </p>
         </Panel>
       </Stagger>

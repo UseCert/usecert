@@ -29,6 +29,8 @@ import CertStakePanel from "./CertStakePanel";
  */
 const USDG = { address: SHARED.collateral, abi: TestUSDGABI, chainId: CHAIN_ID } as const;
 const ZERO = "0x0000000000000000000000000000000000000000" as const;
+/** OZ ERC4626 virtual shares: 10 ** _decimalsOffset(), the offset being 6 (12-decimal shares over 6-decimal USDG). */
+const VIRTUAL_SHARES = 1_000_000n;
 
 const usd = (v: bigint | undefined, dp = 2) =>
   v === undefined ? "—" : Number(formatUnits(v, 6)).toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp });
@@ -46,6 +48,7 @@ export default function StakeViewV2({ pool, deployTx }: { pool: `0x${string}`; d
   const publicClient = usePublicClient({ chainId: CHAIN_ID });
   const { mutateAsync } = useWriteContract();
   const [amount, setAmount] = useState("");
+  const [reqAmt, setReqAmt] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<{ tone: "ok" | "warn"; text: string } | null>(null);
 
@@ -95,9 +98,28 @@ export default function StakeViewV2({ pool, deployTx }: { pool: `0x${string}`; d
   // Escrowed shares are held by the pool, not the wallet, and still belong to the staker.
   const escrowed = req?.[0] ?? 0n;
   const ownShares = walletShares === undefined ? undefined : walletShares + escrowed;
+  // The contract's own conversion (OZ ERC4626 with a 6-decimal virtual offset), not a plain ratio:
+  // assets = shares * (totalAssets + 1) / (totalSupply + 1e6), floored. Staking v2 review I-07.
   const assetsOf = (sh: bigint | undefined): bigint | undefined =>
-    sh !== undefined && totalSupply && totalAssets !== undefined && totalSupply > 0n ? (sh * totalAssets) / totalSupply : sh === 0n ? 0n : undefined;
+    sh === undefined || totalAssets === undefined || totalSupply === undefined ? undefined : (sh * (totalAssets + 1n)) / (totalSupply + VIRTUAL_SHARES);
+  const sharesOf = (a: bigint): bigint | undefined =>
+    totalAssets === undefined || totalSupply === undefined ? undefined : (a * (totalSupply + VIRTUAL_SHARES)) / (totalAssets + 1n);
   const myValue = assetsOf(ownShares);
+  // A partial request (I-07): an amount of USDG, converted to shares and capped at what the staker
+  // holds. Empty means every share, as before.
+  const reqAssets6 = useMemo(() => {
+    try {
+      return reqAmt.trim() === "" ? 0n : parseUnits(reqAmt.trim(), 6);
+    } catch {
+      return -1n;
+    }
+  }, [reqAmt]);
+  const reqShares = (() => {
+    if (ownShares === undefined || reqAssets6 < 0n) return undefined;
+    if (reqAssets6 === 0n) return ownShares;
+    const s = sharesOf(reqAssets6);
+    return s === undefined ? undefined : s > ownShares ? ownShares : s;
+  })();
   const amount6 = useMemo(() => {
     try {
       return amount.trim() === "" ? 0n : parseUnits(amount.trim(), 6);
@@ -146,9 +168,11 @@ export default function StakeViewV2({ pool, deployTx }: { pool: `0x${string}`; d
     }
     if (await confirmed(`Deposit ${amount} USDG`, { ...POOL, functionName: "deposit", args: [amount6, address] })) setAmount("");
   };
-  /** Escrows every share: those in the wallet plus any already in a request (a new request replaces it). */
-  const onRequest = () =>
-    ownShares && ownShares > 0n && confirmed("Request withdrawal", { ...POOL, functionName: "requestWithdraw", args: [ownShares] });
+  /** Escrows `reqShares` (every share when the amount is empty). A new request replaces the old one. */
+  const onRequest = async () => {
+    if (!reqShares || reqShares <= 0n) return;
+    if (await confirmed("Request withdrawal", { ...POOL, functionName: "requestWithdraw", args: [reqShares] })) setReqAmt("");
+  };
   const onCancel = () => confirmed("Cancel withdrawal request", { ...POOL, functionName: "cancelWithdraw" });
   const onReclaim = () => confirmed("Reclaim escrowed shares", { ...POOL, functionName: "cancelWithdraw" });
   const onRedeem = () =>
@@ -250,8 +274,22 @@ export default function StakeViewV2({ pool, deployTx }: { pool: `0x${string}`; d
                 `Your window closed ${when(closesAt)} without a withdrawal. Your ${sharesFmt(escrowed)} shares are still in escrow: reclaim them to your wallet, or request again to restart the cooldown.`}
             </p>
             <div className="mt-3 flex flex-wrap gap-2">
+              {(reqState === "none" || reqState === "expired") && (
+                <input
+                  value={reqAmt}
+                  onChange={(e) => setReqAmt(e.target.value.replace(/[^\d.]/g, ""))}
+                  inputMode="decimal"
+                  placeholder="USDG, empty = all"
+                  className="min-w-0 flex-1 border hairline-dark bg-[#0d0f0d] px-3 py-2 font-mono text-[12px] tabular-nums text-white outline-none placeholder:text-white-60/40 focus:border-green-bright"
+                />
+              )}
               {reqState === "none" && (
-                <Btn id="Request withdrawal" label="Request withdrawal (all shares)" onClick={() => void onRequest()} disabled={gate !== null || !ownShares} />
+                <Btn
+                  id="Request withdrawal"
+                  label={reqAmt.trim() === "" ? "Request withdrawal (all shares)" : "Request withdrawal"}
+                  onClick={() => void onRequest()}
+                  disabled={gate !== null || !reqShares}
+                />
               )}
               {(reqState === "cooling" || reqState === "open") && <Btn id="Cancel withdrawal request" label="Cancel request" onClick={() => void onCancel()} disabled={gate !== null} />}
               {reqState === "open" && (
@@ -260,7 +298,7 @@ export default function StakeViewV2({ pool, deployTx }: { pool: `0x${string}`; d
               {reqState === "expired" && (
                 <>
                   <Btn id="Reclaim escrowed shares" label="Reclaim shares" onClick={() => void onReclaim()} disabled={gate !== null} />
-                  <Btn id="Request withdrawal" label="Request again" onClick={() => void onRequest()} disabled={gate !== null || !ownShares} />
+                  <Btn id="Request withdrawal" label="Request again" onClick={() => void onRequest()} disabled={gate !== null || !reqShares} />
                 </>
               )}
             </div>
@@ -295,7 +333,7 @@ export default function StakeViewV2({ pool, deployTx }: { pool: `0x${string}`; d
             The pool&apos;s income is its 70% share of the vaults&apos; fees, paid in through the fee vault. Income vests over 7
             days before it counts in the value per share, so nobody can deposit just before a payment and leave with it. There
             are no token emissions. The pool&apos;s return is only real income, minus any draw.
-            {IS_STACK5 ? "" : " The vaults that pay these fees are opening now; until they do, income is zero."}
+            {IS_STACK5 ? "" : " The six vaults that pay these fees are deployed and registered but take no mints yet; until they do, income is zero."}
           </p>
           <p className="mt-3 font-mono text-[11px] leading-[1.6] text-silver">
             {unvested === undefined
