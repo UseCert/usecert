@@ -1435,6 +1435,8 @@
   "part-paid · {#} USDG paid, up to {#} USDG outstanding": "部分已付 · 已付 {0} USDG，最多仍欠 {1} USDG",
   "waiting for a fresh price · pays in full from {#}-{#}-{#} {#}:{#} UTC at the latest": "等待新的价格 · 最迟于 {0}-{1}-{2} {3}:{4} UTC 起全额支付",
   "unaudited · principal capped at {#} USDG": "未经审计 · 本金上限 {0} USDG",
+  "audited by Sermium, {#} Sep {#} · capped at {#} CERT": "经 Sermium 审计（{1}年9月{0}日）· 上限 {2} CERT",
+  "audited by Sermium, {#} Sep {#} · principal capped at {#} USDG": "经 Sermium 审计（{1}年9月{0}日）· 本金上限 {2} USDG",
   "principal {#} of {#} USDG · room {#} USDG": "本金 {0} / {1} USDG · 剩余 {2} USDG",
   "{#} shares in wallet · {#} in escrow": "钱包中 {0} 份额 · 托管中 {1} 份额",
   "Room under the cap: {#} USDG. The cap counts deposited principal only; income never uses it up.": "上限内剩余额度：{0} USDG。上限只计算存入的本金；收入永远不会占用额度。",

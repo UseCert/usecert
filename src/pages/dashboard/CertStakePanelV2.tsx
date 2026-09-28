@@ -151,7 +151,7 @@ export default function CertStakePanelV2({ pool, deployTx }: { pool: `0x${string
         </div>
         <p className="flex flex-wrap gap-2 font-mono text-[10px] uppercase tracking-[0.08em]">
           <span className="border border-green-bright/40 px-2 py-1 text-green-bright">live on mainnet</span>
-          <span className="border border-warn/40 px-2 py-1 text-warn">{`unaudited · capped at ${cert(cap, 0)} CERT`}</span>
+          <span className="border hairline-dark px-2 py-1 text-silver">{`audited by Sermium, 28 Sep 2026 · capped at ${cert(cap, 0)} CERT`}</span>
         </p>
       </div>
       <p className="mt-5 max-w-[82ch] text-[14px] leading-[1.6] text-silver">
