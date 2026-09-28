@@ -2146,7 +2146,18 @@ def cmd_keeper_configs(ctx):
     for v in book["vaults"]:
         sym = v["symbol"]
         start, fts, how = int(book["blockNumber"]), int(book.get("timestamp", 0)), "the book's block (a lower bound)"
+        # On an Arbitrum-style chain the book's blockNumber is block.number as the CONTRACT saw it,
+        # i.e. the L1 block: tens of millions below the L2 blocks the keeper scans. S5_START_BLOCK
+        # gives the L2 lower bound from the deploy's own receipts (their first block).
+        if os.environ.get("S5_START_BLOCK"):
+            start = int(os.environ["S5_START_BLOCK"])
+            if not 0 < start <= latest:
+                raise Refuse("S5_START_BLOCK %d is not in (0, latest %d]" % (start, latest))
+            _, fts = chain.block(start)
+            how = "S5_START_BLOCK (the deploy's first receipt block)"
         try:
+            if os.environ.get("S5_START_BLOCK"):
+                raise RuntimeError("skipped: S5_START_BLOCK given")
             b = find_deploy_block(lambda n: chain.has_code(v["vault"], n), int(book["blockNumber"]), latest)
             # A pruned node answers old eth_getCode with nothing and the search would stop at its
             # horizon: accept the block only if the deployer sent a transaction in it.
