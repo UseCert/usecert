@@ -632,3 +632,16 @@ withdrawal (window from 2026-10-06 15:18 UTC) is unaffected.
    signer `--once` bundle so the round trip can run before T3.
 6. **`auto_recall` for the stack-5 keepers** is copied from `s4-uTSLA.json`. Stack 5 caps recalls
    at the attested margin. Confirm that the stack-4 value is wanted.
+
+## Insurance draws: when the Safe may propose one
+
+`proposeDraw` checks eligibility and the cap but not that the vault reports a shortfall, and every
+proposal pauses deposits and exits for 5 days (2-day delay + 3-day execution window), executable or
+not (staking v2 review L-03). So:
+
+- Propose only against a vault whose `insuranceShortfall()` is non-zero, confirmed after a fresh
+  attestation, and for no more than that figure. The health job alerts the moment one appears.
+- Once executable, execute it from our side straight away rather than leaving the timing to anyone
+  (`executeDraw` is permissionless and pays min(proposal, shortfall at that moment)).
+- A proposal that turns out not to be payable (no shortfall at execution, or the vault's
+  `receiveInsurance` reverts) is cancelled at once, so exits do not stay paused for nothing.
