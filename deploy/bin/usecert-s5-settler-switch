@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""France (root): point the six stack-5 keepers at the remote settler on Montreal, or back.
+
+    usecert-s5-settler-switch --check      what would change; nothing written
+    usecert-s5-settler-switch --apply      rewrite the configs (backups kept), restart running keepers,
+                                           and confirm each one logged "settler: remote"
+    usecert-s5-settler-switch --rollback   restore the backups and restart
+
+The local settler key file is NOT deleted here: that is a separate, deliberate step once the remote
+settler has settled a real mint (prove one before many).
+"""
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+CONFIGS = "/opt/keeper/vaults/s5-*.json"
+REMOTE = {"settler_remote": "settle-intake@148.113.237.230",
+          "settler_ssh_key": "/opt/keeper/keys/settle_ed25519",
+          "settler_known_hosts": "/opt/keeper/keys/settle_known_hosts"}
+
+
+def unit(path):
+    return "usecert-keeper@%s.service" % os.path.basename(path)[:-5]
+
+
+def active(u):
+    return subprocess.run(["systemctl", "is-active", u], capture_output=True, text=True).stdout.strip() == "active"
+
+
+def restart_and_confirm(paths, want):
+    bad = []
+    for p in paths:
+        u = unit(p)
+        if not active(u):
+            print("   idle   %s is not running: it reads the new config when it starts" % u)
+            continue
+        since = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        subprocess.run(["systemctl", "restart", u], check=True)
+        for _ in range(30):
+            time.sleep(2)
+            j = subprocess.run(["journalctl", "-u", u, "--since", since, "--utc", "--no-pager", "-o", "cat"],
+                               capture_output=True, text=True).stdout
+            if want in j:
+                print("   ok     %s: %s" % (u, next(l for l in j.splitlines() if want in l)[:120]))
+                break
+        else:
+            bad.append(u)
+            print("   FAIL   %s did not log %r within 60 s" % (u, want))
+    return bad
+
+
+def main():
+    mode = (sys.argv[1:] or ["--check"])[0]
+    paths = sorted(glob.glob(CONFIGS))
+    if len(paths) != 6:
+        sys.exit("found %d stack-5 keeper configs, expected 6" % len(paths))
+    for k in ("settler_ssh_key", "settler_known_hosts"):
+        if not os.path.exists(REMOTE[k]):
+            sys.exit("%s is missing" % REMOTE[k])
+    if mode == "--rollback":
+        for p in paths:
+            if os.path.exists(p + ".local-settler"):
+                shutil.copy2(p + ".local-settler", p)
+                print("   restored %s" % p)
+        return 1 if restart_and_confirm(paths, "settler") else 0
+    for p in paths:
+        c = json.load(open(p))
+        new = {k: v for k, v in c.items() if k not in ("settler_key_file", "settler_pk")}
+        new.update(REMOTE)
+        print("   %s  %s -> remote %s" % (os.path.basename(p), c.get("settler_key_file", "(no local key)"), REMOTE["settler_remote"]))
+        if mode == "--apply" and new != c:
+            if not os.path.exists(p + ".local-settler"):
+                shutil.copy2(p, p + ".local-settler")
+            tmp = p + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(new, f, indent=1)
+            shutil.copystat(p, tmp)
+            st = os.stat(p)
+            os.chown(tmp, st.st_uid, st.st_gid)
+            os.replace(tmp, p)
+    if mode != "--apply":
+        print("\n   --check: nothing written")
+        return 0
+    return 1 if restart_and_confirm(paths, "settler: remote") else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
