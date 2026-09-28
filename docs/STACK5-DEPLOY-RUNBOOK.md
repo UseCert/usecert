@@ -647,3 +647,27 @@ not (staking v2 review L-03). So:
   (`executeDraw` is permissionless and pays min(proposal, shortfall at that moment)).
 - A proposal that turns out not to be payable (no shortfall at execution, or the vault's
   `receiveInsurance` reverts) is cancelled at once, so exits do not stay paused for nothing.
+
+## Key separation (Sermium M-03)
+
+France keeps the six venue API keys: orders must be placed from a location the venue permits, and
+Montreal (Canada) is not one. The settler and, next, the attester move to Montreal, which only
+reads the venue's public data and sends chain transactions.
+
+**Settler (staged 2026-09-28, switched on after the first uTSLA round trip):**
+- Montreal: `usecert-settler-remote serve` (unit `usecert-settler-remote`, user `usecert`) holds
+  the key (`/etc/usecert/settler-remote.env`, root 600, derives 0x29f9…d500). Before `settleMint`
+  it reads the receipt from chain and the vault's position from the venue's public account
+  endpoint, and refuses unless the position covers every certificate after the settle; plus the
+  settle band, a daily budget and a rate limit. Log: `/var/log/usecert-settler-remote.log`.
+- The link: France's `keeper` key `/opt/keeper/keys/settle_ed25519` may run only
+  `usecert-settler-remote intake` as `settle-intake` on Montreal, only from France's IP; the host
+  key is pinned in `/opt/keeper/keys/settle_known_hosts`.
+- Switch: `sudo usecert-s5-settler-switch --check`, then `--apply` (rewrites the six keeper configs,
+  backups `*.local-settler`, restarts running keepers, confirms "settler: remote"); `--rollback`
+  restores. Then, with the owner's go, delete `/opt/keeper/keys/s5-settler.key` on France.
+
+**Attester (next):** move the signer to Montreal (public venue reads) behind France's nginx over
+an authenticated link, and split the funding relay: France reads the authenticated funding
+records, Montreal cross-checks them against public funding rates and position sizes, bounds the
+delta (Sermium L-06) and sends `accrueFunding`.
