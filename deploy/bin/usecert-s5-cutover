@@ -2032,10 +2032,13 @@ def cmd_exec_safe(ctx):
     if not addr_eq(derived, dep["MAINNET_DEPLOYER_ADDR"]):
         raise Refuse("the deployer key does not derive MAINNET_DEPLOYER_ADDR")
 
-    step("anvil fork (--hardfork shanghai): execTransaction with these signatures, then the read-back")
+    # cancun, not shanghai: Lighter's changePubKey (phase B's setVenueApiKey) uses a Cancun opcode and
+    # dies with NotActivated under shanghai. One mined block first gives the fork the blob-gas fields
+    # a cancun anvil wants ("Excess blob gas not set" otherwise).
+    step("anvil fork (--hardfork cancun): execTransaction with these signatures, then the read-back")
     port = free_port()
     fork_url = "http://127.0.0.1:%d" % port
-    anvil = subprocess.Popen(["%s/anvil" % M_FOUNDRY, "--fork-url", ctx.args.rpc or RPC, "--hardfork", "shanghai",
+    anvil = subprocess.Popen(["%s/anvil" % M_FOUNDRY, "--fork-url", ctx.args.rpc or RPC, "--hardfork", "cancun",
                               "--port", str(port), "--auto-impersonate", "--silent"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -2048,6 +2051,7 @@ def cmd_exec_safe(ctx):
                 time.sleep(0.5)
         else:
             raise Refuse("anvil did not come up on %s" % fork_url)
+        fork.req("evm_mine", [])
         if v_uint(fork, safe, "nonce") != nonce:
             raise Refuse("the fork's Safe nonce is not %d" % nonce)
         frec = cast_send_json(ctx, ["%s/cast" % M_FOUNDRY, "send", safe, "--data", cd, "--from", dep["MAINNET_DEPLOYER_ADDR"],
