@@ -588,6 +588,8 @@ Kit: `usecert-s5-cutover site-build`, `usecert-deploy-web`, then `signer-cutover
 4. From here the batch builders need `STACK5_BOOK=deployments/4663.json` and
    `STACK4_BOOK=deployments/history/4663.5-...json`.
 
+- **Audit copy at cutover.** Once the site runs stack 5, "the insurance pool" means InsuranceStaking v2. The shared pages that call it *unaudited* (RiskView's junior-tranche lines, Faq, learn/data.ts, RolesAccordion, TokenFlow) must then say it is audited by Sermium (28 Sep 2026), with Chinese entries; the v1 labels (StakeView, CertStakePanel, the Contracts page's v1 rows) stay *unaudited*. The v2 panels already say so.
+
 ## 14. Stack-4 wind-down
 
 **Vaults.** The stack-4 vaults are empty today. Once stack 5 is live and the front end no longer

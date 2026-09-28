@@ -1,4 +1,4 @@
-# UseCert stack 5 — external audit scope
+# UseCert stack 5 — audit record and scope
 
 Prepared 2026-09-27. **Stack 5 is the code an audit should cover**: it is what will be deployed
 next. Stack 4 (live, `docs/AUDIT-SCOPE.md`) is immutable, and every fix below lives only in
@@ -13,28 +13,31 @@ stack 5.
 | Largest contract | CertVault, 24,139 B runtime (EIP-170 limit 24,576) |
 | What changed vs stack 4 | 9 source files changed, +1,815 / −211 lines (`git diff a057c8b feat/stack5 -- src/`) |
 
-## Status: no external audit before launch (owner decision, 2026-09-28)
+## Status: audited by Sermium (2026-09-28)
 
-The owner has decided that stack 5 launches without a full external audit. The staking side has
-been reviewed twice, and the owner accepts those reviews as the launch gate for it:
+Stack 5 was audited by **Sermium**, an independent auditor working with AI assistance, in a
+time-boxed review (report of 2026-09-28, revision 2). The owner accepts it as the audit of record.
 
 | Review | By | Scope | Result |
 |---|---|---|---|
-| Staking V2 Security Review, 2026-09-28 | an **independent auditor, AI-assisted**, single reviewer | CertStaking v2 and InsuranceStaking v2 as deployed (Sourcify exact match), with their fee routing (FeeVault, BuybackForwarder) and CertVault's insurance hooks only | 0 Critical, 0 High, 1 Medium, 4 Low, 7 Info |
-| Internal staking v2 review, 2026-09-28 | the AI assistant that helped write the stack-5 fixes (not independent) | the same two contracts at 9e05909 | 0 Critical, 0 High, 3 Medium, 4 Low, 6 Info |
+| UseCert Staking V2 & Stack 5 Security Review, rev. 2, 2026-09-28 | **Sermium**, independent, AI-assisted | CertStaking v2, InsuranceStaking v2, FeeVault, BuybackForwarder; the six stack-5 CertVaults in full, their CertOracles, SolvencyRegistry, CapacityOracle, BufferBooks and Certificates; the public signer endpoint; the staking front-end. Sourcify exact-match sources, 22 Foundry tests | 0 Critical, 0 High, 3 Medium, 6 Low, 13 Info |
+| Internal staking v2 review, 2026-09-28 | the AI assistant that helped write the stack-5 fixes (not independent) | CertStaking v2 and InsuranceStaking v2 at 9e05909 | 0 Critical, 0 High, 3 Medium, 4 Low, 6 Info |
 
-Neither found a way to take principal out of either pool; the Medium and Low findings concern who
-ends up with fees or losses. The mitigations that need no redeploy are live: an hourly fee push, no
-fee paid into an empty insurance pool, an alert on any insurance shortfall, the draw-proposal rule
-in the runbook, and the front-end fixes. The findings that need a contract change are carried to
-the next staking deployment.
+Neither found a way to take principal; `forceExit` survived every failure Sermium simulated.
 
-**Not reviewed by anyone outside the team:** CertVault (beyond the insurance hooks), CertOracle,
-SolvencyRegistry, BufferBook, CapacityOracle, CertFactory's other paths and the off-chain services.
-They carry the internal pre-audit fixes described below, and the deployment records keep
-`"audited": false` for stack 5.
+**Acted on without a redeploy:** an hourly fee push and no fee paid into an empty insurance pool
+(M-01, L-02), alerts on any insurance shortfall, the draw-proposal rule in the runbook (L-03), the
+funding relay's heartbeat so fees can be swept (I-08), the stack-5 side signer (I-09), and the
+staking front-end fixes (I-06, I-07).
 
-This document remains the scope for an external review of the rest whenever one is commissioned.
+**Open, and carried to the next deployment:** M-01 (stream every funding over the full period),
+M-02 (haircut or delay queued exits priced at the fallback price), L-01, L-03, L-05 (ring-fence mint
+escrow in `claimRedeem`), L-06 (bound `accrueFunding`), I-11 (delay on CapacityOracle increases).
+**Operational, before caps are raised beyond the first uTSLA round trip:** M-03 (separate the
+settler, venue API key and attester operators, and run a public hedge-divergence watcher).
+
+**Outside the audit's scope:** the Lighter venue's own behaviour and the off-chain services' code
+(signer, keepers, settler, funding relay). Sermium recommends a second review focused on those.
 
 ## Contracts
 
