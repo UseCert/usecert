@@ -123,5 +123,72 @@ class Stack5(unittest.TestCase):
             K._key("settleMint")
 
 
+def remote_keeper(env, answers, settler_onchain=SETTLER_ADDR):
+    """A stack-5 keeper whose sends go to a stubbed remote settler; the REAL _cast is kept for
+    sends, so the routing branch itself is what is tested. Chain reads stay stubbed."""
+    K = k.Keeper.__new__(k.Keeper)
+    K.vault, K.rpc, K.cast, K.stack = "0xV", "rpc", "cast", 5
+    K.settle_window, K.state, K._save = 3600, {"receipts": {}, "last_recall": 0}, lambda: None
+    K.requests, K.local = [], []
+    real = k.Keeper._cast.__get__(K)
+
+    def remote(req):
+        K.requests.append(req)
+        return answers.pop(0) if answers else '{"status": 0, "reason": "no stub answer"}'
+    K._remote = remote
+
+    def cast(*a):
+        if a[0] == "send":
+            return real(*a)
+        if a[0] == "call" and a[2].startswith("settler"):
+            return settler_onchain + "\n"
+        K.local.append(a)
+        return "status 1 (success)\ntransactionHash 0xlocal\n"
+    K._cast = cast
+    K._load_keys({}, env)
+    return K
+
+
+class RemoteSettler(unittest.TestCase):
+    """Sermium M-03: with KEEPER_SETTLER_REMOTE the keeper holds no settler key; every send goes
+    to the remote settler, which checks it and signs it."""
+    ENV = {"KEEPER_SETTLER_REMOTE": "settle@montreal", "KEEPER_SETTLER_SSH_KEY": "/k"}
+    WHO = '{"status": 1, "settler": "%s"}' % SETTLER_ADDR
+
+    def test_sends_go_remote_and_no_key_is_loaded(self):
+        env = dict(self.ENV, KEEPER_ATTESTER_PK=ATT)
+        K = remote_keeper(env, [self.WHO, '{"status": 1, "tx": "0xfeed"}'])
+        self.assertIsNone(K.settler_pk)
+        self.assertIsNone(K.attester_pk)
+        self.assertNotIn("KEEPER_ATTESTER_PK", env)
+        self.assertEqual(K.settle(7, 10 ** 18), "0xfeed")
+        self.assertEqual(K.requests[1], {"vault": "0xV", "sig": "settleMint(uint256,uint256)", "args": ["7", str(10 ** 18)]})
+        self.assertEqual([a for a in K.local if a[0] == "send"], [])          # nothing signed here
+
+    def test_a_refusal_is_a_failed_send(self):
+        K = remote_keeper(dict(self.ENV), [self.WHO, '{"status": 0, "reason": "hedge first"}'])
+        with self.assertRaises(RuntimeError):
+            K.settle(7, 10 ** 18)
+
+    def test_permissionless_sends_go_remote_too(self):
+        K = remote_keeper(dict(self.ENV), [self.WHO] + ['{"status": 1, "tx": "0x1"}'] * 3)
+        out = K._cast("send", K.vault, "stageRefund(uint256)", "8", "--gas-limit", "1500000",
+                      "--private-key", K._key("stageRefund"), "--rpc-url", K.rpc)
+        self.assertIn("status 1", out)
+        self.assertEqual(K.requests[1]["args"], ["8"])                        # flags never forwarded
+
+    def test_local_key_and_remote_refused_together(self):
+        with self.assertRaises(SystemExit):
+            remote_keeper(dict(self.ENV, KEEPER_SETTLER_PK=SET), [self.WHO])
+
+    def test_remote_needs_its_ssh_key(self):
+        with self.assertRaises(SystemExit):
+            remote_keeper({"KEEPER_SETTLER_REMOTE": "settle@montreal"}, [self.WHO])
+
+    def test_remote_must_be_the_vaults_settler(self):
+        with self.assertRaises(SystemExit):
+            remote_keeper(dict(self.ENV), [self.WHO], settler_onchain="0x" + "ee" * 20)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

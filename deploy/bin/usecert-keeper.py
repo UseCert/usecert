@@ -194,6 +194,27 @@ class Keeper:
                 log("a settler key is configured but this is a stack-4 keeper: ignored "
                     "(the stack-4 vault settles only from the attester)")
             return
+        # REMOTE SETTLER (Sermium M-03): the settler key lives on another host, which checks each
+        # request against its own chain and venue reads before sending it. This host then holds
+        # no key that can mint: every send goes through _cast's "send" branch to that host.
+        self.settler_remote = c.get("settler_remote") or env.get("KEEPER_SETTLER_REMOTE")
+        self.settler_ssh_key = c.get("settler_ssh_key") or env.get("KEEPER_SETTLER_SSH_KEY")
+        if self.settler_remote:
+            if c.get("settler_pk") or env.get("KEEPER_SETTLER_PK") or c.get("settler_key_file") \
+                    or env.get("KEEPER_SETTLER_KEY_FILE"):
+                raise SystemExit("stack 5: a remote settler AND a local settler key; keep the key off this host")
+            if not self.settler_ssh_key:
+                raise SystemExit("stack 5: KEEPER_SETTLER_REMOTE needs KEEPER_SETTLER_SSH_KEY")
+            env.pop("KEEPER_ATTESTER_PK", None)
+            self.settler_pk, self.attester_pk = None, None
+            have = (json.loads(self._remote({"action": "whoami"})).get("settler") or "").lower()
+            getter = c.get("settler_getter", "settler()(address)")
+            if getter:
+                want = self._cast("call", self.vault, getter, "--rpc-url", self.rpc).split()[0].lower()
+                if want != have:
+                    raise SystemExit("stack 5: the vault's settler is %s, the remote settler reports %s" % (want, have))
+            log("settler: remote %s (%s); no settler key on this host" % (self.settler_remote, have))
+            return
         pk = c.get("settler_pk") or env.get("KEEPER_SETTLER_PK")
         path = c.get("settler_key_file") or env.get("KEEPER_SETTLER_KEY_FILE")
         if not pk and path:
@@ -238,13 +259,42 @@ class Keeper:
         """The key a send is made with. Stack 5: the settler, for everything; the attester key is
         not even loaded. Stack 4: the attester, as always."""
         if self.stack >= 5:
+            if getattr(self, "settler_remote", None):
+                return "REMOTE"                      # never used: _cast routes the send remotely
             if not self.settler_pk:
                 raise RuntimeError("stack 5 keeper has no settler key for %s" % purpose)
             return self.settler_pk
         return self.attester_pk
 
     # ------------------------------------------------------------------ plumbing
+    def _remote(self, req):
+        """One request to the remote settler over its forced-command ssh key; its JSON answer."""
+        r = subprocess.run(["ssh", "-i", self.settler_ssh_key, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+                            "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=15", self.settler_remote],
+                           input=json.dumps(req), capture_output=True, text=True, timeout=200)
+        out = (r.stdout or "").strip().splitlines()
+        if not out:
+            raise RuntimeError("remote settler: no answer (ssh exit %d: %s)" % (r.returncode, (r.stderr or "").strip()[:200]))
+        return out[-1]
+
+    def _remote_send(self, args):
+        """cast-style `send VAULT SIG ARG... --flags` through the remote settler; a cast-like
+        answer ("status 1" + "transactionHash"), so every caller reads it as it reads cast's."""
+        vault, sig = args[1], args[2]
+        pos = []
+        for a in args[3:]:
+            if str(a).startswith("--"):
+                break
+            pos.append(str(a))
+        ans = json.loads(self._remote({"vault": vault, "sig": sig, "args": pos}))
+        if ans.get("status") != 1:
+            log("remote settler refused %s(%s): %s" % (sig.split("(")[0], ",".join(pos), ans.get("reason", "?")))
+            return "status 0 (refused)\ntransactionHash %s\n" % ans.get("tx", "?")
+        return "status 1 (success)\ntransactionHash %s\n" % ans["tx"]
+
     def _cast(self, *args):
+        if args and args[0] == "send" and getattr(self, "settler_remote", None):
+            return self._remote_send(args)
         r = subprocess.run([self.cast, *args], capture_output=True, text=True, timeout=120)
         if r.returncode != 0:
             raise RuntimeError("cast %s: %s" % (args[0], (r.stderr or r.stdout).strip()[:300]))
