@@ -13,6 +13,20 @@ stack 5.
 | Largest contract | CertVault, 24,139 B runtime (EIP-170 limit 24,576) |
 | What changed vs stack 4 | 9 source files changed, +1,815 / −211 lines (`git diff a057c8b feat/stack5 -- src/`) |
 
+## Status: no external audit before launch (owner decision, 2026-09-28)
+
+The owner has decided that stack 5 launches **without an external audit**. What it has instead is
+an internal review of the staking side (CertStaking v2 and InsuranceStaking v2 as deployed, at
+9e05909), written by the AI assistant that helped write the stack-5 fixes: not independent, and
+not an audit. It found no Critical or High issue, and nothing that lets anyone take funds out of
+either contract; its Medium and Low findings concern who ends up with fees or losses. The
+operational mitigations it asked for are live (an hourly fee push, no fee paid into an empty
+insurance pool, an alert on any insurance shortfall). The findings that need a contract change are
+tracked privately and carried to the next staking deployment. The deployment records keep
+`"audited": false`, which stays true until an independent firm has reviewed the code.
+
+This document remains the scope for such a review whenever one is commissioned.
+
 ## Contracts
 
 | Contract | Lines | New or changed in stack 5 |
