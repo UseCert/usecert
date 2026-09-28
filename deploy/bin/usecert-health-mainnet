@@ -53,6 +53,7 @@ INSURANCE_BOOK = "/opt/usecert-history/4663.insurance.json"
 SIDE_BOOKS = "/opt/usecert-history/4663.*.json"
 CERT_STAKING_BOOK = "/opt/usecert-history/4663.certstaking.json"
 STACK5_SHARED_BOOK = "/opt/usecert-history/4663.stack5.shared.json"
+STACK5_BOOK = "/opt/usecert-history/4663.stack5.json"
 HOST_BOOKS = ["/opt/keeper/book-stack4.json", "/opt/usecert-history/4663.json"]
 MAIL_HOST = "mx.use-cert.com"
 UA = {"User-Agent": "usecert-health/1.0", "Content-Type": "application/json"}
@@ -282,8 +283,27 @@ def checks():
             owed, held = word(fv, "0xe7fa9f7d"), bal(asset, fv)
             if held < owed:
                 P.append("fee vault: holds %.6f USDG but has credited %.6f to recipients (%s)" % (held / 1e6, owed / 1e6, fv))
+            # Staking v2 review L-2: income that reaches an empty insurance pool vests entirely to whoever
+            # deposits first. usecert-fee-pusher (Montreal) holds the pool's credit in FeeVault while the
+            # pool has no shares; this says the credit is waiting, and that the pool needs a first deposit.
+            ins_owed = word(fv, "0xdf18e047" + "0" * 24 + shared["InsuranceStaking"]["address"][2:].lower())
+            if ins_owed and word(shared["InsuranceStaking"]["address"], "0x18160ddd") == 0:
+                P.append("fee vault: %.6f USDG credited to the insurance pool waits for its first deposit (seed the pool; review L-2)" % (ins_owed / 1e6))
         except Exception as e:                                   # noqa: BLE001
             P.append("fee vault: unreadable (%s)" % str(e)[:80])
+    # Staking v2 review M-2: stakers can leave between a loss becoming public (a vault reports an
+    # insurance shortfall as soon as the attester relays it) and a draw being proposed, so whoever
+    # stays takes the loss. Alert the moment any stack-5 vault reports one, so the proposal follows
+    # in minutes rather than days.
+    try:
+        for v in json.load(open(STACK5_BOOK))["vaults"]:
+            short = word(v["vault"], "0xc3ca9f1f")
+            if short:
+                P.append("insurance v2: %s reports an insurance shortfall of %.6f USDG - propose the draw now (stakers can exit until it is proposed)" % (v["symbol"], short / 1e6))
+    except FileNotFoundError:
+        pass
+    except Exception as e:                                       # noqa: BLE001
+        P.append("insurance v2: shortfalls unreadable (%s)" % str(e)[:80])
     try:
         pool = json.load(open(INSURANCE_BOOK))["address"]
         held, cap = word(pool, "0x01e1d114"), word(pool, "0xdbd5edc7")
