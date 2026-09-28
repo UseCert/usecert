@@ -19,6 +19,8 @@ WHAT IS CHECKED, and why each one matters to a holder:
   book       every address this host runs on matches the book tracked on GitHub.
   manifest   every deployed file equals its blob on GitHub (usecert-release-manifest).
   insurance  no draw is pending on the insurance pool (a pending draw pauses stakers' exits).
+  hedges     each stack-5 vault's venue notional (signed by the stack-5 signer) is within a band of
+             what its certificates are worth (Sermium M-03: keeper mode trusts two hot keys).
 
 What is NOT checked: attestation age. Between mints it is stale and capacity reads zero BY DESIGN
 (the signer signs, the minter relays); alerting on it describes correct behaviour.
@@ -54,6 +56,10 @@ SIDE_BOOKS = "/opt/usecert-history/4663.*.json"
 CERT_STAKING_BOOK = "/opt/usecert-history/4663.certstaking.json"
 STACK5_SHARED_BOOK = "/opt/usecert-history/4663.stack5.shared.json"
 STACK5_BOOK = "/opt/usecert-history/4663.stack5.json"
+# The stack-5 signer: the side signer (8788) until the site cutover, then the main one (8787).
+STACK5_SIGNERS = ["http://127.0.0.1:8788/attestations", "http://127.0.0.1:8787/attestations"]
+HEDGE_UNDER_BAND_BPS, HEDGE_UNDER_FLOOR18 = 800, 5 * 10**18       # 8% (5% basis band + slack), $5
+HEDGE_OVER_BAND_BPS, HEDGE_OVER_FLOOR18 = 1000, 25 * 10**18       # 10%, $25
 HOST_BOOKS = ["/opt/keeper/book-stack4.json", "/opt/usecert-history/4663.json"]
 MAIL_HOST = "mx.use-cert.com"
 UA = {"User-Agent": "usecert-health/1.0", "Content-Type": "application/json"}
@@ -85,6 +91,66 @@ def status_of(url, method="GET"):
         return e.code
     except Exception as e:
         return "unreachable (%s)" % type(e).__name__
+
+
+def hedge_divergence():
+    """Sermium M-03: in keeper mode settleMint mints on the settler's word and the venue API key can
+    trade the whole account, so nothing on chain notices a missing or extra hedge. Compare, per
+    stack-5 vault, what the certificates are worth with the venue notional the stack-5 signer
+    measures and signs every few seconds (OI_SOURCE=venue):
+
+      under-hedged  notional < settled supply x px x (1 - UNDER_BAND) - UNDER_FLOOR
+                    (certificates with no hedge behind them: a settler minting unbacked)
+      over-hedged   notional > (supply + pending mints) x px x (1 + OVER_BAND) + OVER_FLOOR
+                    (a position the certificates never asked for: the API key trading)
+
+    The notional is the venue's mark and px the feed, which may differ by the oracle's 5% basis
+    band, hence the bands. Pending mints count only on the upper side: their hedge may already
+    be open while their certificates are not yet minted. An exit burns first and closes after, so
+    a short over-hedge while the keeper closes is expected; the floor keeps it quiet."""
+    P = []
+    try:
+        vaults = json.load(open(STACK5_BOOK))["vaults"]
+    except FileNotFoundError:
+        return P
+    except Exception as e:                                       # noqa: BLE001
+        return ["hedge watch: stack-5 book unreadable (%s)" % str(e)[:80]]
+    want = {v["vault"].lower() for v in vaults}
+    bundle = None
+    for url in STACK5_SIGNERS:
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA["User-Agent"]}), timeout=10) as r:
+                d = json.load(r)
+        except Exception:                                        # noqa: BLE001
+            continue
+        got = {str(a.get("vault", "")).lower(): a for a in d.get("attestations", [])}
+        if want & set(got):
+            bundle = got
+            break
+    if bundle is None:
+        return ["hedge watch: no signer serves stack-5 bundles (%s); the hedges are unwatched" % ", ".join(STACK5_SIGNERS)]
+    word = lambda to, data: int(rpc("eth_call", [{"to": to, "data": data}, "latest"])[:66], 16)
+    for v in vaults:
+        a = bundle.get(v["vault"].lower())
+        if a is None:
+            continue                                             # refused this cycle: the signer names why
+        try:
+            supply = word(v["certificate"], "0x18160ddd")           # totalSupply()
+            pending = word(v["vault"], "0x2f2f761d")                # pendingMintCerts()
+            px = word(v["certOracle"], "0x62d484dd")                # pxUnguarded() -> (px18, observedAt)
+            notional = int(a["notional18"])
+        except Exception as e:                                   # noqa: BLE001
+            P.append("hedge watch: %s unreadable (%s)" % (v["symbol"], str(e)[:60]))
+            continue
+        settled18 = supply * px // 10**18
+        upper18 = (supply + pending) * px // 10**18
+        if notional * 10_000 < settled18 * (10_000 - HEDGE_UNDER_BAND_BPS) - HEDGE_UNDER_FLOOR18 * 10_000:
+            P.append("hedge watch: %s UNDER-hedged - certificates worth $%.2f, venue notional $%.2f (settler or keeper)"
+                     % (v["symbol"], settled18 / 1e18, notional / 1e18))
+        elif notional * 10_000 > upper18 * (10_000 + HEDGE_OVER_BAND_BPS) + HEDGE_OVER_FLOOR18 * 10_000:
+            P.append("hedge watch: %s OVER-hedged - venue notional $%.2f against $%.2f of certificates and pending mints (API key)"
+                     % (v["symbol"], notional / 1e18, upper18 / 1e18))
+    return P
 
 
 def checks():
@@ -304,6 +370,7 @@ def checks():
         pass
     except Exception as e:                                       # noqa: BLE001
         P.append("insurance v2: shortfalls unreadable (%s)" % str(e)[:80])
+    P.extend(hedge_divergence())
     try:
         pool = json.load(open(INSURANCE_BOOK))["address"]
         held, cap = word(pool, "0x01e1d114"), word(pool, "0xdbd5edc7")
