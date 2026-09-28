@@ -1,0 +1,22 @@
+[Unit]
+Description=UseCert stack 5: push fees along the pull chain (sweep, distribute, claim, forward) so no one else picks the moment
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=usecert
+Group=usecert
+# DEPLOYER_PK and DEPLOYER_ADDR only, root-only; read by systemd, never on a command line.
+EnvironmentFile=/etc/usecert/fee-pusher.env
+ExecStart=/opt/usecert-s5/venv/bin/python /opt/usecert/deploy/bin/usecert-fee-pusher
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LockPersonality=true
+StandardOutput=append:/var/log/usecert-fee-pusher.log
+StandardError=append:/var/log/usecert-fee-pusher.log

@@ -1,0 +1,9 @@
+[Unit]
+Description=Push stack-5 fees hourly at :37 (the funding relay on France runs at :07)
+
+[Timer]
+OnCalendar=*:37
+Persistent=false
+
+[Install]
+WantedBy=timers.target

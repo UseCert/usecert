@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Move stack-5 fees along the pull chain, hourly, so nobody else gets to choose when.
+
+    usecert-fee-pusher [--dry-run]      (Montreal; DEPLOYER_PK/DEPLOYER_ADDR in the environment)
+
+WHY (internal staking v2 review, 2026-09-28, M-1 and I-2). Every step of the fee chain is
+permissionless - vault.sweepFees, FeeVault.distribute, FeeVault.claim(recipient),
+BuybackForwarder.forward - and nothing called them on a schedule. CertStaking streams a funding
+that lands mid-period over the time left in it, and withdrawals are instant, so whoever picks the
+moment can stake an hour before a period ends, push a week of fees and leave with most of them.
+Pushing every hour ourselves bounds that to about an hour of fees.
+
+WHAT IT DOES, each step only when there is something to move (an idle protocol costs no gas):
+  1. sweepFees() on each stack-5 vault holding at least SWEEP_MIN of sweepable fees. Simulated
+     first; a vault that would revert (funding relay stale, insurance shortfall open) is skipped
+     and named, and the others carry on.
+  2. FeeVault.distribute() when at least DIST_MIN is uncredited.
+  3. FeeVault.claim(forwarder) when the forwarder would then hold at least CertStaking.minNotify.
+  4. FeeVault.claim(insurance pool) - ONLY while the pool has shares (review L-2): income that
+     reaches an empty pool vests entirely to whoever deposits first. Until the pool is seeded the
+     credit stays in FeeVault, where it is safe, and the health job reports it.
+  5. BuybackForwarder.forward() when its balance is at least minNotify.
+
+It signs locally (eth_account) and sends raw transactions: the key is never on a command line,
+where any local account could read it from the process list.
+Exit 0 when every intended step succeeded or nothing was due; 1 otherwise (the unit shows failed).
+"""
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+from eth_account import Account
+
+RPC = os.environ.get("RPC_URL", "https://rpc.mainnet.chain.robinhood.com")
+CHAIN_ID = 4663
+BOOK = os.environ.get("STACK5_BOOK", "/opt/usecert/deployments/4663.stack5.json")
+SHARED = os.environ.get("STACK5_SHARED_BOOK", "/opt/usecert/deployments/4663.stack5.shared.json")
+SWEEP_MIN = 500_000          # 0.50 USDG: below this a sweep costs more gas than it moves
+DIST_MIN = 100_000           # 0.10 USDG
+MIN_ETH_WEI = 10**15         # 0.001 ETH: below this, stop and let the health job's gas alert speak
+UA = {"User-Agent": "usecert-fee-pusher/1.0", "Content-Type": "application/json"}
+
+SEL = {
+    "sweepableFees": "0x2d151dbb", "sweepFees": "0xd113b95c", "uncredited": "0x3bca9944",
+    "distribute": "0xe4fc6b6d", "owed": "0xdf18e047", "claim": "0x1e83409a", "totalSupply": "0x18160ddd",
+    "minNotify": "0x9a70ad74", "forward": "0xd264e05e", "balanceOf": "0x70a08231",
+}
+
+
+def rpc(method, params):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(RPC, body, UA), timeout=20) as r:
+                out = json.load(r)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 502, 503, 504) or attempt == 4:
+                raise
+            time.sleep(2 * 2 ** attempt)
+    if "error" in out:
+        raise RuntimeError(out["error"])
+    return out["result"]
+
+
+def word(a):
+    return a.lower().replace("0x", "").rjust(64, "0")
+
+
+def call(to, data, frm=None):
+    tx = {"to": to, "data": data}
+    if frm:
+        tx["from"] = frm
+    return rpc("eth_call", [tx, "latest"])
+
+
+def uint(to, data):
+    return int(call(to, data), 16)
+
+
+def say(t):
+    print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + " " + t, flush=True)
+
+
+class Sender:
+    def __init__(self, pk, addr, dry):
+        self.acct = Account.from_key(pk)
+        if self.acct.address.lower() != addr.lower():
+            sys.exit("DEPLOYER_PK does not derive DEPLOYER_ADDR")
+        self.dry = dry
+        self.nonce = None
+
+    def would_revert(self, to, data):
+        try:
+            call(to, data, self.acct.address)
+            return None
+        except RuntimeError as e:
+            err = e.args[0] if e.args else {}
+            return (err.get("data") or err.get("message") or str(err)) if isinstance(err, dict) else str(err)
+
+    def send(self, to, data, label):
+        bad = self.would_revert(to, data)
+        if bad:
+            say("SKIP  %s: would revert (%s)" % (label, str(bad)[:90]))
+            return False
+        if self.dry:
+            say("DRY   %s" % label)
+            return True
+        if self.nonce is None:
+            self.nonce = int(rpc("eth_getTransactionCount", [self.acct.address, "pending"]), 16)
+        gas = int(rpc("eth_estimateGas", [{"from": self.acct.address, "to": to, "data": data}]), 16)
+        base = int(rpc("eth_gasPrice", []), 16)
+        tx = {"chainId": CHAIN_ID, "nonce": self.nonce, "to": to, "value": 0, "data": data, "type": 2,
+              "gas": gas * 13 // 10, "maxFeePerGas": base * 2, "maxPriorityFeePerGas": 0}
+        raw = self.acct.sign_transaction(tx).raw_transaction
+        h = rpc("eth_sendRawTransaction", ["0x" + raw.hex().removeprefix("0x")])
+        self.nonce += 1
+        for _ in range(60):
+            r = rpc("eth_getTransactionReceipt", [h])
+            if r:
+                ok = r.get("status") == "0x1"
+                say("%s  %s tx %s block %d" % ("OK  " if ok else "FAIL", label, h, int(r["blockNumber"], 16)))
+                return ok
+            time.sleep(2)
+        say("FAIL  %s tx %s: no receipt after 120 s" % (label, h))
+        return False
+
+
+def main():
+    dry = "--dry-run" in sys.argv
+    s = Sender(os.environ["DEPLOYER_PK"], os.environ["DEPLOYER_ADDR"], dry)
+    vaults = json.load(open(BOOK))["vaults"]
+    c = json.load(open(SHARED))["contracts"]
+    fv, fwd, pool, cs = (c[k]["address"] for k in ("FeeVault", "BuybackForwarder", "InsuranceStaking", "CertStaking"))
+    usdg = "0x" + call(fv, "0x38d52e0f")[-40:]          # FeeVault.asset()
+
+    if int(rpc("eth_getBalance", [s.acct.address, "latest"]), 16) < MIN_ETH_WEI and not dry:
+        say("STOP  the deployer holds under 0.001 ETH; nothing sent")
+        return 1
+    good = True
+    moved = 0
+
+    for v in vaults:
+        amt = uint(v["vault"], SEL["sweepableFees"])
+        if amt >= SWEEP_MIN:
+            moved += 1
+            good &= s.send(v["vault"], SEL["sweepFees"], "%s sweepFees %.6f USDG" % (v["symbol"], amt / 1e6))
+
+    unc = uint(fv, SEL["uncredited"])
+    if unc >= DIST_MIN:
+        moved += 1
+        good &= s.send(fv, SEL["distribute"], "FeeVault.distribute %.6f USDG" % (unc / 1e6))
+
+    mn = uint(cs, SEL["minNotify"])
+    owed_f = uint(fv, SEL["owed"] + word(fwd))
+    held_f = uint(usdg, SEL["balanceOf"] + word(fwd))
+    if owed_f > 0 and owed_f + held_f >= mn:
+        moved += 1
+        good &= s.send(fv, SEL["claim"] + word(fwd), "FeeVault.claim(forwarder) %.6f USDG" % (owed_f / 1e6))
+
+    owed_p = uint(fv, SEL["owed"] + word(pool))
+    if owed_p > 0:
+        if uint(pool, SEL["totalSupply"]) == 0:
+            say("HOLD  %.6f USDG credited to the insurance pool stays in FeeVault: the pool has no shares (L-2)" % (owed_p / 1e6))
+        else:
+            moved += 1
+            good &= s.send(fv, SEL["claim"] + word(pool), "FeeVault.claim(insurance pool) %.6f USDG" % (owed_p / 1e6))
+
+    bal_f = uint(usdg, SEL["balanceOf"] + word(fwd))
+    if bal_f > 0 and bal_f >= mn:
+        moved += 1
+        good &= s.send(fwd, SEL["forward"], "BuybackForwarder.forward %.6f USDG" % (bal_f / 1e6))
+
+    if not moved:
+        say("idle  nothing due (6 vaults, FeeVault, forwarder)")
+    return 0 if good else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
