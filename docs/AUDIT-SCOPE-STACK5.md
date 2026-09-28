@@ -15,17 +15,26 @@ stack 5.
 
 ## Status: no external audit before launch (owner decision, 2026-09-28)
 
-The owner has decided that stack 5 launches **without an external audit**. What it has instead is
-an internal review of the staking side (CertStaking v2 and InsuranceStaking v2 as deployed, at
-9e05909), written by the AI assistant that helped write the stack-5 fixes: not independent, and
-not an audit. It found no Critical or High issue, and nothing that lets anyone take funds out of
-either contract; its Medium and Low findings concern who ends up with fees or losses. The
-operational mitigations it asked for are live (an hourly fee push, no fee paid into an empty
-insurance pool, an alert on any insurance shortfall). The findings that need a contract change are
-tracked privately and carried to the next staking deployment. The deployment records keep
-`"audited": false`, which stays true until an independent firm has reviewed the code.
+The owner has decided that stack 5 launches without a full external audit. The staking side has
+been reviewed twice, and the owner accepts those reviews as the launch gate for it:
 
-This document remains the scope for such a review whenever one is commissioned.
+| Review | By | Scope | Result |
+|---|---|---|---|
+| Staking V2 Security Review, 2026-09-28 | an **independent auditor, AI-assisted**, single reviewer | CertStaking v2 and InsuranceStaking v2 as deployed (Sourcify exact match), with their fee routing (FeeVault, BuybackForwarder) and CertVault's insurance hooks only | 0 Critical, 0 High, 1 Medium, 4 Low, 7 Info |
+| Internal staking v2 review, 2026-09-28 | the AI assistant that helped write the stack-5 fixes (not independent) | the same two contracts at 9e05909 | 0 Critical, 0 High, 3 Medium, 4 Low, 6 Info |
+
+Neither found a way to take principal out of either pool; the Medium and Low findings concern who
+ends up with fees or losses. The mitigations that need no redeploy are live: an hourly fee push, no
+fee paid into an empty insurance pool, an alert on any insurance shortfall, the draw-proposal rule
+in the runbook, and the front-end fixes. The findings that need a contract change are carried to
+the next staking deployment.
+
+**Not reviewed by anyone outside the team:** CertVault (beyond the insurance hooks), CertOracle,
+SolvencyRegistry, BufferBook, CapacityOracle, CertFactory's other paths and the off-chain services.
+They carry the internal pre-audit fixes described below, and the deployment records keep
+`"audited": false` for stack 5.
+
+This document remains the scope for an external review of the rest whenever one is commissioned.
 
 ## Contracts
 
