@@ -52,6 +52,8 @@ STACK 5 (all off by default, so a stack-4 signer behaves exactly as before):
   Under STACK=5 an attestation whose observedAt is not strictly after the registry's latest,
   or a mark whose observedAt is before the oracle's markAt, is not signed: the stack-5
   contracts would revert it.
+SIGNER_PORT                   the 127.0.0.1 port it serves on (8787); a side signer beside the live one
+                              takes another, e.g. 8788 for the stack-5 round trip before the cutover
 A refused vault is left out of the bundle, listed under "refused" with the reason, and logged;
 the other vaults are still signed.
 """
@@ -78,7 +80,7 @@ UA = "usecert-signer/1.0"
 VALIDITY = 60          # SolvencyRegistry.SIGNATURE_VALIDITY
 MARK_VALIDITY = 60     # stack-5 CertOracle: deadline <= observedAt + 60
 CYCLE = 5              # + ~15-20 s of reads: every bundle served keeps >= ~35 s of its 60; the site wants 25
-PORT = 8787
+PORT = int(os.environ.get("SIGNER_PORT", "8787"))   # a second signer (the stack-5 side signer) takes another
 E18 = Decimal(10) ** 18
 
 cache = {"generatedAt": 0, "attestations": [], "error": "not yet generated"}
