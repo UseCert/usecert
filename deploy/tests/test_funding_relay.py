@@ -108,6 +108,8 @@ class World:
         self.account_index = 33556
         self.auth_seen = []
         self.gets = []
+        self.sweepable = 0
+        self.last_accrual = 0
 
     def get(self, vc, path, auth=None):
         self.gets.append(path)
@@ -131,6 +133,10 @@ class World:
             return "0x" + "0" * 24 + ATTESTER[2:]
         if data.startswith(fr.SEL_BALANCE18):
             return "0x" + format(self.ledger % (1 << 256), "064x")
+        if data == fr.SEL_SWEEPABLE:
+            return "0x" + format(self.sweepable, "064x")
+        if data == fr.SEL_LAST_ACCRUAL:
+            return "0x" + format(self.last_accrual, "064x")
         raise AssertionError(data)
 
     def cast(self, vc, *a):
@@ -205,6 +211,24 @@ class Flow(unittest.TestCase):
                                       "position_side": "long"})
         self.assertEqual(self.relay(), 0)                          # only the new hour
         self.assertEqual(self.world.sends, [WANT, -14910 * 10 ** 12])
+
+    def test_heartbeat_only_when_fees_wait_and_accrual_is_old(self):
+        # Sermium I-08: sweepFees needs an accrual under 2 days old. A heartbeat every idle hour on
+        # six vaults would be ~144 attester transactions a day for nothing, so it is sent only when
+        # there are fees to sweep and the last accrual is over FUNDING_RELAY_HEARTBEAT_AGE old.
+        self.assertEqual(self.relay(), 0)
+        base = list(self.world.sends)
+        self.assertEqual(self.relay(FUNDING_RELAY_HEARTBEAT="1"), 0)          # no fees: nothing
+        self.assertEqual(self.world.sends, base)
+        self.world.sweepable, self.world.last_accrual = 5, int(time.time()) - 3600
+        self.assertEqual(self.relay(FUNDING_RELAY_HEARTBEAT="1"), 0)          # fees, recent accrual
+        self.assertEqual(self.world.sends, base)
+        self.world.last_accrual = int(time.time()) - 2 * 86400
+        self.assertEqual(self.relay(FUNDING_RELAY_HEARTBEAT="1"), 0)          # fees, old accrual
+        self.assertEqual(self.world.sends, base + [0])
+        self.world.sends, self.world.last_accrual = list(base), int(time.time()) - 2 * 86400
+        self.assertEqual(self.relay(), 0)                                     # heartbeat off: never
+        self.assertEqual(self.world.sends, base)
 
     def test_start_ts_is_inclusive_and_bounds_history(self):
         self.relay(FUNDING_RELAY_START_TS="1790488800")

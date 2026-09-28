@@ -55,7 +55,9 @@ ENVIRONMENT
   FUNDING_MAX_RECORDS      hours relayed per vault per run, oldest first (default 168)
   FUNDING_PENDING_GRACE_SEC  default 900
   FUNDING_RELAY_HEARTBEAT  1: send accrueFunding(0) when nothing is due (for a sweepFees gated
-                           on relay recency); default 0
+                           on relay recency); default 0. Sent only when the vault has fees to sweep
+                           AND its last accrual is older than FUNDING_RELAY_HEARTBEAT_AGE (default
+                           86400 s; sweepFees accepts up to 2 days), so an idle vault costs no gas
   CAST                     default: the vault config's "cast", else "cast"
 """
 import asyncio
@@ -79,6 +81,8 @@ SEL_BUFFER = "0xedaafe20"        # CertVault.buffer()
 SEL_ORACLE = "0x7dc0d1d0"        # CertVault.oracle()
 SEL_ATTESTER = "0x47b0c3b3"      # CertOracle.attester()
 SEL_BALANCE18 = "0xc49b6578"     # BufferBook.balance18(address)
+SEL_SWEEPABLE = "0x2d151dbb"     # CertVault.sweepableFees()
+SEL_LAST_ACCRUAL = "0x3131fd71"  # CertVault.lastAccrualAt()
 
 
 def log(*a):
@@ -187,6 +191,7 @@ class Relay:
         self.max_records = int(e.get("FUNDING_MAX_RECORDS", "168"))
         self.grace = int(e.get("FUNDING_PENDING_GRACE_SEC", "900"))
         self.heartbeat = e.get("FUNDING_RELAY_HEARTBEAT", "0") == "1"
+        self.heartbeat_age = int(e.get("FUNDING_RELAY_HEARTBEAT_AGE", "86400"))
         self.cast_override = e.get("CAST")
         self.state = self._load()
         self._attester_ok = {}
@@ -317,6 +322,16 @@ class Relay:
         word = self.eth_call(vc, buf, SEL_BALANCE18 + vc["vault"][2:].lower().rjust(64, "0"))
         return int256(word)
 
+    def heartbeat_due(self, vc):
+        """A heartbeat only unblocks sweepFees (FEE_SWEEP_MAX_ACCRUAL_AGE): worth its gas only when there are
+        fees to sweep and the last accrual is getting old."""
+        fees = int(self.eth_call(vc, vc["vault"], SEL_SWEEPABLE), 16)
+        last = int(self.eth_call(vc, vc["vault"], SEL_LAST_ACCRUAL), 16)
+        due = fees > 0 and time.time() - last > self.heartbeat_age
+        if not due:
+            log("%s: no funding; heartbeat not due (sweepable %d, last accrual %d)" % (vc["vault"], fees, last))
+        return due
+
     def check_attester(self, vc):
         """accrueFunding reverts unless msg.sender is the oracle's attester: check before sending."""
         if vc["vault"] in self._attester_ok:
@@ -381,7 +396,7 @@ class Relay:
             raise Refuse("positionFunding returned %d records for other markets" % len(foreign))
         new = select_new(records, cursor_ts, seen, self.max_records)
         if not new:
-            if self.heartbeat and not self.dry:
+            if self.heartbeat and not self.dry and self.heartbeat_due(vc):
                 self._send_journaled(vc, st, 0, cursor_ts, seen)
             else:
                 log("%s: no funding since %d" % (vault, cursor_ts))
