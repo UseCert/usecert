@@ -199,6 +199,7 @@ class Keeper:
         # no key that can mint: every send goes through _cast's "send" branch to that host.
         self.settler_remote = c.get("settler_remote") or env.get("KEEPER_SETTLER_REMOTE")
         self.settler_ssh_key = c.get("settler_ssh_key") or env.get("KEEPER_SETTLER_SSH_KEY")
+        self.settler_known_hosts = c.get("settler_known_hosts") or env.get("KEEPER_SETTLER_KNOWN_HOSTS")
         if self.settler_remote:
             if c.get("settler_pk") or env.get("KEEPER_SETTLER_PK") or c.get("settler_key_file") \
                     or env.get("KEEPER_SETTLER_KEY_FILE"):
@@ -269,7 +270,8 @@ class Keeper:
     # ------------------------------------------------------------------ plumbing
     def _remote(self, req):
         """One request to the remote settler over its forced-command ssh key; its JSON answer."""
-        r = subprocess.run(["ssh", "-i", self.settler_ssh_key, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+        pin = ["-o", "UserKnownHostsFile=" + self.settler_known_hosts] if getattr(self, "settler_known_hosts", None) else []
+        r = subprocess.run(["ssh", "-i", self.settler_ssh_key, *pin, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
                             "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=15", self.settler_remote],
                            input=json.dumps(req), capture_output=True, text=True, timeout=200)
         out = (r.stdout or "").strip().splitlines()
