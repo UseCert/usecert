@@ -1176,7 +1176,10 @@ class SimChain:
 def detect_host():
     if os.name == "nt":
         return "workstation"
-    if os.path.exists(M_DEPLOYER_ENV) and os.path.exists(M_FOUNDRY + "/forge"):
+    # The deployer env's directory is root-only, so os.path.exists() on the file itself is False for
+    # the usecert user even when it is there. Its directory is stat-able; France has /etc/usecert too
+    # but no foundry, so the pair still identifies Montreal.
+    if os.path.isdir(os.path.dirname(M_DEPLOYER_ENV)) and os.path.exists(M_FOUNDRY + "/forge"):
         return "montreal"
     if os.path.exists(F_PY) and os.path.isdir(F_VAULTS):
         return "france"
