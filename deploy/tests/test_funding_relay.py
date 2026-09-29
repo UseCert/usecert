@@ -308,5 +308,61 @@ class Flow(unittest.TestCase):
         self.assertLess(send.index("--private-key"), i)
 
 
+class RemoteAttester(unittest.TestCase):
+    """Sermium M-03: with FUNDING_RELAY_REMOTE the relay holds no attester key; each delta goes to
+    Montreal with the records behind it, and a refusal leaves the cursor where it was."""
+    setUp = Flow.setUp
+    st = Flow.st
+
+    def remote(self, req):
+        self.reqs.append(req)
+        if req.get("action") == "whoami":
+            return json.dumps({"status": 1, "attester": self.remote_attester})
+        if self.refuse:
+            return json.dumps({"status": 0, "reason": "refused by the test"})
+        self.world.ledger += int(req["args"][0])
+        return json.dumps({"status": 1, "tx": "0xfeed"})
+
+    def relay(self, **env):
+        self.reqs = getattr(self, "reqs", [])
+        e = {"FUNDING_RELAY_VAULTS": self.cfg, "FUNDING_RELAY_STATE": self.state, "FUNDING_RELAY_START_TS": "1790481600",
+             "FUNDING_RELAY_REMOTE": "settle-intake@montreal", "FUNDING_RELAY_SSH_KEY": "/k", "KEEPER_ATTESTER_PK": PK}
+        e.update(env)
+        r = fr.Relay(env={k: v for k, v in e.items() if v is not None})
+        w = self.world
+        r.get, r.eth_call, r.cast, r._remote = w.get, w.eth_call, w.cast, self.remote
+        r.auth_token = lambda vc: "TOKEN-xyz"
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            refused = r.run()
+        self.out, self.r = buf.getvalue(), r
+        return refused
+
+    def test_deltas_go_remote_with_their_records(self):
+        self.refuse, self.remote_attester = False, ATTESTER
+        self.assertEqual(self.relay(), 0)
+        self.assertIsNone(self.r.pk)                                   # the local key is dropped
+        self.assertEqual(self.world.sends, [])                         # nothing signed on this host
+        ask = [q for q in self.reqs if q.get("sig")][0]
+        self.assertEqual((ask["sig"], ask["args"]), ("accrueFunding(int256)", [str(WANT)]))
+        self.assertEqual(len(ask["evidence"]), 4)
+        self.assertTrue(all(set(x) <= set(fr.Relay.EVIDENCE_KEYS) for x in ask["evidence"]))
+        self.assertEqual(self.world.ledger, WANT)
+        self.assertEqual(self.st()["cursor_ts"], 1790492400)
+
+    def test_a_refusal_keeps_the_cursor(self):
+        self.refuse, self.remote_attester = True, ATTESTER
+        self.relay()
+        s = self.st()
+        self.assertNotIn("pending", s)
+        self.assertEqual(s["cursor_ts"], 1790481600 - 1)
+        self.assertIn("refused", self.out)
+
+    def test_the_remote_must_be_the_oracles_attester(self):
+        self.refuse, self.remote_attester = False, "0x" + "99" * 20
+        self.assertEqual(self.relay(), 1)
+        self.assertEqual([q for q in self.reqs if q.get("sig")], [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

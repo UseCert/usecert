@@ -195,6 +195,19 @@ class Relay:
         self.cast_override = e.get("CAST")
         self.state = self._load()
         self._attester_ok = {}
+        # REMOTE ATTESTER (Sermium M-03): the stack-5 attester key lives on Montreal, which re-checks
+        # every delta against the public funding before sending it. This host then holds no key
+        # that can write the funding ledger.
+        self.remote = e.get("FUNDING_RELAY_REMOTE")
+        self.remote_key = e.get("FUNDING_RELAY_SSH_KEY")
+        self.remote_known = e.get("FUNDING_RELAY_KNOWN_HOSTS")
+        self._evidence = []
+        if self.remote:
+            if not self.remote_key:
+                raise SystemExit("FUNDING_RELAY_REMOTE needs FUNDING_RELAY_SSH_KEY")
+            self.pk = None
+            if env is None:
+                os.environ.pop("KEEPER_ATTESTER_PK", None)
 
     # ------------------------------------------------------------------ plumbing
     def _load(self):
@@ -338,13 +351,38 @@ class Relay:
             return
         oracle = "0x" + self.eth_call(vc, vc["vault"], SEL_ORACLE)[-40:]
         want = ("0x" + self.eth_call(vc, oracle, SEL_ATTESTER)[-40:]).lower()
-        have = self.cast(vc, "wallet", "address", "--private-key", self.pk).split()[0].lower()
-        if want != have:
-            raise Refuse("KEEPER_ATTESTER_PK derives %s, the oracle's attester is %s" % (have, want))
+        if self.remote:
+            have = (json.loads(self._remote({"action": "whoami"})).get("attester") or "").lower()
+            if want != have:
+                raise Refuse("the remote attester reports %s, the oracle's attester is %s" % (have, want))
+        else:
+            have = self.cast(vc, "wallet", "address", "--private-key", self.pk).split()[0].lower()
+            if want != have:
+                raise Refuse("KEEPER_ATTESTER_PK derives %s, the oracle's attester is %s" % (have, want))
         self._attester_ok[vc["vault"]] = True
 
     # ------------------------------------------------------------------ the work
+    EVIDENCE_KEYS = ("timestamp", "market_id", "funding_id", "change", "rate", "position_size", "position_side")
+
+    def _remote(self, req):
+        """One request to the remote attester over its forced-command ssh key; its JSON answer."""
+        pin = ["-o", "UserKnownHostsFile=" + self.remote_known] if self.remote_known else []
+        r = subprocess.run(["ssh", "-i", self.remote_key, *pin, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+                            "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=15", self.remote],
+                           input=json.dumps(req), capture_output=True, text=True, timeout=200)
+        out = (r.stdout or "").strip().splitlines()
+        if not out:
+            raise RuntimeError("remote attester: no answer (ssh exit %d)" % r.returncode)
+        return out[-1]
+
     def send(self, vc, delta18):
+        if self.remote:
+            ev = [{k: r[k] for k in self.EVIDENCE_KEYS if k in r} for r in self._evidence]
+            ans = json.loads(self._remote({"vault": vc["vault"], "sig": "accrueFunding(int256)",
+                                           "args": [str(delta18)], "evidence": ev}))
+            if ans.get("status") != 1:
+                log("%s: the remote attester refused accrueFunding(%d): %s" % (vc["vault"], delta18, ans.get("reason", "?")))
+            return ans.get("status") == 1, ans.get("tx", "?")
         out = self.cast(vc, "send", "--gas-limit", "300000", "--private-key", self.pk, "--rpc-url", vc["rpc"],
                         "--", vc["vault"], "accrueFunding(int256)", str(delta18))
         ok = any(l.split()[:2] == ["status", "1"] for l in out.splitlines())
@@ -397,6 +435,7 @@ class Relay:
         new = select_new(records, cursor_ts, seen, self.max_records)
         if not new:
             if self.heartbeat and not self.dry and self.heartbeat_due(vc):
+                self._evidence = []
                 self._send_journaled(vc, st, 0, cursor_ts, seen)
             else:
                 log("%s: no funding since %d" % (vault, cursor_ts))
@@ -415,10 +454,11 @@ class Relay:
             st.update(cursor_ts=new_ts, seen_ids=new_ids)
             self._save()
             return
+        self._evidence = new
         self._send_journaled(vc, st, delta18, new_ts, new_ids)
 
     def _send_journaled(self, vc, st, delta18, new_ts, new_ids):
-        if not self.pk:
+        if not self.pk and not self.remote:
             raise Refuse("KEEPER_ATTESTER_PK is not set")
         self.check_attester(vc)
         # WRITE-AHEAD: journal before the transaction leaves, so a crash cannot relay twice.

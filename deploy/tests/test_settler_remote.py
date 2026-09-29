@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from decimal import Decimal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _ethstub  # noqa: E402
@@ -47,6 +48,12 @@ class World:
             return [0xaa, 18 * 10 ** 6, self.settled, PX, self.requested_at, self.staged, self.indicative]
         if to == VAULT and sel == s.SEL["settleWindow"]:
             return [self.window]
+        if to == VAULT and sel == "0x2f2f761d":                  # pendingMintCerts()
+            return [getattr(self, "pending", 0)]
+        if to == VAULT and sel == "0x2d151dbb":                  # sweepableFees()
+            return [getattr(self, "fees", 0)]
+        if to == VAULT and sel == "0x3131fd71":                  # lastAccrualAt()
+            return [getattr(self, "last_accrual", 0)]
         raise AssertionError((to, data))
 
 
@@ -112,6 +119,83 @@ class Checks(unittest.TestCase):
         self.assertIsNone(s.check({"vault": VAULT, "sig": "stageRefund(uint256)", "args": ["3"]}, self.ledger))
 
 
+s.RELAY_PATH = os.path.join(_ethstub.BIN, "usecert-funding-relay")
+R = s.relay_mod()
+PUBLIC = _ethstub.fixture("fundings-16.json")
+PF = _ethstub.fixture("positionFunding-synthetic.json")
+WANT = -59602 * 10 ** 12          # 10 TSLA long, four hours, longs paying (as in test_funding_relay)
+
+
+def records():
+    return [{k: r[k] for k in s.EVIDENCE_KEYS if k in r} for r in json.loads(json.dumps(PF["position_fundings"]))]
+
+
+class Accrue(unittest.TestCase):
+    """The remote attester sends accrueFunding only for records it could check itself."""
+
+    def setUp(self):
+        self.w = World()
+        s.words = self.w.words
+        self.w.position = 100_000                                 # 10.0000 shares at 4 decimals, public
+        s.venue_position_units = lambda vault, market, dec: self.w.position
+        s.public_fundings = lambda market, lo, hi: R.public_index(PUBLIC["fundings"])
+        self.ledger = {"sends": [], "settled_usd": [], "vaults": {}}
+        self.now = max(R.norm_ts(r["timestamp"]) for r in PF["position_fundings"]) + 600
+
+    def ask(self, delta=WANT, ev=None):
+        return {"vault": VAULT, "sig": s.ACCRUE, "args": [str(delta)], "evidence": records() if ev is None else ev}
+
+    def check(self, req):
+        return s.check_accrue(req, self.ledger, now=self.now)
+
+    def test_checked_records_pass(self):
+        self.assertIsNone(self.check(self.ask()))
+
+    def test_a_delta_the_records_do_not_sum_to(self):
+        self.assertIn("sum to", self.check(self.ask(delta=WANT * 2)))
+
+    def test_a_record_the_public_funding_contradicts(self):
+        ev = records()
+        ev[0]["change"] = str(Decimal(ev[0]["change"]) * 3)
+        self.assertIn("public funding", self.check(self.ask(ev=ev)))
+
+    def test_an_inflated_position_is_capped_by_what_is_visible(self):
+        ev = records()                                            # France claims 10x the position ...
+        for r in ev:
+            r["position_size"] = str(Decimal(r["position_size"]) * 10)
+            r["change"] = str(Decimal(r["change"]) * 10)          # ... with changes to match
+        self.assertIn("is visible", self.check(self.ask(delta=WANT * 10, ev=ev)))
+        self.w.supply = 100 * E18                                 # unless the certificates need it
+        self.assertIsNone(self.check(self.ask(delta=WANT * 10, ev=ev)))
+
+    def test_no_record_is_relayed_twice(self):
+        req = self.ask()
+        self.assertIsNone(self.check(req))
+        s.accrue_booked(req, self.ledger, now=self.now)
+        self.assertIn("already relayed", self.check(self.ask()))
+
+    def test_caps(self):
+        s.MAX_ACCRUE_USD, old = Decimal("0.01"), s.MAX_ACCRUE_USD
+        try:
+            self.assertIn("per-request cap", self.check(self.ask()))
+        finally:
+            s.MAX_ACCRUE_USD = old
+        self.ledger["vaults"][VAULT] = {"day": [[self.now - 60, str(s.DAILY_ACCRUE_USD)]]}
+        self.assertIn("daily cap", self.check(self.ask()))
+
+    def test_heartbeat_only_when_fees_wait_and_accrual_is_old(self):
+        hb = {"vault": VAULT, "sig": s.ACCRUE, "args": ["0"], "evidence": []}
+        self.assertIn("no fees", self.check(hb))
+        self.w.fees, self.w.last_accrual = 5, int(self.now) - 3600
+        self.assertIn("only", self.check(hb))
+        self.w.last_accrual = int(self.now) - 2 * 86400
+        self.assertIsNone(self.check(hb))
+
+    def test_negative_int256_is_twos_complement(self):
+        self.assertEqual(s.w32(-1), "f" * 64)
+        self.assertEqual(int(s.w32(WANT), 16) - (1 << 256), WANT)
+
+
 class Intake(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -154,6 +238,27 @@ class Intake(unittest.TestCase):
         self.assertEqual(len(q), 1)
         with open(os.path.join(s.INBOX, q[0])) as f:
             self.assertEqual(json.load(f)["args"], ["1", str(PX)])
+
+
+class IntakeAccrue(Intake):
+    def setUp(self):
+        super().setUp()
+        s.ATT_INBOX = os.path.join(self.dir, "att")
+        os.makedirs(s.ATT_INBOX)
+
+    def test_accrue_shape(self):
+        ok = {"vault": VAULT, "sig": s.ACCRUE, "args": [str(WANT)], "evidence": records()}
+        bad = [dict(ok, evidence=[]),                                        # a delta with no records
+               dict(ok, args=["0"]),                                         # a heartbeat with records
+               dict(ok, evidence=[dict(records()[0], extra="x")]),           # a field Montreal does not read
+               dict(ok, evidence="records"),
+               dict(ok, args=["-0x10"])]
+        for req in bad:
+            self.assertEqual(self.run_intake(req)[1]["status"], 0, req)
+        self.assertEqual(os.listdir(s.ATT_INBOX), [])
+        self.run_intake(ok)                                                  # a signed delta is allowed
+        self.assertEqual(len(os.listdir(s.ATT_INBOX)), 1)
+        self.assertEqual(self.queued(), [])                                  # never in the settler's queue
 
 
 if __name__ == "__main__":

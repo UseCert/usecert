@@ -4,6 +4,7 @@
     usecert-settler-remote intake      the ONLY command France's settle key can run (forced in
                                        authorized_keys): one request on stdin, one answer out
     usecert-settler-remote serve       the loop that holds the settler key (systemd)
+    usecert-settler-remote serve-attester   the loop that holds the stack-5 attester key: accrueFunding only
     usecert-settler-remote check ...   dry: run the checks for one request and print the verdict
 
 WHY. In keeper mode settleMint mints certificates on the settler's word, and the venue API key
@@ -60,10 +61,22 @@ ACTIONS = {
     "recallMarginUpTo(uint256)": ("0xc7d1f5ce", 1),
     "stageRefund(uint256)": ("0xe571c72c", 1),
     "refundMint(uint256)": ("0xd2e684b8", 1),
+    "accrueFunding(int256)": ("0x0f9b0da6", 1),
 }
+ACCRUE = "accrueFunding(int256)"
+ATT_INBOX = os.path.join(BASE, "attester-inbox")
+ATT_LEDGER = os.path.join(BASE, "attester-ledger.json")
+MAX_REQUEST = 65536
+MAX_EVIDENCE = 200
+EVIDENCE_KEYS = {"timestamp", "market_id", "funding_id", "change", "rate", "position_size", "position_side"}
+MAX_ACCRUE_USD = Decimal(os.environ.get("MAX_ACCRUE_USD", "100"))        # one request (Sermium L-06)
+DAILY_ACCRUE_USD = Decimal(os.environ.get("DAILY_ACCRUE_USD", "300"))    # |delta| summed per vault per day
+POSITION_SLACK_BPS = 1000                                                # a record may claim 10% over what is visible
+HEARTBEAT_MIN_AGE = 20 * 3600
+RELAY_PATH = os.environ.get("FUNDING_RELAY_PATH", "/opt/usecert/deploy/bin/usecert-funding-relay")
 SEL = {"mintReceipts": "0x93a8c438", "settleWindow": "0x1c9963fa", "cfg": "0x0457dad2",
        "certificate": "0x2dbf7b98", "totalSupply": "0x18160ddd", "oracle": "0x7dc0d1d0",
-       "multiplier18": "0x05a3a104", "settler": "0xab221a76"}
+       "multiplier18": "0x05a3a104", "settler": "0xab221a76", "attester": "0x47b0c3b3"}
 
 
 def log(t):
@@ -78,27 +91,40 @@ def vaults():
 def intake():
     """Validate one request from stdin, queue it, wait for serve's answer, print it. Runs as the
     intake user, which can write the inbox and read the outbox and nothing else."""
-    raw = sys.stdin.buffer.read(4097)
+    raw = sys.stdin.buffer.read(MAX_REQUEST + 1)
     ans = lambda d: (print(json.dumps(d)), 0 if d.get("status") == 1 else 1)[1]
-    if len(raw) > 4096:
-        return ans({"status": 0, "reason": "request over 4 KiB"})
+    if len(raw) > MAX_REQUEST:
+        return ans({"status": 0, "reason": "request over %d bytes" % MAX_REQUEST})
     try:
         req = json.loads(raw.decode())
     except Exception:                                            # noqa: BLE001
         return ans({"status": 0, "reason": "not JSON"})
+    if not isinstance(req, dict):
+        return ans({"status": 0, "reason": "not a request"})
     if req.get("action") == "whoami":
-        return ans({"status": 1, "settler": os.environ.get("SETTLER_ADDR", "")})
+        return ans({"status": 1, "settler": os.environ.get("SETTLER_ADDR", ""), "attester": os.environ.get("ATTESTER_ADDR", "")})
     vault, sig, args = str(req.get("vault", "")).lower(), req.get("sig"), req.get("args")
     if vault not in vaults():
         return ans({"status": 0, "reason": "not a stack-5 vault"})
+    num = r"-?[0-9]{1,77}" if sig == ACCRUE else r"[0-9]{1,78}"
     if sig not in ACTIONS or not isinstance(args, list) or len(args) != ACTIONS[sig][1] \
-            or not all(isinstance(a, str) and re.fullmatch(r"[0-9]{1,78}", a) for a in args):
+            or not all(isinstance(a, str) and re.fullmatch(num, a) for a in args):
         return ans({"status": 0, "reason": "action or arguments not allowed"})
+    q = {"vault": vault, "sig": sig, "args": args, "at": int(time.time())}
+    box = INBOX
+    if sig == ACCRUE:
+        ev = req.get("evidence")
+        if not isinstance(ev, list) or len(ev) > MAX_EVIDENCE or not all(
+                isinstance(r, dict) and set(r) <= EVIDENCE_KEYS for r in ev):
+            return ans({"status": 0, "reason": "evidence must be a list of at most %d funding records" % MAX_EVIDENCE})
+        if (args[0] == "0") != (len(ev) == 0):
+            return ans({"status": 0, "reason": "a heartbeat carries no records; a funding delta carries its records"})
+        q["evidence"], box = ev, ATT_INBOX
     rid = time.strftime("%Y%m%dT%H%M%S") + "-" + secrets.token_hex(6)
-    tmp = os.path.join(INBOX, rid + ".part")
+    tmp = os.path.join(box, rid + ".part")
     with open(tmp, "w") as f:
-        json.dump({"vault": vault, "sig": sig, "args": args, "at": int(time.time())}, f)
-    os.replace(tmp, os.path.join(INBOX, rid + ".json"))
+        json.dump(q, f)
+    os.replace(tmp, os.path.join(box, rid + ".json"))
     out = os.path.join(OUTBOX, rid + ".json")
     for _ in range(ANSWER_WAIT_SEC * 2):
         if os.path.exists(out):
@@ -131,7 +157,8 @@ def words(to, data):
 
 
 def w32(n):
-    return "%064x" % int(n)
+    n = int(n)
+    return "%064x" % (n + (1 << 256) if n < 0 else n)          # int256 two's complement for accrueFunding
 
 
 def venue_position_units(vault, market, size_dec):
@@ -203,25 +230,162 @@ def check(req, ledger, now=None):
 
 
 # ---------------------------------------------------------------------------- serve (the key)
-def serve(once=False):
+_RELAY = None
+
+
+def relay_mod():
+    """The funding relay's own record checks (compute_delta, norm_ts, public_index), loaded from its
+    file, so Montreal re-runs exactly the code France ran - on public data it fetched itself."""
+    global _RELAY
+    if _RELAY is None:
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("usecert_funding_relay", RELAY_PATH)
+        spec = importlib.util.spec_from_loader("usecert_funding_relay", loader)
+        _RELAY = importlib.util.module_from_spec(spec)
+        loader.exec_module(_RELAY)
+    return _RELAY
+
+
+def public_fundings(market, lo, hi):
+    """The venue's PUBLIC hourly funding for `market` around [lo, hi], indexed as the relay does."""
+    import urllib.parse
+    start, end = lo - 3600, hi + 3600
+    q = {"market_id": int(market), "resolution": "1h", "start_timestamp": start, "end_timestamp": end,
+         "count_back": (end - start) // 3600 + 2}
+    req = urllib.request.Request(API + "/api/v1/fundings?" + urllib.parse.urlencode(q), headers={"User-Agent": UA["User-Agent"]})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        d = json.load(r)
+    if not isinstance(d.get("fundings"), list):
+        raise RuntimeError("fundings answered without a fundings list: code %s" % d.get("code"))
+    return relay_mod().public_index(d["fundings"])
+
+
+def check_accrue(req, ledger, now=None):
+    """accrueFunding(delta18) from France's relay: None if it may be sent, else why not.
+
+    The records are the vault account's own funding records, which only France can read (they need
+    the API key). Montreal checks each one against the venue's PUBLIC hourly funding, with the
+    relay's own compute_delta, and requires the result to be exactly the delta asked for. The one
+    figure a record carries that the public data cannot confirm is its position size, so that is
+    capped by what Montreal can see: the public position, or what the certificates require, plus
+    POSITION_SLACK_BPS. A record is never accepted twice, and the delta is capped per request and
+    per day (Sermium L-06: the attester ledger has no bound of its own)."""
+    now = time.time() if now is None else now
+    vault, delta, ev = req["vault"], int(req["args"][0]), req.get("evidence", [])
+    if len([t for t in ledger["sends"] if now - t < 3600]) >= MAX_SENDS_PER_HOUR:
+        return "rate limit: %d sends in the last hour" % MAX_SENDS_PER_HOUR
+    if delta == 0:
+        fees = words(vault, "0x2d151dbb")[0]                    # sweepableFees()
+        last = words(vault, "0x3131fd71")[0]                    # lastAccrualAt()
+        if fees == 0:
+            return "heartbeat: no fees wait to be swept"
+        if now - last < HEARTBEAT_MIN_AGE:
+            return "heartbeat: the last accrual is only %d s old" % (now - last)
+        return None
+    R = relay_mod()
+    cfg = words(vault, SEL["cfg"])
+    market, size_dec = cfg[3], cfg[4]
+    try:
+        tss = [R.norm_ts(r["timestamp"]) for r in ev]
+    except Exception as e:                                       # noqa: BLE001
+        return "a record has no usable timestamp (%s)" % e
+    if any(int(r.get("market_id", market)) != market for r in ev):
+        return "a record is for another market"
+    if max(tss) > now + 60:
+        return "a record is dated in the future"
+    ids = [str(r.get("funding_id")) for r in ev]
+    if len(set(zip(tss, ids))) != len(ev):
+        return "the same record appears twice"
+    vs = ledger["vaults"].get(vault, {})
+    last_ts, seen = int(vs.get("last_ts", 0)), set(vs.get("seen", []))
+    for ts, i in zip(tss, ids):
+        if ts < last_ts or (ts == last_ts and i in seen):
+            return "record %s at %d was already relayed" % (i, ts)
+    try:
+        d2, _ = R.compute_delta(ev, public_fundings(market, min(tss), max(tss)), "auto", 200)
+    except R.Refuse as e:
+        return "the records do not match the public funding: %s" % e
+    if d2 != delta:
+        return "asked for %d, but the records sum to %d" % (delta, d2)
+    cert = "0x" + "%040x" % words(vault, SEL["certificate"])[0]
+    oracle = "0x" + "%040x" % words(vault, SEL["oracle"])[0]
+    certs = words(cert, SEL["totalSupply"])[0] + words(vault, "0x2f2f761d")[0]   # + pendingMintCerts()
+    visible = max(abs(venue_position_units(vault, market, size_dec)),
+                  required_units(certs, words(oracle, SEL["multiplier18"])[0], size_dec))
+    cap = visible * (10_000 + POSITION_SLACK_BPS) // 10_000 + 1
+    for r in ev:
+        units = int(abs(Decimal(str(r["position_size"]))) * 10 ** size_dec)
+        if units > cap:
+            return "record %s claims a position of %d units; at most %d is visible" % (r.get("funding_id"), units, cap)
+    usd = Decimal(abs(delta)) / Decimal(10**18)
+    if usd > MAX_ACCRUE_USD:
+        return "|delta| %.6f USD is over the %s USD per-request cap" % (usd, MAX_ACCRUE_USD)
+    day = sum(Decimal(x[1]) for x in vs.get("day", []) if now - x[0] < 86400)
+    if day + usd > DAILY_ACCRUE_USD:
+        return "daily cap: %.6f USD relayed today + %.6f > %s" % (day, usd, DAILY_ACCRUE_USD)
+    return None
+
+
+def accrue_booked(req, ledger, now=None):
+    """After a landed accrueFunding: remember its records so none is relayed twice, and its size."""
+    now = time.time() if now is None else now
+    ev = req.get("evidence", [])
+    if not ev:
+        return
+    R = relay_mod()
+    vs = ledger["vaults"].setdefault(req["vault"], {})
+    tss = [R.norm_ts(r["timestamp"]) for r in ev]
+    top = max(tss)
+    ids = [str(r.get("funding_id")) for r, ts in zip(ev, tss) if ts == top]
+    vs["seen"] = sorted(set(vs.get("seen", [])) | set(ids)) if int(vs.get("last_ts", 0)) == top else ids
+    vs["last_ts"] = top
+    vs["day"] = [x for x in vs.get("day", []) if now - x[0] < 172800] + [[now, str(Decimal(abs(int(req["args"][0]))) / Decimal(10**18))]]
+
+
+ROLES = {
+    # role: (key env, inbox, ledger file, checker, getter on chain the key must match)
+    "settler": ("SETTLER_PK", INBOX, LEDGER, check, "settler"),
+    "attester": ("ATTESTER_PK", ATT_INBOX, ATT_LEDGER, check_accrue, "attester"),
+}
+
+
+def load_role_ledger(path):
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except FileNotFoundError:
+        d = {}
+    d.setdefault("sends", [])
+    d.setdefault("settled_usd", [])
+    d.setdefault("vaults", {})
+    return d
+
+
+def serve(once=False, role="settler"):
     from eth_account import Account
-    acct = Account.from_key(os.environ["SETTLER_PK"])
+    key_env, inbox, ledger_path, checker, getter = ROLES[role]
+    acct = Account.from_key(os.environ[key_env])
     for v in vaults().values():
-        on = "0x" + "%040x" % words(v["vault"], SEL["settler"])[0]
+        to = v["vault"] if getter == "settler" else "0x" + "%040x" % words(v["vault"], SEL["oracle"])[0]
+        on = "0x" + "%040x" % words(to, SEL[getter])[0]
         if on.lower() != acct.address.lower():
-            log("WARN  %s settler() is %s, not this key %s: its requests will revert" % (v["symbol"], on, acct.address))
-    log("settler %s serving %s" % (acct.address, INBOX))
+            log("WARN  %s %s() is %s, not this key %s: its requests will revert" % (v["symbol"], getter, on, acct.address))
+    log("%s %s serving %s" % (role, acct.address, inbox))
     while True:
-        for name in sorted(os.listdir(INBOX)):
+        for name in sorted(os.listdir(inbox)):
             if not name.endswith(".json"):
                 continue
-            path = os.path.join(INBOX, name)
+            path = os.path.join(inbox, name)
             with open(path) as f:
                 req = json.load(f)
             os.remove(path)
-            ledger = load_ledger()
+            ledger = load_role_ledger(ledger_path)
             try:
-                why = check(req, ledger)
+                if (req["sig"] == ACCRUE) != (role == "attester"):
+                    why = "%s is not the %s's call" % (req["sig"], role)
+                else:
+                    why = checker(req, ledger)
                 if why:
                     ans = {"status": 0, "reason": why}
                 else:
@@ -230,14 +394,16 @@ def serve(once=False):
                     if ans["status"] == 1 and req["sig"].startswith("settleMint"):
                         r = words(req["vault"], SEL["mintReceipts"] + w32(req["args"][0]))
                         ledger["settled_usd"].append([time.time(), str(Decimal(r[6]) * Decimal(int(req["args"][1])) / Decimal(10**36))])
+                    if ans["status"] == 1 and req["sig"] == ACCRUE:
+                        accrue_booked(req, ledger)
             except Exception as e:                               # noqa: BLE001
                 ans = {"status": 0, "reason": "error: %s" % str(e)[:200]}
             ledger["sends"] = [t for t in ledger["sends"] if time.time() - t < 7200]
             ledger["settled_usd"] = [x for x in ledger["settled_usd"] if time.time() - x[0] < 172800]
-            tmp = LEDGER + ".tmp"
+            tmp = ledger_path + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(ledger, f)
-            os.replace(tmp, LEDGER)
+            os.replace(tmp, ledger_path)
             out = os.path.join(OUTBOX, name)
             with open(out + ".part", "w") as f:
                 json.dump(ans, f)
@@ -284,6 +450,8 @@ def main():
         return intake()
     if cmd == "serve":
         return serve("--once" in sys.argv)
+    if cmd == "serve-attester":
+        return serve("--once" in sys.argv, role="attester")
     if cmd == "check":
         req = {"vault": sys.argv[2].lower(), "sig": sys.argv[3], "args": sys.argv[4:]}
         why = check(req, load_ledger())

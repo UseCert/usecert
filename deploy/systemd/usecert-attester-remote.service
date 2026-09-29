@@ -1,0 +1,25 @@
+[Unit]
+Description=UseCert stack 5: the attester on Montreal - accrueFunding only, each delta re-checked against the public funding and capped (Sermium M-03, L-06)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=usecert
+Group=usecert-settle
+# ATTESTER_PK and ATTESTER_ADDR (the stack-5 attester), root-only; read by systemd, never on a command line.
+EnvironmentFile=/etc/usecert/attester-s5.env
+ExecStart=/opt/usecert-s5/venv/bin/python /opt/usecert/deploy/bin/usecert-settler-remote serve-attester
+Restart=always
+RestartSec=5
+UMask=0007
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/usecert-settler
+ProtectHome=true
+PrivateTmp=true
+StandardOutput=append:/var/log/usecert-attester-remote.log
+StandardError=append:/var/log/usecert-attester-remote.log
+
+[Install]
+WantedBy=multi-user.target
