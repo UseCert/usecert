@@ -677,3 +677,23 @@ the chain does not name). Before accepting: move the signer to Montreal (public 
 an authenticated link, and split the funding relay: France reads the authenticated funding
 records, Montreal cross-checks them against public funding rates and position sizes, bounds the
 delta (Sermium L-06) and sends `accrueFunding`.
+
+**Attester side, staged 2026-09-29:** `usecert-attester-remote` (Montreal, `serve-attester`) holds only
+the stack-5 attester key and sends only `accrueFunding`. France's relay sends each delta WITH the
+vault account's funding records; Montreal re-runs the relay's own `compute_delta` on them against the
+public funding it fetches itself, requires the same delta, caps every record's position at what it
+can see (public position, or what the certificates need, +10%), never accepts a record twice, and caps
+the amount (100 USD per request, 300 per vault per day). A heartbeat (delta 0) needs fees waiting and
+an accrual over 20 h old. The stack-5 signer (`usecert-signer-s5`, Montreal, port 8788) is reached from
+France through `usecert-s5-signer-tunnel` (France 127.0.0.1:8789; a key that can open that one port).
+
+**Switch-over, in this order, once the rotation (nonce 8) has served its 2 days:**
+1. The new attester 0x1e65…Ba5e holds gas (about 0.003 ETH, sent by the owner).
+2. Montreal: `usecert-s5-cutover accept-attester` (writes `/opt/usecert-s5/book-stack5-signer.json`).
+3. Montreal: `systemctl enable --now usecert-signer-s5`; `curl 127.0.0.1:8788/attestations` signs 6.
+4. France: nginx's stack-5 route (`/u/<token>/attestations` now, `/api/attestations` at the site
+   cutover) -> 127.0.0.1:8789; stop `usecert-signer-s5side`; add 8789 to the health job's
+   STACK5_SIGNERS.
+5. France: install `usecert-funding-relay.service.d-60-remote-attester.conf`, daemon-reload; the next
+   hourly run relays through Montreal (check `/var/log/usecert-attester-remote.log`).
+France then holds no key that signs for stack 5; the old attester stays there for stack 4 only.
