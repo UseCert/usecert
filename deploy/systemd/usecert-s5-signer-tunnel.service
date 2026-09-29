@@ -1,0 +1,19 @@
+[Unit]
+Description=UseCert: France 127.0.0.1:8789 -> the stack-5 signer on Montreal (127.0.0.1:8788), over a key that can open that one port and nothing else
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=s5tunnel
+Group=s5tunnel
+ExecStart=/usr/bin/ssh -N -i /var/lib/s5tunnel/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o UserKnownHostsFile=/var/lib/s5tunnel/known_hosts -o StrictHostKeyChecking=yes \
+  -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:8789:127.0.0.1:8788 s5tunnel@148.113.237.230
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

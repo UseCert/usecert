@@ -1,0 +1,26 @@
+[Unit]
+Description=UseCert stack-5 attestation signer on Montreal (its own attester, never on France; signs, never broadcasts; Sermium M-03)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=usecert
+Group=usecert
+# ATTESTER_PK (the stack-5 attester) and ATTESTER_ADDR, root-only; read by systemd.
+EnvironmentFile=/etc/usecert/attester-s5.env
+Environment=STACK=5 MARK_SIG_VERSION=2 OI_SOURCE=venue SANITY_CHECKS=1 MULTIPLIER_CHECKS=1 SIGNER_PORT=8788
+Environment=CAST=/home/usecert/.foundry/bin/cast
+# The book copy naming the rotated attester (written by usecert-s5-cutover accept-attester).
+ExecStart=/opt/usecert-s5/venv/bin/python /opt/usecert/deploy/bin/usecert-signer-mainnet.py /opt/usecert-s5/book-stack5-signer.json
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+StandardOutput=append:/var/log/usecert-signer-s5.log
+StandardError=append:/var/log/usecert-signer-s5.log
+
+[Install]
+WantedBy=multi-user.target

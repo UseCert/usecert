@@ -1873,7 +1873,14 @@ def cmd_accept_attester(ctx):
         if not addr_eq(got, pend):
             raise Refuse("%s attester() reads %s after accepting, not %s" % (label, got, pend))
         ok("%s attester() = %s (tx %s)" % (label, got, rec.get("transactionHash")))
-    say("\n   NEXT  restart the stack-5 signer and the funding relay's sender with the new key (runbook: key separation)")
+    # The signer refuses a key the book does not name as the attester; its copy of the book names
+    # the new one. The generated book itself is never edited.
+    new_book = {k: v for k, v in book.items() if not k.startswith("_") or k in ("_generatedBy", "_warning")}
+    new_book["senders"] = dict(book["senders"], attester=todo[0][2])
+    new_book["_derived"] = "copy of deployments/4663.stack5.json for the stack-5 signer: senders.attester = the rotated attester"
+    out = posixpath.join(M_S5, "book-stack5-signer.json")
+    ctx.write(out, (json.dumps(new_book, indent=2) + "\n").encode(), refuse_if_different=False, what="the signer's book")
+    say("\n   NEXT  systemctl enable --now usecert-signer-s5 (Montreal), then point France's nginx at the tunnel (runbook: key separation)")
     return 0
 
 
