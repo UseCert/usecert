@@ -126,7 +126,8 @@ SIGNATURES = {
     "proposeChange": "proposeChange(bytes)", "setSettler": "setSettler(address)",
     "setVenueApiKey": "setVenueApiKey(uint8,bytes)", "setVenueMinimums": "setVenueMinimums(uint256,uint256)",
     "setAbsoluteCap": "setAbsoluteCap(address,uint256)", "oracle": "oracle()", "GOVERNANCE_DELAY": "GOVERNANCE_DELAY()",
-    "retired": "retired()", "attester": "attester()",
+    "retired": "retired()", "attester": "attester()", "proposeAttester": "proposeAttester(address)",
+    "pendingAttester": "pendingAttester()", "pendingAttesterAt": "pendingAttesterAt()", "acceptAttester": "acceptAttester()",
 }
 SEL = {
     "execTransaction": "6a761202", "getTransactionHash": "d8d11f78", "checkSignatures": "934f3a11",
@@ -139,7 +140,8 @@ SEL = {
     "setInsurancePool": "a94c487e", "enableKeeperHedging": "7de60cc0", "proposeChange": "cd06618c",
     "setSettler": "07f19eba", "setVenueApiKey": "c891db3f", "setVenueMinimums": "f4d6a155",
     "setAbsoluteCap": "c4d17c14", "oracle": "7dc0d1d0", "GOVERNANCE_DELAY": "b0b54895", "retired": "2eb38ae0",
-    "attester": "47b0c3b3",
+    "attester": "47b0c3b3", "proposeAttester": "57f9ea5f", "pendingAttester": "e593a2bb",
+    "pendingAttesterAt": "f545ae15", "acceptAttester": "d9db4405",
 }
 NAME_OF_SEL = {v: k for k, v in SEL.items()}
 TOPIC_EXECUTION_SUCCESS = "0x442e715f626346e8c54381002da614f62bee8d27386535b2521ec8540898556e"
@@ -1785,6 +1787,96 @@ def cmd_phase_b(ctx):
 
 # --------------------------------------------------------------------------------- openMinting
 
+ATTESTER_ROTATION_DELAY = 2 * 86400      # SolvencyRegistry / CertOracle ATTESTER_ROTATION_DELAY
+
+
+def attester_targets(book):
+    return [("SolvencyRegistry", book["shared"]["solvencyRegistry"])] + \
+           [("%s oracle" % v["symbol"], v["certOracle"]) for v in book["vaults"]]
+
+
+def cmd_rotate_attester(ctx):
+    """Sermium M-03: give stack 5 its own attester, generated on Montreal and never on France
+    (stack 4 still needs the old key there). Seven proposeAttester(next) calls - the registry and
+    the six oracles - under the contracts' own 2-day notice; accept-attester finishes it."""
+    ctx.require_host("montreal", "usecert")
+    book = book_for(ctx, os.path.join(ROOT, "deployments", "4663.stack5.json"))
+    chain = ctx.chain(book)
+    nxt = getattr(ctx.args, "to", None) or ""
+    if not is_addr(nxt):
+        raise Refuse("--to %s is not an address" % nxt)
+    step("current attesters (every target must still hold the book's attester %s)" % book["senders"]["attester"])
+    entries = []
+    for label, to in attester_targets(book):
+        cur = v_addr(chain, to, "attester")
+        if not addr_eq(cur, book["senders"]["attester"]):
+            raise Refuse("%s attester() is %s, not the book's %s" % (label, cur, book["senders"]["attester"]))
+        if addr_eq(cur, nxt):
+            raise Refuse("%s already uses %s" % (label, nxt))
+        pend = v_addr(chain, to, "pendingAttester")
+        if int(pend, 16) and not ctx.args.rebuild:
+            raise Refuse("%s already has a pending rotation to %s" % (label, pend))
+        say("   %-18s %s -> %s" % (label, cur, nxt))
+        entries.append((0, to, 0, calldata("proposeAttester", ["address"], [nxt])))
+    name = "rotate-attester"
+    d = ctx.workdir if ctx.dry else posixpath.join(M_S5, name)
+    os.makedirs(d, exist_ok=True)
+    ms = {"to": MULTISEND_CALLONLY_141, "operation": 1, "calls": len(entries), "data": multisend_encode(entries)}
+    txb = txbuilder_json(book["_safe"], "UseCert stack 5 - rotate the attester", "proposeAttester x %d" % len(entries), entries, 0)
+    for (op, to, value, cd), (label, want) in zip(multisend_entries(ms["data"]), attester_targets(book)):
+        if op or value or not addr_eq(to, want) or cd[:4].hex() != SEL["proposeAttester"] or not addr_eq(w_addr(cd[4:], 0), nxt):
+            raise Refuse("call for %s is not proposeAttester(%s)" % (label, nxt))
+    ok("%d calls, each proposeAttester(%s) on the intended contract" % (len(entries), nxt))
+    parts, _ = publish_batch(
+        ctx, book, name, "Sign stack 5: a separate attester",
+        "This proposes a new attester, created on the Montreal server and never present on France, for the "
+        "solvency registry and the six price oracles. It takes effect only after the contracts' own 2-day public "
+        "notice, when anyone may accept it. It moves no funds and changes nothing else.",
+        ms, txb, {}, posixpath.join(M_S5, name), ctx.args.rebuild)
+    say("\n   NEXT  exec-safe --batch %s/%s/%s --nonce %d --sigs %s/%s/sigs.txt; then, 2 days later, accept-attester"
+        % (M_S5, name, parts[0]["file"], parts[0]["nonce"], M_S5, name))
+    return 0
+
+
+def cmd_accept_attester(ctx):
+    """Finish a rotation whose notice has run: acceptAttester() on the registry and the six oracles
+    (permissionless), sent by the deployer, then attester() read back on every one."""
+    ctx.require_host("montreal", "usecert")
+    book = book_for(ctx, os.path.join(ROOT, "deployments", "4663.stack5.json"))
+    chain = ctx.chain(book)
+    now = chain.block()[1]
+    todo = []
+    for label, to in attester_targets(book):
+        pend, at = v_addr(chain, to, "pendingAttester"), v_uint(chain, to, "pendingAttesterAt")
+        if not int(pend, 16):
+            cur = v_addr(chain, to, "attester")
+            say("   %-18s nothing pending (attester %s)" % (label, cur))
+            continue
+        if at > now:
+            raise Refuse("%s: the rotation to %s is due at %s" % (label, pend, utc(at)))
+        todo.append((label, to, pend))
+    if not todo:
+        ok("nothing to accept")
+        return 0
+    if len({p.lower() for _, _, p in todo}) != 1:
+        raise Refuse("the pending attesters differ: %s" % sorted({p for _, _, p in todo}))
+    dep = deployer_env(ctx)
+    for label, to, pend in todo:
+        step("acceptAttester() on %s" % label)
+        rec = cast_send_json(ctx, ["%s/cast" % M_FOUNDRY, "send", to, "acceptAttester()", "--private-key",
+                                   dep["MAINNET_DEPLOYER_PK"], "--rpc-url", ctx.args.rpc or RPC], redact=(dep["MAINNET_DEPLOYER_PK"],))
+        if ctx.dry:
+            continue
+        if str(rec.get("status")) not in ("0x1", "1"):
+            raise Refuse("acceptAttester on %s: %s" % (label, rec.get("transactionHash")))
+        got = v_addr(chain, to, "attester")
+        if not addr_eq(got, pend):
+            raise Refuse("%s attester() reads %s after accepting, not %s" % (label, got, pend))
+        ok("%s attester() = %s (tx %s)" % (label, got, rec.get("transactionHash")))
+    say("\n   NEXT  restart the stack-5 signer and the funding relay's sender with the new key (runbook: key separation)")
+    return 0
+
+
 def cmd_open(ctx):
     ctx.require_host("montreal", "usecert")
     book = book_for(ctx, os.path.join(ROOT, "deployments", "4663.stack5.json"))
@@ -1901,6 +1993,12 @@ def expectations(chain, book, entries, proposals, ts, delay):
         elif name == "setAbsoluteCap":
             v = w_addr(body, 0)
             chk("capacityOracle absoluteCap18(%s)" % lab.get(v.lower(), v), v_uint(chain, to, "absoluteCap18", ["address"], [v]), word(body, 1))
+        elif name == "proposeAttester":
+            nxt = w_addr(body, 0)
+            chk("%s pendingAttester()" % who, v_addr(chain, to, "pendingAttester").lower(), nxt.lower())
+            at = v_uint(chain, to, "pendingAttesterAt")
+            chk("%s pendingAttesterAt()" % who, at, ts + ATTESTER_ROTATION_DELAY if ts else "non-zero",
+                at == ts + ATTESTER_ROTATION_DELAY if ts else at > 0)
         else:
             chk("%s %s: no read-back is defined for this call" % (who, name or cd[:4].hex()), False, True)
     return out
@@ -2567,7 +2665,8 @@ def cmd_site_build(ctx):
 
 HOSTS = {"bootstrap": "montreal", "genkeys": "france", "phase-a": "montreal", "exec-safe": "montreal",
          "phase-b": "montreal", "open": "montreal", "keeper-configs": "france", "signer-cutover": "france",
-         "site-build": "workstation", "funding-relay": "france"}
+         "site-build": "workstation", "funding-relay": "france", "rotate-attester": "montreal",
+         "accept-attester": "montreal"}
 
 
 def parser():
@@ -2593,7 +2692,8 @@ def parser():
     p.add_argument("--sim-pubkey", help="offline: the placeholder public key to use for every vault")
     for name, fn, h in (("phase-a", cmd_phase_a, "build phase A and its signing page"),
                         ("phase-b", cmd_phase_b, "build phase B and its signing page"),
-                        ("open", cmd_open, "build openMinting and its signing page")):
+                        ("open", cmd_open, "build openMinting and its signing page"),
+                        ("rotate-attester", cmd_rotate_attester, "build the attester rotation and its signing page")):
         p = add(name, fn, h)
         p.add_argument("--nonce", type=int, help="first Safe nonce (default: the Safe's next)")
         p.add_argument("--rebuild", action="store_true", help="replace a page built from other bytes (voids its signatures)")
@@ -2603,6 +2703,9 @@ def parser():
         if name == "open":
             p.add_argument("--vaults", required=True, help="uTSLA, a comma list, or all")
             p.add_argument("--cap18", help="a lower first cap, 18 decimals (e.g. 1000000000000000000000 = $1,000)")
+        if name == "rotate-attester":
+            p.add_argument("--to", help="the new stack-5 attester address (its key on Montreal only); required")
+    add("accept-attester", cmd_accept_attester, "acceptAttester() on the registry and six oracles once the notice has run")
     p = add("exec-safe", cmd_exec_safe, "verify signatures, run on a fork, execute, read back")
     p.add_argument("--batch", required=True, help="a part's .hex, next to its manifest.json")
     p.add_argument("--nonce", type=int, required=True)
