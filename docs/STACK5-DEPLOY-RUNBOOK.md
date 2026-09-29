@@ -667,7 +667,13 @@ reads the venue's public data and sends chain transactions.
   backups `*.local-settler`, restarts running keepers, confirms "settler: remote"); `--rollback`
   restores. Then, with the owner's go, delete `/opt/keeper/keys/s5-settler.key` on France.
 
-**Attester (next):** move the signer to Montreal (public venue reads) behind France's nginx over
+**Attester (rotation built 2026-09-29):** stack 5 gets its own attester 0x1e65…Ba5e, generated on
+Montreal (`/etc/usecert/attester-s5.env`, root 600) and never present on France; stack 4 keeps
+0x021E…f681 on France until its wind-down. `rotate-attester --to 0x1e655E90A873bdCFcbf051B2aCB4C1588c30Ba5e`
+built the Safe batch at nonce 8 (Safe tx 0x54004e12…3e65: proposeAttester on the registry and the six
+oracles); after its 2-day notice, `accept-attester` finishes it (permissionless). The stack-5 signer then
+runs on Montreal from a copy of the book whose `senders.attester` is the new address (it refuses a key
+the chain does not name). Before accepting: move the signer to Montreal (public venue reads) behind France's nginx over
 an authenticated link, and split the funding relay: France reads the authenticated funding
 records, Montreal cross-checks them against public funding rates and position sizes, bounds the
 delta (Sermium L-06) and sends `accrueFunding`.
