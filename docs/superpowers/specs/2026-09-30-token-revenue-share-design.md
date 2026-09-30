@@ -131,3 +131,38 @@ stack-6 vaults --sweepFees--> RevenueRouter --claim--> InsuranceStaking (below t
 
 Stack-6 CertVault fixes (separate spec), the new token's own tokenomics and launch, the front end,
 and the wind-down of stacks 4 and 5 (in progress, `usecert-s5-cutover wind-down`).
+
+## Revision 2026-10-01: the token launches on Pons V2
+
+Facts read on chain and from the verified sources (Sourcify, chain 4663):
+
+- Pons V2 (`PonsV2LaunchFactory` 0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e, the factory CERT used)
+  gives each token a bonding curve that graduates into a **Uniswap v4** pool (PoolManager
+  0x8366a39cc670b4001a1121b8f6a443a643e40951) behind `PonsV2MemeHook`
+  0xe5e702641ea86f4ae6cc3cdaed2b886f976be044, liquidity locked for good.
+- USDG (0x5fc5…d168) is an approved quote asset; twelve USDG-quoted Pons launches have graduated
+  (e.g. 0xe646f78bbd4ffb656ef8800a2c77b1b658babdaf).
+- The hook takes a fee on every swap in `afterSwap`, out of the output: `hookFeeBps` (default
+  100 = 1%) split protocol / creator, plus a creator-chosen `creatorTaxBps` paid to the creator.
+  It keeps no price history (no TWAP).
+- Pons' own buyback (`PonsV2BuybackVault` 0x42df…219c) does not burn: it locks the bought tokens
+  and releases them over five years to the creator and the protocol.
+- Pons tokens have `burn(uint256)` and `burnFrom`; supply 1e9 with 18 decimals.
+
+Decisions, replacing the V2-pair parts of the Buyback above:
+
+1. The token launches on Pons V2 **quoted in USDG**, so the Buyback spends USDG directly.
+2. **Our Buyback burns; Pons' buyback stays off** (`buybackBurnBps` = 0 at launch).
+3. **The creator fees feed our Buyback**: the creator recipient is the Buyback contract, so our
+   share of the 1% hook fee on every trade of the token becomes buybacks too. `creatorTaxBps` = 0,
+   so trading is not taxed beyond Pons' default fee.
+4. The Buyback swaps through the v4 PoolManager (`unlock` → `swap` → `settle` / `take`) on the pool
+   key set once by governance after the 2-day delay; `applyPool` checks the currencies are exactly
+   the token and USDG, the hooks address is `PonsV2MemeHook`, and the pool is initialised.
+5. **Price guard without a TWAP**: the Buyback records the pool's `sqrtPriceX96` (read from the
+   PoolManager with `extsload`) as its observation. A buy needs an observation 30 minutes to
+   2 hours old, the current price within 1% of it, and a swap output of at least 98% of what the
+   observed price implies after the pool's LP fee and the hook's fee and tax. A price moved in the
+   same block, or not back within 1% of where it was half an hour earlier, makes the buy refuse.
+6. `tokenHasBurn` = true for Pons tokens.
+7. The fork test runs against a real graduated USDG-quoted Pons pool.
