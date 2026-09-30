@@ -915,9 +915,9 @@ class Keeper:
 
 def main():
     k = Keeper(sys.argv[1])
-    log("keeper up: vault %s market %d account %d from block %d, stack %d, sends with the %s key"
+    log("keeper up: vault %s market %d account %d from block %d, stack %d, sends with %s"
         % (k.vault, k.market, k.key["account_index"], k.state["next_block"], k.stack,
-           "settler" if k.stack >= 5 else "attester"))
+           ("the remote settler at " + k.settler_remote) if getattr(k, "settler_remote", None) else ("settler key" if k.stack >= 5 else "attester key")))
     if k.stack >= 5:
         log("stack 5: rehedge orders filled, orphan closes on refund %s, auto-rehedge %s"
             % ("on" if k.refund_close_orphans else "OFF", "ON" if k.auto_rehedge else "off"))

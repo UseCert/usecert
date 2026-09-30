@@ -38,12 +38,16 @@ def restart_and_confirm(paths, want):
         if not active(u):
             print("   idle   %s is not running: it reads the new config when it starts" % u)
             continue
-        since = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        # The keepers write to their own log file (StandardOutput=append:), not the journal:
+        # read what the restart added to it.
+        logf = "/var/log/usecert-keeper-%s.log" % os.path.basename(p)[:-5]
+        start = os.path.getsize(logf) if os.path.exists(logf) else 0
         subprocess.run(["systemctl", "restart", u], check=True)
         for _ in range(30):
             time.sleep(2)
-            j = subprocess.run(["journalctl", "-u", u, "--since", since, "--utc", "--no-pager", "-o", "cat"],
-                               capture_output=True, text=True).stdout
+            with open(logf, errors="replace") as fh:
+                fh.seek(start)
+                j = fh.read()
             if want in j:
                 print("   ok     %s: %s" % (u, next(l for l in j.splitlines() if want in l)[:120]))
                 break
