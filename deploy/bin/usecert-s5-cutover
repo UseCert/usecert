@@ -128,6 +128,8 @@ SIGNATURES = {
     "setAbsoluteCap": "setAbsoluteCap(address,uint256)", "oracle": "oracle()", "GOVERNANCE_DELAY": "GOVERNANCE_DELAY()",
     "retired": "retired()", "attester": "attester()", "proposeAttester": "proposeAttester(address)",
     "pendingAttester": "pendingAttester()", "pendingAttesterAt": "pendingAttesterAt()", "acceptAttester": "acceptAttester()",
+    "retire": "retire()", "sweepRetired": "sweepRetired(uint256)", "transfer": "transfer(address,uint256)",
+    "balanceOf": "balanceOf(address)",
 }
 SEL = {
     "execTransaction": "6a761202", "getTransactionHash": "d8d11f78", "checkSignatures": "934f3a11",
@@ -141,7 +143,8 @@ SEL = {
     "setSettler": "07f19eba", "setVenueApiKey": "c891db3f", "setVenueMinimums": "f4d6a155",
     "setAbsoluteCap": "c4d17c14", "oracle": "7dc0d1d0", "GOVERNANCE_DELAY": "b0b54895", "retired": "2eb38ae0",
     "attester": "47b0c3b3", "proposeAttester": "57f9ea5f", "pendingAttester": "e593a2bb",
-    "pendingAttesterAt": "f545ae15", "acceptAttester": "d9db4405",
+    "pendingAttesterAt": "f545ae15", "acceptAttester": "d9db4405", "retire": "a4874d77",
+    "sweepRetired": "0673011e", "transfer": "a9059cbb", "balanceOf": "70a08231",
 }
 NAME_OF_SEL = {v: k for k, v in SEL.items()}
 TOPIC_EXECUTION_SUCCESS = "0x442e715f626346e8c54381002da614f62bee8d27386535b2521ec8540898556e"
@@ -1884,6 +1887,77 @@ def cmd_accept_attester(ctx):
     return 0
 
 
+def wind_down_vaults():
+    """(label, vault) for every vault of both stacks: stack 4 from 4663.json, stack 5 from its book."""
+    out = []
+    for tag, name in (("s4", "4663.json"), ("s5", "4663.stack5.json")):
+        b = read_json(os.path.join(ROOT, "deployments", name))
+        out += [("%s %s" % (tag, v["symbol"]), v["vault"]) for v in b["vaults"]]
+    return out
+
+
+def venue_available6(ctx, vault):
+    d = ctx.http_json("%s/api/v1/account?by=l1_address&value=%s" % (VENUE_API, vault))
+    a = d["accounts"][0]
+    if any(float(p.get("position", 0) or 0) for p in a.get("positions", [])):
+        raise Refuse("%s still has a venue position; retire() would refuse" % vault)
+    return int(Decimal(str(a.get("available_balance") or "0")) * 10**6)
+
+
+def cmd_wind_down(ctx):
+    """Owner-decided shutdown (2026-09-30). Stage 1: retire every vault of both stacks and sweep it,
+    asking the venue for its whole available balance. Stage 2 (once the venue has paid out): sweep
+    again and transfer the Safe's USDG to --to. retire() refuses a vault that is not empty, so no
+    holder's backing can be swept; exits stay open on a retired vault."""
+    ctx.require_host("montreal", "usecert")
+    book = book_for(ctx, os.path.join(ROOT, "deployments", "4663.stack5.json"))
+    chain = ctx.chain(book)
+    stage = int(getattr(ctx.args, "stage", 0) or 0)
+    if stage not in (1, 2):
+        raise Refuse("--stage 1 or --stage 2")
+    usdg = book["collateral"] if "collateral" in book else "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+    entries = []
+    total = 0
+    for label, v in wind_down_vaults():
+        if stage == 1:
+            if v_bool(chain, v, "retired"):
+                raise Refuse("%s is already retired" % label)
+            amt = venue_available6(ctx, v)
+            say("   %-9s retire(); sweepRetired(%d)  (venue holds %s USDG)" % (label, amt, fmt18(amt * 10**12)))
+            entries.append((0, v, 0, calldata("retire")))
+            entries.append((0, v, 0, calldata("sweepRetired", ["uint256"], [amt])))
+        else:
+            if not v_bool(chain, v, "retired"):
+                raise Refuse("%s is not retired: run stage 1 first" % label)
+            held = v_uint(chain, usdg, "balanceOf", ["address"], [v])
+            left = venue_available6(ctx, v)
+            say("   %-9s sweepRetired(0)  (vault holds %s USDG, venue still %s)" % (label, fmt18(held * 10**12), fmt18(left * 10**12)))
+            total += held
+            entries.append((0, v, 0, calldata("sweepRetired", ["uint256"], [0])))
+    if stage == 2:
+        to = getattr(ctx.args, "to", None) or ""
+        if not is_addr(to):
+            raise Refuse("--to OWNER_WALLET is required for stage 2")
+        total += v_uint(chain, usdg, "balanceOf", ["address"], [book["_safe"]])
+        if total == 0:
+            raise Refuse("nothing to transfer")
+        say("   Safe -> %s: transfer(%d) = %s USDG" % (to, total, fmt18(total * 10**12)))
+        entries.append((0, usdg, 0, calldata("transfer", ["address", "uint256"], [to, total])))
+    name = "wind-down-%d" % stage
+    ms = {"to": MULTISEND_CALLONLY_141, "operation": 1, "calls": len(entries), "data": multisend_encode(entries)}
+    txb = txbuilder_json(book["_safe"], "UseCert - wind-down stage %d" % stage, "%d calls" % len(entries), entries, 0)
+    intro = ("Stage 1 of the shutdown: retire all twelve vaults (stack 4 and stack 5) and sweep them, asking the venue "
+             "to pay back each vault's balance. retire() refuses any vault that still owes anyone anything, and exits "
+             "stay open on a retired vault. The swept USDG goes to the Safe." if stage == 1 else
+             "Stage 2 of the shutdown: sweep what the venue has paid back into the retired vaults, and transfer all of "
+             "the Safe's USDG (%s) to %s." % (fmt18(total * 10**12), getattr(ctx.args, "to", "")))
+    parts, _ = publish_batch(ctx, book, name, "Sign: wind-down stage %d" % stage, intro, ms, txb, {},
+                             posixpath.join(M_S5, name), ctx.args.rebuild)
+    say("\n   NEXT  exec-safe --batch %s/%s/%s --nonce %d --sigs %s/%s/sigs.txt"
+        % (M_S5, name, parts[0]["file"], parts[0]["nonce"], M_S5, name))
+    return 0
+
+
 def cmd_open(ctx):
     ctx.require_host("montreal", "usecert")
     book = book_for(ctx, os.path.join(ROOT, "deployments", "4663.stack5.json"))
@@ -2000,6 +2074,15 @@ def expectations(chain, book, entries, proposals, ts, delay):
         elif name == "setAbsoluteCap":
             v = w_addr(body, 0)
             chk("capacityOracle absoluteCap18(%s)" % lab.get(v.lower(), v), v_uint(chain, to, "absoluteCap18", ["address"], [v]), word(body, 1))
+        elif name == "retire":
+            chk("%s retired()" % who, v_bool(chain, to, "retired"), True)
+        elif name == "sweepRetired":
+            usdg = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+            chk("%s USDG left in the vault after the sweep" % who, v_uint(chain, usdg, "balanceOf", ["address"], [to]), 0)
+        elif name == "transfer":
+            dest, amt = w_addr(body, 0), word(body, 1)
+            got = v_uint(chain, to, "balanceOf", ["address"], [dest])
+            chk("USDG balance of %s (received %d)" % (dest, amt), got, ">= %d" % amt, got >= amt)
         elif name == "proposeAttester":
             nxt = w_addr(body, 0)
             chk("%s pendingAttester()" % who, v_addr(chain, to, "pendingAttester").lower(), nxt.lower())
@@ -2673,7 +2756,7 @@ def cmd_site_build(ctx):
 HOSTS = {"bootstrap": "montreal", "genkeys": "france", "phase-a": "montreal", "exec-safe": "montreal",
          "phase-b": "montreal", "open": "montreal", "keeper-configs": "france", "signer-cutover": "france",
          "site-build": "workstation", "funding-relay": "france", "rotate-attester": "montreal",
-         "accept-attester": "montreal"}
+         "accept-attester": "montreal", "wind-down": "montreal"}
 
 
 def parser():
@@ -2700,7 +2783,8 @@ def parser():
     for name, fn, h in (("phase-a", cmd_phase_a, "build phase A and its signing page"),
                         ("phase-b", cmd_phase_b, "build phase B and its signing page"),
                         ("open", cmd_open, "build openMinting and its signing page"),
-                        ("rotate-attester", cmd_rotate_attester, "build the attester rotation and its signing page")):
+                        ("rotate-attester", cmd_rotate_attester, "build the attester rotation and its signing page"),
+                        ("wind-down", cmd_wind_down, "build a wind-down stage (1: retire and sweep; 2: sweep and pay out)")):
         p = add(name, fn, h)
         p.add_argument("--nonce", type=int, help="first Safe nonce (default: the Safe's next)")
         p.add_argument("--rebuild", action="store_true", help="replace a page built from other bytes (voids its signatures)")
@@ -2710,6 +2794,9 @@ def parser():
         if name == "open":
             p.add_argument("--vaults", required=True, help="uTSLA, a comma list, or all")
             p.add_argument("--cap18", help="a lower first cap, 18 decimals (e.g. 1000000000000000000000 = $1,000)")
+        if name == "wind-down":
+            p.add_argument("--stage", type=int, help="1 or 2")
+            p.add_argument("--to", help="stage 2: the wallet that receives the Safe's USDG")
         if name == "rotate-attester":
             p.add_argument("--to", help="the new stack-5 attester address (its key on Montreal only); required")
     add("accept-attester", cmd_accept_attester, "acceptAttester() on the registry and six oracles once the notice has run")
