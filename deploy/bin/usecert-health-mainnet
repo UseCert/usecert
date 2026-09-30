@@ -43,6 +43,13 @@ SITE = "https://use-cert.com/"
 BOOK = "/opt/keeper/book-stack4.json"
 STATE_GLOB = "/opt/keeper/state-s4-*.json"
 UNITS = ["usecert-signer-mainnet"] + ["usecert-keeper@s4-%s" % s for s in ("uTSLA", "uSPY", "uQQQ", "uNVDA", "uAAPL", "uMSFT")]
+# Stack 5 (live since 2026-09-30): its six keepers, and the tunnel to its signer on Montreal.
+UNITS_S5 = ["usecert-keeper@s5-%s" % s for s in ("uTSLA", "uSPY", "uQQQ", "uNVDA", "uAAPL", "uMSFT")] + ["usecert-s5-signer-tunnel"]
+# The remote settler (Sermium M-03): the keepers can mint nothing without it.
+REMOTE_SETTLER = ["runuser", "-u", "keeper", "--", "ssh", "-i", "/opt/keeper/keys/settle_ed25519", "-o", "IdentitiesOnly=yes",
+                  "-o", "BatchMode=yes", "-o", "UserKnownHostsFile=/opt/keeper/keys/settle_known_hosts", "-o", "StrictHostKeyChecking=yes",
+                  "-o", "ConnectTimeout=15", "settle-intake@148.113.237.230"]
+STACK5_SETTLER = "0x29f975357cc98A4F4e7E4460440380AB3136d500"
 LAG_BLOCKS = 3000        # the keepers poll every few seconds; this is minutes of silence, not jitter
 STUCK_SEC = 900          # a hedge normally fills in under a minute; fill_timeout_sec is 180
 MIN_ETH = 0.002
@@ -91,6 +98,26 @@ def status_of(url, method="GET"):
         return e.code
     except Exception as e:
         return "unreachable (%s)" % type(e).__name__
+
+
+def stack5_services():
+    """Stack 5's own moving parts on this host, and the remote settler they depend on. Checked only
+    once the stack-5 keepers exist (installed by the cutover kit), so a stack-4-only host is quiet."""
+    P = []
+    if not glob.glob("/opt/keeper/vaults/s5-*.json"):
+        return P
+    for u in UNITS_S5:
+        st = subprocess.run(["systemctl", "is-active", u], capture_output=True, text=True).stdout.strip()
+        if st != "active":
+            P.append("stack 5: unit %s is %s" % (u, st or "unknown"))
+    try:
+        r = subprocess.run(REMOTE_SETTLER, input='{"action": "whoami"}', capture_output=True, text=True, timeout=60)
+        got = json.loads((r.stdout or "").strip().splitlines()[-1]).get("settler", "")
+        if got.lower() != STACK5_SETTLER.lower():
+            P.append("stack 5: the remote settler on Montreal answers %r, not %s: no mint can settle" % (got, STACK5_SETTLER))
+    except Exception as e:                                       # noqa: BLE001
+        P.append("stack 5: the remote settler on Montreal does not answer (%s): no mint can settle" % str(e)[:80])
+    return P
 
 
 def hedge_divergence():
@@ -371,6 +398,7 @@ def checks():
     except Exception as e:                                       # noqa: BLE001
         P.append("insurance v2: shortfalls unreadable (%s)" % str(e)[:80])
     P.extend(hedge_divergence())
+    P.extend(stack5_services())
     try:
         pool = json.load(open(INSURANCE_BOOK))["address"]
         held, cap = word(pool, "0x01e1d114"), word(pool, "0xdbd5edc7")
