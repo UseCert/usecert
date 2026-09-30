@@ -1199,40 +1199,74 @@ contract Buyback is ReentrancyGuard {
     }
 
     // ------------------------------------------------------------------ buy
+    /// @dev One buy's figures, kept in memory: the legacy code generator has no room for them as
+    ///      locals (the repo builds with via_ir off).
+    struct Trade {
+        uint256 avgX112;
+        uint256 rUsdg;
+        uint256 rToken;
+        uint256 spend;
+        uint256 reward;
+        uint256 amountIn;
+        uint256 out;
+    }
+
     function buy() external nonReentrant returns (uint256 received) {
         if (address(pair) == address(0)) revert Buyback_NoPool();
         if (lastBuyAt != 0 && block.timestamp < lastBuyAt + BUY_INTERVAL) revert Buyback_TooSoon();
-        (uint256 cum, uint256 rUsdg, uint256 rToken) = _cumulative();
+        Trade memory t;
+        bool observedOnly;
+        (observedOnly, t.avgX112, t.rUsdg, t.rToken) = _averagePrice();
+        if (observedOnly) return 0;
+        _quote(t);
+        received = _swap(t.amountIn, t.out);
+        (uint256 cum,,) = _cumulative();
+        _observe(cum);
+        lastBuyAt = block.timestamp;
+        (uint256 burnt, uint256 toStakers) = _burnAndStake(received);
+        if (t.reward > 0) usdg.safeTransfer(msg.sender, t.reward);
+        emit Bought(msg.sender, t.spend, received, t.avgX112, burnt, toStakers, t.reward);
+    }
+
+    /// @dev The average tokens-per-USDG since the last observation, or - with no observation, or
+    ///      one older than TWAP_MAX - a fresh observation and `observedOnly`.
+    function _averagePrice() internal returns (bool observedOnly, uint256 avgX112, uint256 rUsdg, uint256 rToken) {
+        uint256 cum;
+        (cum, rUsdg, rToken) = _cumulative();
         uint256 age = block.timestamp - lastObsTime;
         if (lastObsTime == 0 || age > TWAP_MAX) {
             _observe(cum);
-            return 0;
+            return (true, 0, rUsdg, rToken);
         }
         if (age < TWAP_MIN) revert Buyback_ObservationTooRecent();
-        uint256 avgX112 = (cum - lastObsCumulative) / age;
+        avgX112 = (cum - lastObsCumulative) / age;
+    }
 
-        uint256 spend = Math.min(Math.min(trancheMax, rUsdg / 100), usdg.balanceOf(address(this)));
-        if (spend == 0) revert Buyback_NothingToSpend();
-        uint256 reward = Math.min(callerRewardMax, spend / 100);
-        uint256 amountIn = spend - reward;
+    /// @dev The tranche, the caller's reward, the swap input and output, and the price guard:
+    ///      the output must be at least (1 - GUARD_BPS) of what the average price implies.
+    function _quote(Trade memory t) internal view {
+        t.spend = Math.min(Math.min(trancheMax, t.rUsdg / 100), usdg.balanceOf(address(this)));
+        if (t.spend == 0) revert Buyback_NothingToSpend();
+        t.reward = Math.min(callerRewardMax, t.spend / 100);
+        t.amountIn = t.spend - t.reward;
+        uint256 expected = Math.mulDiv(t.amountIn, t.avgX112, 1 << 112);
+        uint256 inWithFee = t.amountIn * 997;
+        t.out = inWithFee * t.rToken / (t.rUsdg * 1000 + inWithFee);
+        if (t.out * 10_000 < expected * (10_000 - GUARD_BPS)) revert Buyback_PriceGuard();
+    }
 
-        uint256 expected = Math.mulDiv(amountIn, avgX112, 1 << 112);
-        uint256 inWithFee = amountIn * 997;
-        uint256 out = inWithFee * rToken / (rUsdg * 1000 + inWithFee);
-        if (out * 10_000 < expected * (10_000 - GUARD_BPS)) revert Buyback_PriceGuard();
-
+    function _swap(uint256 amountIn, uint256 out) internal returns (uint256 received) {
         uint256 before = token.balanceOf(address(this));
         usdg.safeTransfer(address(pair), amountIn);
-        (uint256 o0, uint256 o1) = usdgIsToken0 ? (uint256(0), out) : (out, uint256(0));
-        pair.swap(o0, o1, address(this), "");
+        if (usdgIsToken0) pair.swap(0, out, address(this), "");
+        else pair.swap(out, 0, address(this), "");
         received = token.balanceOf(address(this)) - before;
+    }
 
-        (cum,,) = _cumulative();
-        _observe(cum);
-        lastBuyAt = block.timestamp;
-
-        uint256 toStakers = staking.totalStaked() == 0 ? 0 : received - received / 2;
-        uint256 burnt = received - toStakers;
+    /// @dev Half burnt, half to stakers; all burnt when nothing is staked (no first-staker prize).
+    function _burnAndStake(uint256 received) internal returns (uint256 burnt, uint256 toStakers) {
+        toStakers = staking.totalStaked() == 0 ? 0 : received - received / 2;
+        burnt = received - toStakers;
         if (tokenHasBurn) IBurnable(address(token)).burn(burnt);
         else token.safeTransfer(DEAD, burnt);
         if (toStakers > 0) {
@@ -1240,8 +1274,6 @@ contract Buyback is ReentrancyGuard {
             staking.notifyRewardAmount(toStakers);
             token.forceApprove(address(staking), 0);
         }
-        if (reward > 0) usdg.safeTransfer(msg.sender, reward);
-        emit Bought(msg.sender, spend, received, avgX112, burnt, toStakers, reward);
     }
 }
 ```

@@ -68,7 +68,7 @@ Holds USDG credited by the router and turns it into burnt and staked tokens.
   2 hours) only records a new one and buys nothing, so the first buy after a gap waits 30 minutes.
 - The swap goes straight to the pair (`transfer` in, `swap` out; amounts from the pair's reserves
   and its 0.3% fee), no router.
-- Of the tokens received: 50% burnt (the token's `burn` if it has one, detected at construction,
+- Of the tokens received: 50% burnt (the token's `burn` if the constructor's `tokenHasBurn` says it has one,
   otherwise sent to `0x…dEaD`); 50% sent to Staking v3 via `notifyRewardAmount`. If Staking v3 has
   no stake at that moment, that half is burnt too: no reward for being the first staker.
 - The caller receives `min(0.5 USDG, 1% of the tranche)` from the tranche for the gas; our own job
