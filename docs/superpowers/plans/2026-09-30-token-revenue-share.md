@@ -172,9 +172,9 @@ contract TokenStakingTest is Test {
         vm.prank(alice);
         st.stake(1_000_000e18);
         _fund(70e18);                                      // the base weekly stream
-        skip(7 days - 1 hours);
+        skip(7 days - 2 hours);                           // two hours left: the old rule would stream over them
         vm.prank(bob);
-        st.stake(9_000_000e18);                            // the attacker, an hour before the end
+        st.stake(9_000_000e18);                            // the attacker, just before the late funding
         _fund(1_000e18);                                   // the large late funding
         skip(1 hours);
         vm.prank(bob);
